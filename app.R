@@ -349,29 +349,34 @@ ui <- fluidPage(
         }, 150);
       });
 
-      // Browser-side CSV file reader with encoding auto-detection (UTF-8 -> Shift-JIS -> Fallback)
+      // Browser-side CSV file reader with encoding auto-detection (UTF-8 -> Shift-JIS -> GB18030 -> Big5 -> EUC-KR -> Fallback)
       $(document).on('change', '#datafile', function(e) {
         const file = e.target.files[0];
         if (!file) return;
         const reader = new FileReader();
         reader.onload = function(evt) {
           const arrayBuffer = evt.target.result;
+          const encodings = ['utf-8', 'shift-jis', 'gb18030', 'big5', 'euc-kr'];
           let decodedText = '';
-          try {
-            // 1. Try UTF-8 first (fatal: true forces error on invalid byte sequences)
-            const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
-            decodedText = utf8Decoder.decode(arrayBuffer);
-          } catch (err) {
+          let success = false;
+
+          for (const enc of encodings) {
             try {
-              // 2. Fallback to Shift-JIS (supports CP932)
-              const sjisDecoder = new TextDecoder('shift-jis', { fatal: true });
-              decodedText = sjisDecoder.decode(arrayBuffer);
-            } catch (err2) {
-              // 3. Last resort fallback to Latin1 (windows-1252)
-              const latin1Decoder = new TextDecoder('windows-1252');
-              decodedText = latin1Decoder.decode(arrayBuffer);
+              const decoder = new TextDecoder(enc, { fatal: true });
+              decodedText = decoder.decode(arrayBuffer);
+              success = true;
+              break;
+            } catch (err) {
+              // Try next encoding on failure
             }
           }
+
+          if (!success) {
+            // Last resort fallback to Latin1 (windows-1252)
+            const latin1Decoder = new TextDecoder('windows-1252');
+            decodedText = latin1Decoder.decode(arrayBuffer);
+          }
+
           // Send decoded UTF-8 string directly to Shiny (WebR)
           Shiny.setInputValue('datafile_utf8', {
             name: file.name,
