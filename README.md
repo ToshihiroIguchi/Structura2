@@ -21,34 +21,51 @@ Structura2 is an interactive Shiny application for Structural Equation Modeling 
 * **Visualization**: Render path diagrams via **DiagrammeR**/**semDiagram**, and generate plots using **ggplot2** ([cran.r-project.org](https://cran.r-project.org/package%3Dggplot2?utm_source=chatgpt.com)).
 * **Comprehensive Reporting**: View fit indices (p-value, SRMR, RMSEA, AIC, BIC, GFI, AGFI, NFI, CFI), parameter tables, and formatted equations in real time.
 
-## Installation
-
-Install the required R packages from CRAN:
-
-```r
-install.packages(c("shiny", "shinyjs", "DT", "rhandsontable", "lavaan", "DiagrammeR", "ggplot2", "reshape2", "markdown", "shinylive"))
-```
-
 ## Launch Application
 
-### 1. Run Locally (Traditional Shiny)
-From your R console in the project directory, run:
+There are several ways to launch and run **Structura2**, depending on whether you want to run it online, locally via standard Shiny, or as a compiled static site.
 
-```r
-shiny::runApp(".")
-```
+### Option 1: Live Demo (No Setup Required)
+Simply access the application online via GitHub Pages:
+👉 **[Structura2 Live Demo](https://toshihiroiguchi.github.io/Structura2/)**
 
-### 2. Export and Run as Static Site (ShinyLive WebAssembly)
-To compile the application into a fully static website powered by WebR (WASM):
+This version is compiled into WebAssembly using ShinyLive and runs entirely inside your web browser. You do not need to install R or any libraries.
 
-```bash
-# Run the export script
-Rscript export_shinylive.R
+### Option 2: Run Locally (Traditional Shiny App)
+To run the traditional Shiny application locally, you need [R](https://www.r-project.org/) installed.
 
-# Host the generated site locally
-python -m http.server 8000 --directory site
-```
-Open your browser and navigate to `http://localhost:8000`.
+1. **Install Dependencies**: Open R or RStudio and run the following command to install the required packages:
+   ```r
+   install.packages(c("shiny", "shinyjs", "DT", "rhandsontable", "lavaan", "DiagrammeR", "ggplot2", "reshape2", "markdown"))
+   ```
+2. **Run the App**: Set your working directory to the project folder and run:
+   ```r
+   shiny::runApp(".")
+   ```
+   The app will open in your default browser (usually at `http://127.0.0.1:xxxx`).
+
+### Option 3: Compile and Serve Static Site Locally (ShinyLive WebAssembly)
+You can compile the app to a static site and serve it using a local web server.
+
+1. **Install ShinyLive**: In R, install the `shinylive` package:
+   ```r
+   install.packages("shinylive")
+   ```
+2. **Export the App**: Open your terminal (or command prompt) in the project root directory and run the export script:
+   ```bash
+   Rscript export_shinylive.R
+   ```
+   This will prepare a clean source structure and generate the static site inside the `site/` directory.
+3. **Serve the Directory**: Run a local web server to serve the generated assets.
+   - **Using Python 3**:
+     ```bash
+     python -m http.server 8000 --directory site
+     ```
+   - **Using Node.js (http-server)**:
+     ```bash
+     npx http-server site -p 8000
+     ```
+4. **Access the App**: Open your web browser and navigate to `http://localhost:8000`.
 
 
 ## Hosting the Shiny App Directly from GitHub
