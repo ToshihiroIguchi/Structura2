@@ -35,6 +35,15 @@ for (wf in www_files) {
 cat("Prepared clean app source directory. Exporting via ShinyLive...\n")
 shinylive::export(appdir = src_dir, destdir = dest_dir)
 
+# Update the HTML title from 'Shiny App' to 'Structura'
+index_html <- file.path(dest_dir, "index.html")
+if (file.exists(index_html)) {
+  html_content <- readLines(index_html, warn = FALSE)
+  html_content <- gsub("<title>Shiny App</title>", "<title>Structura</title>", html_content, ignore.case = TRUE)
+  writeLines(html_content, index_html)
+  cat("Updated index.html title to 'Structura'\n")
+}
+
 # Clean up temp directory disabled for debugging
 # unlink(src_dir, recursive = TRUE)
 
