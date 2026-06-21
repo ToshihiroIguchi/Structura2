@@ -59,6 +59,21 @@ const fs = require('fs');
     });
     console.log('Detected columns in datatable:', headers);
 
+    // Verify Correlation Heatmap
+    const heatmapError = await frame.evaluate(() => {
+      const el = document.querySelector('#corr_heatmap');
+      if (!el) return 'Heatmap element not found';
+      if (el.innerText.includes('Correlation Heatmap Error')) {
+        return el.innerText;
+      }
+      return null;
+    });
+    if (heatmapError) {
+      console.error('Heatmap Error detected:', heatmapError);
+    } else {
+      console.log('Correlation Heatmap rendered successfully without errors.');
+    }
+
     console.log('Switching to Model tab...');
     await frame.evaluate(() => {
       const tabs = document.querySelectorAll('a[data-toggle="tab"]');

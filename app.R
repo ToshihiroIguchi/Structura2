@@ -746,9 +746,9 @@ server <- function(input, output, session) {
         }
       "
       
-      rhandsontable(cm_df, rowHeaders = rownames(cm_rounded), readOnly = TRUE) %>%
-        hot_cols(renderer = color_renderer) %>%
-        hot_opts(manualColumnResize = TRUE, manualRowResize = TRUE)
+      rhandsontable(cm_df, rowHeaders = rownames(cm_rounded), readOnly = TRUE,
+                    manualColumnResize = TRUE, manualRowResize = TRUE) %>%
+        hot_cols(renderer = color_renderer)
     }, error = function(e) {
       error_df <- data.frame(Error = paste("Correlation Heatmap Error:", e$message))
       rhandsontable(error_df, rowHeaders = FALSE, readOnly = TRUE)
