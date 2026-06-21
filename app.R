@@ -32,7 +32,6 @@ library(rhandsontable)
 library(lavaan)
 library(DiagrammeR)
 library(ggplot2)
-library(reshape2)
 library(markdown)
 
 # Patch the lavaan option cache to prevent NA bounds crashes during estimation checks
@@ -538,9 +537,11 @@ ui <- fluidPage(
 
                                   # ----- Diagnostics tab ---------------------
                                   tabPanel("Diagnostics",
-                                           div(id = "fit_alert_box",
-                                               textOutput("fit_alert"),
-                                               class = "alert-box"),
+                                           shinyjs::hidden(
+                                             div(id = "fit_alert_box",
+                                                 textOutput("fit_alert"),
+                                                 class = "alert-box")
+                                           ),
                                            h4("Fit Indices"),
                                            DTOutput("fit_indices")),
 
@@ -654,13 +655,15 @@ server <- function(input, output, session) {
   })
 
   processed_data <- reactive({
-    message("DEBUGLOG: processed_data start")
     req(data())
-    message("DEBUGLOG: processed_data data validated")
     tryCatch({
-      idx <- as.numeric(unlist(input$datatable_rows_all))
-      if (!length(idx)) idx <- seq_len(nrow(data()))
-      df <- data()[idx, , drop = FALSE]
+      idx <- input$datatable_rows_all
+      if (is.null(idx)) {
+        df <- data()
+      } else {
+        idx_num <- as.numeric(unlist(idx))
+        df <- data()[idx_num, , drop = FALSE]
+      }
       df[] <- lapply(df, function(x) if (is.factor(x)) as.character(x) else x)
 
       # --- log10 transform -----------------------------------------
@@ -682,7 +685,7 @@ server <- function(input, output, session) {
         u <- unique(x); length(u) > 1 && length(u) < nrow(df)
       }, logical(1))]
       if (length(multi)) {
-        mm <- model.matrix(~ . - 1, data = df[multi])
+        mm <- model.matrix(~ . - 1, data = df[multi], na.action = na.pass)
         df <- cbind(df[setdiff(names(df), multi)],
                     as.data.frame(mm, check.names = TRUE))
       }
@@ -709,9 +712,7 @@ server <- function(input, output, session) {
   })
 
   output$display_column_ui <- renderUI({
-    message("DEBUGLOG: display_column_ui start")
     df <- processed_data(); req(df)
-    message("DEBUGLOG: display_column_ui df validated")
     
     # Identify columns with zero variance (constant columns)
     numeric_cols <- sapply(df, is.numeric)
@@ -762,7 +763,9 @@ server <- function(input, output, session) {
       if (length(num_cols) < 2) return(NULL)
       cm <- cor(df[, num_cols, drop = FALSE], use = "pairwise.complete.obs")
       cm[is.nan(cm)] <- NA
-      mf <- reshape2::melt(round(cm, 3))
+      cm_rounded <- round(cm, 3)
+      mf <- as.data.frame(as.table(cm_rounded))
+      names(mf) <- c("Var1", "Var2", "value")
       ggplot(mf, aes(x = Var2, y = Var1, fill = value)) +
         geom_tile() +
         geom_text(aes(label = ifelse(is.na(value), "NA", sprintf('%.3f', value)))) +
@@ -779,10 +782,10 @@ server <- function(input, output, session) {
   # ---------- Measurement table ----------------------------------
 
   input_table_data <- reactiveVal(NULL)
+  input_table_trigger <- reactiveVal(0)
 
   observeEvent(data(), {
     req(data())
-    message("DEBUGLOG: Initializing input_table_data from loaded data")
     inds <- names(data())[sapply(data(), is.numeric)]
     init <- data.frame(Latent    = "LatentVariable1",
                        Indicator = "",
@@ -791,10 +794,10 @@ server <- function(input, output, session) {
                        stringsAsFactors = FALSE)
     colnames(init) <- c("Latent", "Indicator", "Operator", inds)
     input_table_data(init)
+    input_table_trigger(input_table_trigger() + 1)
   })
 
   observeEvent(input$display_columns, ignoreNULL = TRUE, {
-    message("DEBUGLOG: Updating input_table_data columns from display_columns")
     inds <- input$display_columns
     df <- input_table_data()
     if (!is.null(df)) {
@@ -806,13 +809,13 @@ server <- function(input, output, session) {
         new_checkboxes[, common_cols] <- df[, common_cols]
       }
       input_table_data(cbind(meta, new_checkboxes))
+      input_table_trigger(input_table_trigger() + 1)
     }
   })
 
   output$input_table <- renderRHandsontable({
-    message("DEBUGLOG: renderRHandsontable input_table run")
-    df <- input_table_data(); req(df)
-    message(paste("DEBUGLOG: input_table df validated. Cols:", paste(colnames(df), collapse = ",")))
+    input_table_trigger()
+    df <- isolate(input_table_data()); req(df)
     rh <- rhandsontable(df, rowHeaders = FALSE) %>%
       hot_table(highlightReadOnly = TRUE)
     rh <- hot_col(rh, "Latent")
@@ -838,6 +841,7 @@ server <- function(input, output, session) {
     new_row$Latent     <- ""
     new_row$Operator   <- "=~"
     input_table_data(rbind(df, new_row))
+    input_table_trigger(input_table_trigger() + 1)
   })
 
   # ---------- Helper function for R² calculation -----------------
@@ -875,86 +879,121 @@ server <- function(input, output, session) {
 
   # ---------- Structural table -----------------------------------
 
+  struct_table_data <- reactiveVal(NULL)
+
+  model_items <- reactive({
+    df <- processed_data(); req(df)
+    deps <- as.character(input$display_columns %||% names(df))
+    meas <- input_table_data(); req(meas)
+    vars <- names(meas)[4:ncol(meas)]
+    row_has_indicator <- apply(meas[vars], 1, function(x) any(as.logical(x)))
+    convs <- setdiff(na.omit(unique(meas$Indicator[row_has_indicator])), "")
+    unique(c(deps, convs))
+  })
+
+  observeEvent(model_items(), {
+    items <- model_items()
+    if (!length(items)) {
+      struct_table_data(NULL)
+      return()
+    }
+    
+    old_tbl <- struct_table_data()
+    
+    # Create new matrix
+    mat <- data.frame(Dependent = items, Operator = "~", stringsAsFactors = FALSE)
+    for (col in items) mat[[col]] <- FALSE
+    
+    # Preserve old settings if available
+    if (!is.null(old_tbl)) {
+      common_deps <- intersect(old_tbl$Dependent, items)
+      common_cols <- intersect(colnames(old_tbl), items)
+      if (length(common_deps) > 0 && length(common_cols) > 0) {
+        for (dep in common_deps) {
+          old_row_idx <- which(old_tbl$Dependent == dep)
+          new_row_idx <- which(mat$Dependent == dep)
+          if (length(old_row_idx) == 1 && length(new_row_idx) == 1) {
+            mat[new_row_idx, common_cols] <- old_tbl[old_row_idx, common_cols]
+          }
+        }
+      }
+    }
+    struct_table_data(mat)
+  })
+
+  observeEvent(input$checkbox_matrix, {
+    tbl <- hot_to_r(input$checkbox_matrix); req(tbl)
+    struct_table_data(tbl)
+  })
+
   output$checkbox_matrix <- renderRHandsontable({
     tryCatch({
       df <- processed_data(); req(df)
-      deps <- as.character(input$display_columns %||% names(df))
       meas <- input_table_data(); req(meas)
-      vars <- names(meas)[4:ncol(meas)]
-      row_has_indicator <- apply(meas[vars], 1, function(x) any(as.logical(x)))
-      convs <- setdiff(na.omit(unique(meas$Indicator[row_has_indicator])), "")
-      items <- unique(c(deps, convs))
+      mat <- struct_table_data(); req(mat)
+      items <- mat$Dependent
       if (!length(items)) return()
       
       # Compute R² matrix for color coding
       r2_matrix <- compute_r2_matrix(df, items, items)
-      
-      mat   <- data.frame(Dependent = items, Operator = "~",
-                          stringsAsFactors = FALSE)
-      for (col in items) mat[[col]] <- FALSE
       
       rh <- rhandsontable(mat, rowHeaders = FALSE) %>%
         hot_table(highlightReadOnly = TRUE, fixedColumnsLeft = 2)
       rh <- hot_col(rh, "Dependent", readOnly = TRUE)
       rh <- hot_col(rh, "Operator",  readOnly = TRUE)
     
-    # Set diagonal cells as readOnly before applying renderers
-    for (i in seq_along(items)) {
-      diag_col_index <- match(items[i], colnames(mat))
-      if (!is.na(diag_col_index)) {
-        rh <- hot_cell(rh, row = i, col = diag_col_index, readOnly = TRUE)
-      }
-    }
-    
-    # Apply color coding using custom renderer for each checkbox column
-    for (col_name in items) {
-      # Calculate R² values for this predictor column
-      r2_colors <- sapply(seq_along(items), function(row_idx) {
-        dep_var <- items[row_idx]
-        if (dep_var == col_name) {
-          return("#FFFFFF")  # White for diagonal (self-regression)
+      # Set diagonal cells as readOnly before applying renderers
+      for (i in seq_along(items)) {
+        diag_col_index <- match(items[i], colnames(mat))
+        if (!is.na(diag_col_index)) {
+          rh <- hot_cell(rh, row = i, col = diag_col_index, readOnly = TRUE)
         }
+      }
+      
+      # Apply color coding using custom renderer for each checkbox column
+      for (col_name in items) {
+        r2_colors <- sapply(seq_along(items), function(row_idx) {
+          dep_var <- items[row_idx]
+          if (dep_var == col_name) {
+            return("#FFFFFF")
+          }
+          
+          r2_val <- tryCatch({
+            if (dep_var %in% rownames(r2_matrix) && col_name %in% colnames(r2_matrix)) {
+              val <- r2_matrix[dep_var, col_name]
+              if (is.na(val) || !is.finite(val)) 0 else val
+            } else {
+              0
+            }
+          }, error = function(e) 0)
+          
+          r2_val <- ifelse(is.na(r2_val) || !is.finite(r2_val), 0, r2_val)
+          red_intensity <- min(1, max(0, r2_val))
+          rgb(1, 1 - red_intensity * 0.7, 1 - red_intensity * 0.7)
+        })
         
-        r2_val <- tryCatch({
-          if (dep_var %in% rownames(r2_matrix) && col_name %in% colnames(r2_matrix)) {
-            val <- r2_matrix[dep_var, col_name]
-            if (is.na(val) || !is.finite(val)) 0 else val
-          } else {
-            0
-          }
-        }, error = function(e) 0)
+        colors_js <- paste0("['", paste(r2_colors, collapse = "','"), "']")
+        diag_row <- match(col_name, items) - 1
         
-        # Create gradient: white (R²=0) to red (R²=1)
-        # Ensure r2_val is finite and in [0,1] range
-        r2_val <- ifelse(is.na(r2_val) || !is.finite(r2_val), 0, r2_val)
-        red_intensity <- min(1, max(0, r2_val))
-        rgb(1, 1 - red_intensity * 0.7, 1 - red_intensity * 0.7)
-      })
-      
-      # Create JavaScript renderer with row-specific colors
-      colors_js <- paste0("['", paste(r2_colors, collapse = "','"), "']")
-      diag_row <- match(col_name, items) - 1  # 0-indexed for JavaScript
-      
-      renderer_js <- paste0("
-        function(instance, td, row, col, prop, value, cellProperties) {
-          Handsontable.renderers.CheckboxRenderer.apply(this, arguments);
-          var colors = ", colors_js, ";
-          if (colors[row]) {
-            td.style.backgroundColor = colors[row];
-          }
-          if (row === ", diag_row, ") {
-            cellProperties.readOnly = true;
-            td.style.backgroundColor = '#f0f0f0';
-            td.style.cursor = 'not-allowed';
-            td.classList.add('htDimmed');
-          }
-        }")
-      
-      rh <- hot_col(rh, col_name, type = "checkbox", renderer = renderer_js)
-    }
-    rh
+        renderer_js <- paste0("
+          function(instance, td, row, col, prop, value, cellProperties) {
+            Handsontable.renderers.CheckboxRenderer.apply(this, arguments);
+            var colors = ", colors_js, ";
+            if (colors[row]) {
+              td.style.backgroundColor = colors[row];
+            }
+            if (row === ", diag_row, ") {
+              cellProperties.readOnly = true;
+              td.style.backgroundColor = '#f0f0f0';
+              td.style.cursor = 'not-allowed';
+              td.classList.add('htDimmed');
+            }
+          }")
+        
+        rh <- hot_col(rh, col_name, type = "checkbox", renderer = renderer_js)
+      }
+      rh
     }, error = function(e) {
-      # Return a simple error message table
       error_mat <- data.frame(
         Dependent = "Error",
         Operator = "~",
@@ -969,7 +1008,7 @@ server <- function(input, output, session) {
   # ---------- lavaan syntax --------------------------------------
 
   lavaan_model_str <- reactive({
-    req(input$input_table, input$checkbox_matrix)
+    req(input$input_table, struct_table_data())
     meas <- hot_to_r(input$input_table)
     mlines <- lapply(seq_len(nrow(meas)), function(i) {
       lt   <- meas$Latent[i]; if (!nzchar(lt)) return(NULL)
@@ -978,7 +1017,7 @@ server <- function(input, output, session) {
       if (!length(inds)) return(NULL)
       paste0(lt, " =~ ", paste(inds, collapse = " + "))
     })
-    struc <- hot_to_r(input$checkbox_matrix)
+    struc <- struct_table_data(); req(struc)
     slines <- lapply(seq_len(nrow(struc)), function(i) {
       dp    <- struc$Dependent[i]; if (!nzchar(dp)) return(NULL)
       preds <- names(struc)[3:ncol(struc)]
@@ -1005,42 +1044,23 @@ server <- function(input, output, session) {
 
   fit_model_safe <- eventReactive(input$run_model, {
     ln <- isolate(lavaan_model_str())
-    if (length(ln) == 0)
+    if (length(ln) == 0) {
+      msg <- if (input$run_model > 0) "Define a model to proceed." else ""
       return(list(ok = FALSE,
-                  msg_friendly = "Define a model to proceed.",
+                  msg_friendly = msg,
                   fit = NULL))
+    }
     tryCatch({
-      # Patch lavaan options cache inside WebR to prevent NA-related crashes
-      tryCatch({
-        if (requireNamespace("parallel", quietly = TRUE)) {
-          ns <- asNamespace("parallel")
-          unlockBinding("detectCores", ns)
-          assign("detectCores", function(...) 1L, envir = ns)
-          lockBinding("detectCores", ns)
-        }
-      }, error = function(e) NULL)
-      tryCatch({
-        env <- lavaan:::lavaan_cache_env
-        for (chk_name in c("opt_check", "opt.check")) {
-          if (exists(chk_name, envir = env)) {
-            opt_check <- get(chk_name, envir = env)
-            if (!is.null(opt_check$ncpus) && !is.null(opt_check$ncpus$nm)) {
-              bounds <- opt_check$ncpus$nm$bounds
-              if (any(is.na(bounds))) {
-                opt_check$ncpus$nm$bounds[is.na(bounds)] <- 1L
-                assign(chk_name, opt_check, envir = env)
-              }
-            }
-          }
-        }
-      }, error = function(e) NULL)
+      # Use meanstructure = TRUE if FIML is selected to prevent lavaan error
+      needs_meanstructure <- (input$analysis_mode == "raw" || 
+                              input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
 
       fm <- sem(paste(ln, collapse = "\n"),
                 data          = processed_data(),
                 missing       = input$missing_method,
                 fixed.x       = FALSE,
                 parser        = "old",
-                meanstructure = (input$analysis_mode == "raw"),
+                meanstructure = needs_meanstructure,
                 ncpus         = 1L)
       list(ok = lavInspect(fm, "converged"),
            msg_friendly = if (lavInspect(fm, "converged"))

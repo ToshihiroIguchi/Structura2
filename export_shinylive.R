@@ -46,12 +46,12 @@ index_html <- file.path(dest_dir, "index.html")
 if (file.exists(index_html)) {
   html_content <- readLines(index_html, warn = FALSE)
   
-  # Update title
-  html_content <- gsub("<title>Shiny App</title>", "<title>Structura2</title>", html_content, ignore.case = TRUE)
+  # Update title (using case-insensitive regex for title tag to be robust)
+  html_content <- gsub("<title>.*?</title>", "<title>Structura2</title>", html_content, ignore.case = TRUE)
   
-  # Inject favicon.ico before </head>
+  # Inject favicon.ico before </head> (using more robust match for head closing tag)
   favicon_tag <- '    <link rel="icon" type="image/x-icon" href="./favicon.ico" />\n  </head>'
-  html_content <- gsub("  </head>", favicon_tag, html_content, fixed = TRUE)
+  html_content <- gsub("</head>", favicon_tag, html_content, ignore.case = TRUE)
   
   writeLines(html_content, index_html)
   cat("Updated index.html title to 'Structura2' and injected favicon link\n")
