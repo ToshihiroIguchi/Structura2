@@ -1,10 +1,10 @@
 <img src="www/logo.png" width="25%" />
 
-# Structura: Structural Insights, Simplified.
+# Structura2: Structural Insights, Simplified.
 
 ## Overview
 
-Structura is an interactive application built in **R** using **lavaan** for Structural Equation Modeling (SEM). With an intuitive interface and enhanced commenting, Structura enables users to:
+Structura2 is an interactive application built in **R** using **lavaan** for Structural Equation Modeling (SEM). With an intuitive interface and enhanced commenting, Structura2 enables users to:
 
 * **Upload and inspect** datasets without worrying about file encoding.  
 * **Log-transform** positive numeric variables (common logarithm, log10).  

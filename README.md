@@ -1,5 +1,5 @@
 
-# Structura
+# Structura2
 
 **Structural Insights, Simplified.**
 <br>
@@ -9,7 +9,7 @@
 
 ## Description
 
-Structura is an interactive Shiny application for Structural Equation Modeling (SEM) in **R** ([r-project.org](https://www.r-project.org/?utm_source=chatgpt.com)), making it easy to upload data, specify models, and visualize results in a unified interface. It leverages the **lavaan** package for comprehensive latent variable analysis ([cran.r-project.org](https://cran.r-project.org/package%3Dlavaan?utm_source=chatgpt.com)).
+Structura2 is an interactive Shiny application for Structural Equation Modeling (SEM) in **R** ([r-project.org](https://www.r-project.org/?utm_source=chatgpt.com)), making it easy to upload data, specify models, and visualize results in a unified interface. It leverages the **lavaan** package for comprehensive latent variable analysis ([cran.r-project.org](https://cran.r-project.org/package%3Dlavaan?utm_source=chatgpt.com)).
 
 ## Features
 
@@ -53,7 +53,7 @@ Open your browser and navigate to `http://localhost:8000`.
 
 ## Hosting the Shiny App Directly from GitHub
 
-You can launch **Structura** straight from its GitHub repository and make it accessible across your LAN 
+You can launch **Structura2** straight from its GitHub repository and make it accessible across your LAN 
 by automatically detecting your host’s IPv4 address and configuring Shiny’s host/port options. 
 Place the following snippet in your `README.md` under a “Hosting” or “Development” section.
 
@@ -111,7 +111,7 @@ get_ip <- function() {
 # ── Configuration & launch ────────────────────────────────────
 port    <- 8100
 host_ip <- get_ip()
-cat("Launching Structura on", host_ip, "port", port, "\n")
+cat("Launching Structura2 on", host_ip, "port", port, "\n")
 
 # runGitHub() cannot take host directly; set Shiny options
 options(
@@ -119,9 +119,9 @@ options(
   shiny.port = port
 )
 
-# Launch Structura from GitHub
+# Launch Structura2 from GitHub
 shiny::runGitHub(
-  repo           = "Structura",
+  repo           = "Structura2",
   username       = "ToshihiroIguchi",
   ref            = "main",
   launch.browser = FALSE,

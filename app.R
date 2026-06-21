@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # ---------------------------------------------------------------
-# Structura – Structural Insights, Simplified
+# Structura2 – Structural Insights, Simplified
 # Shiny app for Structural Equation Modeling with mean structures
 # ---------------------------------------------------------------
 
@@ -457,7 +457,7 @@ ui <- fluidPage(
   div(id = "app-logo",
       img(src = "logo.png", height = 40,
           title = "Structural Insights, Simplified")),
-  title = "Structura",
+  title = "Structura2",
 
   tabsetPanel(
 
