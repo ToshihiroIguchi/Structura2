@@ -5,6 +5,8 @@
 <br>
 <img src="www/logo.png" width="12.5%" />
 
+**Live Demo**: [https://toshihiroiguchi.github.io/Structura2/](https://toshihiroiguchi.github.io/Structura2/)
+
 ## Description
 
 Structura is an interactive Shiny application for Structural Equation Modeling (SEM) in **R** ([r-project.org](https://www.r-project.org/?utm_source=chatgpt.com)), making it easy to upload data, specify models, and visualize results in a unified interface. It leverages the **lavaan** package for comprehensive latent variable analysis ([cran.r-project.org](https://cran.r-project.org/package%3Dlavaan?utm_source=chatgpt.com)).
