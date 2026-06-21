@@ -68,11 +68,10 @@ You can compile the app to a static site and serve it using a local web server.
 4. **Access the App**: Open your web browser and navigate to `http://localhost:8000`.
 
 
-## Hosting the Shiny App Directly from GitHub
+## Hosting the Shiny App Directly from GitHub (Traditional Shiny)
 
-You can launch **Structura2** straight from its GitHub repository and make it accessible across your LAN 
-by automatically detecting your host’s IPv4 address and configuring Shiny’s host/port options. 
-Place the following snippet in your `README.md` under a “Hosting” or “Development” section.
+You can launch **Structura2** directly from its GitHub repository as a traditional Shiny application (not ShinyLive) and make it accessible across your LAN. This requires a local installation of R. 
+This script automatically detects your host's IPv4 address and configures Shiny's host/port options so other devices on your local network can connect.
 
 ```r
 # ── Packages ──────────────────────────────────────────────────
