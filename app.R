@@ -338,7 +338,7 @@ semDiagram <- function(
 }
 
 # 3. Data Loader utility (robust for WebR)
-loadDataOnce <- function(file) {
+load_data_once <- function(file) {
   tryCatch({
     df <- readflex(file$datapath, stringsAsFactors = FALSE)
     if (is.null(df) || nrow(df) == 0) {
@@ -611,7 +611,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$datafile, {
     tryCatch({
-      data(loadDataOnce(input$datafile))
+      data(load_data_once(input$datafile))
       updateRadioButtons(session, "sample_ds", selected = "None")
       removeModal()
     }, error = function(e) {

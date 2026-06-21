@@ -1,0 +1,12 @@
+/app_source
+/site
+/test_webr_site
+*.Rproj.user
+.Rhistory
+.Rdata
+node_modules/
+test_browser/node_modules/
+test_browser/screenshot.png
+test_browser/error_*.png
+test_webr/
+

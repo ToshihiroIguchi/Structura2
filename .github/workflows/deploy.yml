@@ -38,9 +38,7 @@ jobs:
             any::shinylive
 
       - name: Export ShinyLive site
-        run: |
-          source("export_shinylive.R")
-        shell: Rscript {0}
+        run: Rscript export_shinylive.R
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
