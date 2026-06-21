@@ -31,7 +31,6 @@ library(DT)
 library(rhandsontable)
 library(lavaan)
 library(DiagrammeR)
-library(ggplot2)
 library(markdown)
 
 # Patch the lavaan option cache to prevent NA bounds crashes during estimation checks
@@ -422,7 +421,7 @@ ui <- fluidPage(
              DTOutput("filtered_table"),
              tags$hr(),
              h4("Correlation Heatmap"),
-             plotOutput("corr_heatmap", height = "300px")),
+             rHandsontableOutput("corr_heatmap")),
 
     # ---------------- Model tab ----------------------------------
     tabPanel("Model",
@@ -699,7 +698,7 @@ server <- function(input, output, session) {
               rownames = FALSE)
   }, server = FALSE)
 
-  output$corr_heatmap <- renderPlot({
+  output$corr_heatmap <- renderRHandsontable({
     req(!is.null(input$display_columns))
     tryCatch({
       df <- processed_data()
@@ -709,18 +708,50 @@ server <- function(input, output, session) {
       cm <- cor(df[, num_cols, drop = FALSE], use = "pairwise.complete.obs")
       cm[is.nan(cm)] <- NA
       cm_rounded <- round(cm, 3)
-      mf <- as.data.frame(as.table(cm_rounded))
-      names(mf) <- c("Var1", "Var2", "value")
-      ggplot(mf, aes(x = Var2, y = Var1, fill = value)) +
-        geom_tile() +
-        geom_text(aes(label = ifelse(is.na(value), "NA", sprintf('%.3f', value)))) +
-        scale_fill_gradient2(midpoint = 0) +
-        theme_minimal() +
-        labs(x = NULL, y = NULL, fill = "Correlation")
+      cm_df <- as.data.frame(cm_rounded)
+      
+      color_renderer <- "
+        function (instance, td, row, col, prop, value, cellProperties) {
+          Handsontable.renderers.TextRenderer.apply(this, arguments);
+          if (value !== null) {
+            var val = parseFloat(value);
+            if (!isNaN(val)) {
+              var r = 255, g = 255, b = 255;
+              var absVal = Math.min(Math.abs(val), 1);
+              var intensity = Math.round(255 * (1 - absVal));
+              if (val > 0) {
+                g = intensity;
+                b = intensity;
+              } else if (val < 0) {
+                r = intensity;
+                g = intensity;
+              }
+              td.style.background = 'rgb(' + r + ',' + g + ',' + b + ')';
+              if (absVal > 0.5) {
+                td.style.color = '#ffffff';
+              } else {
+                td.style.color = '#000000';
+              }
+              td.style.textAlign = 'center';
+            } else {
+              td.style.background = '#eeeeee';
+              td.style.color = '#999999';
+              td.style.textAlign = 'center';
+            }
+          } else {
+            td.style.background = '#eeeeee';
+            td.style.color = '#999999';
+            td.style.textAlign = 'center';
+          }
+        }
+      "
+      
+      rhandsontable(cm_df, rowHeaders = rownames(cm_rounded), readOnly = TRUE) %>%
+        hot_cols(renderer = color_renderer) %>%
+        hot_opts(manualColumnResize = TRUE, manualRowResize = TRUE)
     }, error = function(e) {
-      ggplot() + 
-        annotate("text", x = 0.5, y = 0.5, label = paste("Correlation Heatmap Error:\n", e$message), color = "red", size = 4) + 
-        theme_void()
+      error_df <- data.frame(Error = paste("Correlation Heatmap Error:", e$message))
+      rhandsontable(error_df, rowHeaders = FALSE, readOnly = TRUE)
     })
   })
 

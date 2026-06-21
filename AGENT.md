@@ -45,11 +45,9 @@ Structura2/
 | `shiny` | CRAN | Core web framework |
 | `shinyjs` | CRAN | JavaScript interop (show/hide elements) |
 | `DT` | CRAN | Interactive data tables |
-| `rhandsontable` | CRAN | Editable spreadsheet-like tables (measurement/structural model) |
+| `rhandsontable` | CRAN | Editable spreadsheet-like tables (measurement/structural model, correlation heatmap) |
 | `lavaan` | CRAN | SEM engine |
 | `DiagrammeR` | CRAN | Graphviz-based path diagram rendering |
-| `ggplot2` | CRAN | Correlation heatmap plots |
-| `reshape2` | CRAN | Data reshaping for heatmaps |
 | `markdown` | CRAN | Render help.md |
 | `readflex` | GitHub (inlined) | CSV reader with auto encoding detection |
 | `semDiagram` | GitHub (inlined) | SEM path diagram builder using DiagrammeR |
