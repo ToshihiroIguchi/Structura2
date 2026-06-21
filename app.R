@@ -346,10 +346,9 @@ ui <- fluidPage(
 ")),
     tags$script(src = if (file.exists("www/hpcc-js/graphviz.umd.js")) "hpcc-js/graphviz.umd.js" else "https://cdn.jsdelivr.net/npm/@hpcc-js/wasm/dist/graphviz.umd.js"),
     tags$script(HTML("
+      window.__hpcc_wasmFolder = 'hpcc-js';
+
       $(document).on('shiny:connected', function() {
-        if (window['@hpcc-js/wasm']) {
-          window['@hpcc-js/wasm'].wasmFolder('hpcc-js');
-        }
 
         Shiny.addCustomMessageHandler('update_sem_plot', function(message) {
           var container = document.getElementById('sem_plot_container');
@@ -368,7 +367,7 @@ ui <- fluidPage(
           }
           
           container.style.display = 'block';
-          var hpccWasm = window['@hpcc-js/wasm'];
+          var hpccWasm = window['@hpcc-js/wasm/graphviz'];
           if (hpccWasm && hpccWasm.Graphviz) {
             hpccWasm.Graphviz.load().then(function(graphviz) {
               try {
