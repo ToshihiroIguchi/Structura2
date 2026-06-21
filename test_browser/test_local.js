@@ -58,7 +58,10 @@ const puppeteer = require('puppeteer-core');
   });
 
   await page.waitForSelector('#input_table', { timeout: 10000 });
-  console.log('Model tab loaded. Checking a path in Measurement Model to define the model...');
+  console.log('Model tab loaded. Waiting 3s for cells to render...');
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  
+  console.log('Checking a path in Measurement Model to define the model...');
   
   const checked = await page.evaluate(() => {
     const tds = document.querySelectorAll('#input_table td');

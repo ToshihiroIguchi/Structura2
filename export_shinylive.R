@@ -6,13 +6,22 @@ if (!requireNamespace("shinylive", quietly = TRUE)) {
   install.packages("shinylive", repos = c("https://posit-dev.r-universe.dev", "https://cloud.r-project.org"))
 }
 
-src_dir <- "app_source"
 dest_dir <- "site"
+# Use a temporary directory outside the project root to bypass .gitignore rules
+# which prevent renv::dependencies from scanning files inside gitignored directories.
+src_dir <- file.path(tempdir(), "Structura2_app_source")
 
 # Clean up existing directories
 if (dir.exists(src_dir)) unlink(src_dir, recursive = TRUE)
-dir.create(src_dir)
+dir.create(src_dir, recursive = TRUE)
 dir.create(file.path(src_dir, "www"))
+
+# Clean up destination directory to ensure no stale WASM package files from previous builds remain
+if (dir.exists(dest_dir)) {
+  unlink(dest_dir, recursive = TRUE)
+  cat(sprintf("Cleaned up existing destination directory: %s\n", dest_dir))
+}
+dir.create(dest_dir)
 
 # Copy production files only
 files_to_copy <- c("app.R", "help.md")
@@ -63,8 +72,11 @@ if (file.exists(index_html)) {
   cat("Updated index.html title to 'Structura2' and injected favicon link\n")
 }
 
-# Clean up temp directory disabled for debugging
-# unlink(src_dir, recursive = TRUE)
+# Clean up temp directory
+if (dir.exists(src_dir)) {
+  unlink(src_dir, recursive = TRUE)
+  cat("Cleaned up temporary source directory.\n")
+}
 
 cat("\nShinyLive export complete. The static site has been generated in the 'site/' directory.\n")
 cat("To preview the app locally, run:\n")
