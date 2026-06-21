@@ -32,9 +32,10 @@ jobs:
           use-public-rspm: true
 
       - name: Install ShinyLive R Package
-        run: |
-          install.packages("shinylive", repos = c("https://posit-dev.r-universe.dev", "https://cloud.r-project.org"))
-        shell: Rscript {0}
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::shinylive
 
       - name: Export ShinyLive site
         run: |
