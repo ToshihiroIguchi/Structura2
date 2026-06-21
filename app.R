@@ -53,97 +53,6 @@ tryCatch({
 
 # ---- Inlined Utilities (from utils.R) ----------------------------
 
-# 1. readflex: CSV reader with auto encoding detection
-readflex <- function(file,
-                     ...,
-                     encodings = c(
-                       "UTF-8", "UTF-8-BOM", "UTF-16LE", "UTF-16BE",
-                       "Shift_JIS", "CP932", "EUC-JP", "ISO-2022-JP",
-                       "ISO-8859-1", "Windows-1252", "latin1",
-                       "GB18030", "GB2312", "GBK", "Big5", "Big5-HKSCS",
-                       "EUC-KR", "ISO-2022-KR"
-                     ),
-                     guess_n_max = 1000,
-                     verbose = FALSE,
-                     stringsAsFactors = FALSE,
-                     max_file_size_mb = 100) {
-  
-  stopifnot(is.character(file), length(file) == 1)
-  stopifnot(is.numeric(guess_n_max), guess_n_max > 0)
-  stopifnot(is.logical(verbose), length(verbose) == 1)
-  stopifnot(is.character(encodings), length(encodings) > 0)
-  stopifnot(is.logical(stringsAsFactors), length(stringsAsFactors) == 1)
-  stopifnot(is.numeric(max_file_size_mb), max_file_size_mb > 0)
-  
-  if (!file.exists(file)) {
-    stop(sprintf("[readflex] File not found: %s", file))
-  }
-  
-  if (file.size(file) == 0) {
-    warning(sprintf("[readflex] File is empty: %s", file))
-    return(data.frame())
-  }
-  
-  file_size_mb <- file.size(file) / (1024 * 1024)
-  if (file_size_mb > max_file_size_mb) {
-    stop(sprintf(
-      "[readflex] File size (%.1f MB) exceeds limit (%.1f MB). Consider using a smaller file or increasing max_file_size_mb parameter.",
-      file_size_mb, max_file_size_mb
-    ))
-  }
-  
-  try_read <- function(enc) {
-    if (verbose) message(sprintf("[readflex] Trying encoding: %s", enc))
-    tryCatch(
-      utils::read.csv(
-        file,
-        fileEncoding = enc,
-        ...,
-        stringsAsFactors = stringsAsFactors
-      ),
-      error   = function(e) e,
-      warning = function(w) w
-    )
-  }
-
-  detected <- character(0)
-  if (requireNamespace("readr", quietly = TRUE)) {
-    tryCatch({
-      info <- readr::guess_encoding(file, n_max = guess_n_max)
-      if (nrow(info) > 0) {
-        detected <- unique(info$encoding)
-        if (verbose) message("[readflex] Detected with readr: ", paste(detected, collapse = ", "))
-      }
-    }, error = function(e) NULL)
-  }
-  if (length(detected) == 0 && requireNamespace("stringi", quietly = TRUE)) {
-    txt <- tryCatch(base::readLines(file, n = guess_n_max, warn = FALSE),
-                    error = function(e) character(0))
-    if (length(txt) > 0) {
-      tryCatch({
-        info2 <- stringi::stri_enc_detect(paste(txt, collapse = "\n"))[[1]]
-        detected <- unique(info2$Encoding[order(-info2$Confidence)])
-        if (verbose) message("[readflex] Detected with stringi: ", paste(detected, collapse = ", "))
-      }, error = function(e) NULL)
-    }
-  }
-
-  trial_encs <- unique(c(detected, encodings))
-  if (verbose) message("[readflex] Trial order: ", paste(trial_encs, collapse = ", "))
-
-  for (enc in trial_encs) {
-    res <- try_read(enc)
-    if (inherits(res, "data.frame")) {
-      if (verbose) message(sprintf("[readflex] Success with: %s", enc))
-      return(res)
-    }
-  }
-
-  stop(sprintf(
-    "[readflex] Failed to read '%s'. Tried encodings: %s",
-    file, paste(trial_encs, collapse = ", ")
-  ))
-}
 
 # 2. semDiagram: Visual path diagrams robust against NA and multicollinearity
 semDiagram <- function(
@@ -337,19 +246,7 @@ semDiagram <- function(
   })
 }
 
-# 3. Data Loader utility (robust for WebR)
-load_data_once <- function(file) {
-  tryCatch({
-    df <- readflex(file$datapath, stringsAsFactors = FALSE)
-    if (is.null(df) || nrow(df) == 0) {
-      stop("The loaded dataset has no data rows.")
-    }
-    names(df) <- make.names(names(df), unique = TRUE)
-    return(df)
-  }, error = function(e) {
-    stop(paste("File reading failed:", e$message))
-  })
-}
+
 
 # ------------------------------------------------------------------
 
@@ -450,6 +347,38 @@ ui <- fluidPage(
         setTimeout(function() {
           window.dispatchEvent(new Event('resize'));
         }, 150);
+      });
+
+      // Browser-side CSV file reader with encoding auto-detection (UTF-8 -> Shift-JIS -> Fallback)
+      $(document).on('change', '#datafile', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = function(evt) {
+          const arrayBuffer = evt.target.result;
+          let decodedText = '';
+          try {
+            // 1. Try UTF-8 first (fatal: true forces error on invalid byte sequences)
+            const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+            decodedText = utf8Decoder.decode(arrayBuffer);
+          } catch (err) {
+            try {
+              // 2. Fallback to Shift-JIS (supports CP932)
+              const sjisDecoder = new TextDecoder('shift-jis', { fatal: true });
+              decodedText = sjisDecoder.decode(arrayBuffer);
+            } catch (err2) {
+              // 3. Last resort fallback to Latin1 (windows-1252)
+              const latin1Decoder = new TextDecoder('windows-1252');
+              decodedText = latin1Decoder.decode(arrayBuffer);
+            }
+          }
+          // Send decoded UTF-8 string directly to Shiny (WebR)
+          Shiny.setInputValue('datafile_utf8', {
+            name: file.name,
+            content: decodedText
+          }, { priority: 'event' });
+        };
+        reader.readAsArrayBuffer(file);
       });
     "))
   ),
@@ -609,9 +538,20 @@ server <- function(input, output, session) {
 
   data <- reactiveVal(NULL)
 
-  observeEvent(input$datafile, {
+  observeEvent(input$datafile_utf8, {
+    req(input$datafile_utf8)
     tryCatch({
-      data(load_data_once(input$datafile))
+      df <- utils::read.csv(
+        text = input$datafile_utf8$content,
+        fileEncoding = "UTF-8",
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+      if (is.null(df) || nrow(df) == 0) {
+        stop("The loaded dataset has no data rows.")
+      }
+      names(df) <- make.names(names(df), unique = TRUE)
+      data(df)
       updateRadioButtons(session, "sample_ds", selected = "None")
       removeModal()
     }, error = function(e) {
