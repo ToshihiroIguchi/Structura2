@@ -109,7 +109,26 @@ const puppeteer = require('puppeteer-core');
   console.log('Clicked a valid checkbox in structural model:', clicked);
 
   // Wait a bit for state to save to reactiveVal
-  await new Promise(resolve => setTimeout(resolve, 1500));
+  await new Promise(resolve => setTimeout(resolve, 1000));
+
+  console.log('Clicking Run / Update Model button...');
+  await frame.evaluate(() => {
+    const btn = document.getElementById('run_model');
+    if (btn) {
+      btn.click();
+    } else {
+      throw new Error('Run / Update Model button not found');
+    }
+  });
+
+  console.log('Waiting for path diagram to render...');
+  try {
+    await frame.waitForSelector('#sem_plot_container svg', { timeout: 30000 });
+    console.log('Path diagram rendered successfully!');
+  } catch (err) {
+    console.error('Failed to render path diagram within timeout.', err);
+    await page.screenshot({ path: 'C:\\Users\\toshi\\python\\Structura2\\test_browser\\error_diagram.png' });
+  }
 
   console.log('Switching to Data tab to trigger re-render of Model tab...');
   await frame.evaluate(() => {

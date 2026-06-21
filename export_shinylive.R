@@ -6,6 +6,29 @@ if (!requireNamespace("shinylive", quietly = TRUE)) {
   install.packages("shinylive", repos = c("https://posit-dev.r-universe.dev", "https://cloud.r-project.org"))
 }
 
+# Pre-download @hpcc-js/wasm assets for offline use before export
+assets_dir <- "www/hpcc-js"
+dir.create(assets_dir, showWarnings = FALSE, recursive = TRUE)
+js_path <- file.path(assets_dir, "graphviz.umd.js")
+wasm_path <- file.path(assets_dir, "graphvizlib.wasm")
+
+if (!file.exists(js_path)) {
+  cat("Downloading graphviz.umd.js for production build...\n")
+  tryCatch({
+    download.file("https://cdn.jsdelivr.net/npm/@hpcc-js/wasm/dist/graphviz.umd.js", js_path, mode = "wb")
+  }, error = function(e) {
+    cat(sprintf("WARNING: Failed to download graphviz.umd.js: %s\n", e$message))
+  })
+}
+if (!file.exists(wasm_path)) {
+  cat("Downloading graphvizlib.wasm for production build...\n")
+  tryCatch({
+    download.file("https://cdn.jsdelivr.net/npm/@hpcc-js/wasm/dist/graphvizlib.wasm", wasm_path, mode = "wb")
+  }, error = function(e) {
+    cat(sprintf("WARNING: Failed to download graphvizlib.wasm: %s\n", e$message))
+  })
+}
+
 dest_dir <- "site"
 # Use a temporary directory outside the project root to bypass .gitignore rules
 # which prevent renv::dependencies from scanning files inside gitignored directories.

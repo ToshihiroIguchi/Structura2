@@ -29,26 +29,22 @@ library(shiny)
 library(shinyjs)
 library(DT)
 library(rhandsontable)
-library(lavaan)
 library(markdown)
 
-# ---- Download @hpcc-js/wasm assets for offline use if not present ----
+# Parser bypass block to guarantee dependency packaging during Shinylive build
+# while deferring execution to the dynamic lazy-loader at runtime.
+if (FALSE) {
+  library(lavaan)
+}
+
+# Offline assets warning (assets should be prepared at build time)
 tryCatch({
-  dir.create("www/hpcc-js", showWarnings = FALSE, recursive = TRUE)
   js_path <- "www/hpcc-js/graphviz.umd.js"
   wasm_path <- "www/hpcc-js/graphvizlib.wasm"
-  
-  if (!file.exists(js_path)) {
-    message("Downloading graphviz.umd.js for offline use...")
-    download.file("https://cdn.jsdelivr.net/npm/@hpcc-js/wasm/dist/graphviz.umd.js", js_path, mode = "wb")
+  if (!file.exists(js_path) || !file.exists(wasm_path)) {
+    warning("Graphviz assets are missing in www/hpcc-js/. They should be prepared at build time.")
   }
-  if (!file.exists(wasm_path)) {
-    message("Downloading graphvizlib.wasm for offline use...")
-    download.file("https://cdn.jsdelivr.net/npm/@hpcc-js/wasm/dist/graphvizlib.wasm", wasm_path, mode = "wb")
-  }
-}, error = function(e) {
-  warning("Failed to download offline Graphviz assets: ", e$message)
-})
+}, error = function(e) NULL)
 
 # Patch the lavaan option cache to prevent NA bounds crashes during estimation checks
 tryCatch({
@@ -343,6 +339,44 @@ ui <- fluidPage(
 .alert-box { background:#fff3cd;border:1px solid #ffeeba;border-radius:6px;padding:10px;margin-bottom:10px; }
 #lavaan_model { white-space: pre; }
 #approx_eq    { white-space: pre-wrap; }
+
+/* Custom elegant splash preloader styles */
+#structura-preload-container {
+  position: fixed;
+  top: 0; left: 0; width: 100%; height: 100%;
+  background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+  color: white;
+  z-index: 99999;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  font-family: system-ui, -apple-system, sans-serif;
+  transition: opacity 0.5s ease-out;
+}
+.structura-preload-spinner {
+  border: 4px solid rgba(255,255,255,0.1);
+  width: 50px; height: 50px;
+  border-radius: 50%;
+  border-left-color: #3b82f6;
+  animation: structura-spin 1s linear infinite;
+  margin-bottom: 24px;
+}
+@keyframes structura-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+.structura-preload-progress {
+  width: 280px;
+  background-color: #334155;
+  border-radius: 10px;
+  padding: 3px;
+  margin-top: 16px;
+}
+.structura-preload-bar {
+  height: 8px;
+  background-color: #3b82f6;
+  border-radius: 8px;
+  width: 0%;
+  transition: width 0.3s ease;
+}
 ")),
     tags$script(src = if (file.exists("www/hpcc-js/graphviz.umd.js")) "hpcc-js/graphviz.umd.js" else "https://cdn.jsdelivr.net/npm/@hpcc-js/wasm/dist/graphviz.umd.js"),
     tags$script(HTML("
@@ -439,10 +473,27 @@ ui <- fluidPage(
       });
     "))
   ),
-  div(id = "app-logo",
-      img(src = "logo.png", height = 40,
-          title = "Structural Insights, Simplified")),
   title = "Structura2",
+
+  # Preload overlay splash screen
+  div(
+    id = "structura-preload-container",
+    div(class = "structura-preload-spinner"),
+    h2("Structura2", style = "margin: 0; font-weight: 300; letter-spacing: 2px;"),
+    p("Initializing WebR Environment...", id = "structura-preload-status", style = "color: #94a3b8; margin-top: 12px; font-size: 14px;"),
+    div(
+      class = "structura-preload-progress",
+      div(id = "structura-preload-bar", class = "structura-preload-bar")
+    )
+  ),
+
+  # Main application hidden behind this wrapper
+  hidden(
+    div(
+      id = "structura-main-app",
+      div(id = "app-logo",
+          img(src = "logo.png", height = 40,
+              title = "Structural Insights, Simplified")),
 
   tabsetPanel(
 
@@ -569,8 +620,10 @@ ui <- fluidPage(
 
     # ---------------- Help tab -----------------------------------
     tabPanel("Help", includeMarkdown("help.md"))
-  )
-)
+  ) # end tabsetPanel
+  ) # end div (structura-main-app)
+  ) # end hidden
+) # end fluidPage
 
 # ================================================================
 # SERVER
@@ -578,22 +631,61 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
 
-  showModal(
-    modalDialog(
-      title = span(icon("upload"), "Load Data"),
-      fileInput("datafile", NULL,
-                buttonLabel = "Browse…",
-                placeholder  = "Upload CSV",
-                accept       = c(".csv", "text/csv", "application/csv")),
-      tags$hr(),
-      radioButtons("sample_ds", "Or choose a demo dataset:",
-                   choices = c("None", "HolzingerSwineford1939",
-                               "PoliticalDemocracy", "Demo.growth",
-                               "Demo.twolevel", "FacialBurns")),
-      easyClose = FALSE,
-      footer    = NULL
-    )
-  )
+  # Dynamic Lazy Loader sequence triggered on Shiny session connection
+  observeEvent(TRUE, {
+    tryCatch({
+      # Step 1: Initial wait & status update
+      Sys.sleep(0.2)
+      runjs("document.getElementById('structura-preload-status').innerText = 'Initializing analysis runtime...';")
+      runjs("document.getElementById('structura-preload-bar').style.width = '30%';")
+      Sys.sleep(0.1)
+      
+      # Step 2: Load lavaan (only package we defer now, direct call to bypass WebR VFS bugs)
+      runjs("document.getElementById('structura-preload-status').innerText = 'Initializing structural equation engine (lavaan)...';")
+      runjs("document.getElementById('structura-preload-bar').style.width = '75%';")
+      Sys.sleep(0.1)
+      library(lavaan)
+      
+      # Finalize UI transition
+      Sys.sleep(0.1)
+      runjs("document.getElementById('structura-preload-bar').style.width = '100%';")
+      Sys.sleep(0.1)
+      
+      # Smoothly hide preload splash panel and reveal app layout
+      runjs("
+        var container = document.getElementById('structura-preload-container');
+        if (container) {
+          container.style.opacity = '0';
+          setTimeout(function() {
+            container.style.display = 'none';
+          }, 500);
+        }
+      ")
+      shinyjs::show("structura-main-app")
+      
+      # Show the initial load data modal dialog after dependencies are loaded
+      showModal(
+        modalDialog(
+          title = span(icon("upload"), "Load Data"),
+          fileInput("datafile", NULL,
+                    buttonLabel = "Browse…",
+                    placeholder  = "Upload CSV",
+                    accept       = c(".csv", "text/csv", "application/csv")),
+          tags$hr(),
+          radioButtons("sample_ds", "Or choose a demo dataset:",
+                       choices = c("None", "HolzingerSwineford1939",
+                                   "PoliticalDemocracy", "Demo.growth",
+                                   "Demo.twolevel", "FacialBurns")),
+          easyClose = FALSE,
+          footer    = NULL
+        )
+      )
+    }, error = function(e) {
+      runjs(sprintf("document.getElementById('structura-preload-status').innerText = 'Error loading application: %s';", e$message))
+      runjs("document.getElementById('structura-preload-bar').style.backgroundColor = '#ef4444';")
+      warning("Structura2 lazy loading failed: ", e$message)
+    })
+  }, once = TRUE)
 
   data <- reactiveVal(NULL)
 
