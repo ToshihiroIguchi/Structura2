@@ -25,10 +25,16 @@ for (f in files_to_copy) {
   }
 }
 
-# Copy www assets
+# Copy www assets (recursively, including directories like hpcc-js)
 www_files <- list.files("www", full.names = TRUE)
 for (wf in www_files) {
-  file.copy(wf, file.path(src_dir, "www", basename(wf)))
+  if (dir.exists(wf)) {
+    dest_subdir <- file.path(src_dir, "www", basename(wf))
+    dir.create(dest_subdir, showWarnings = FALSE, recursive = TRUE)
+    file.copy(list.files(wf, full.names = TRUE), dest_subdir, recursive = TRUE, overwrite = TRUE)
+  } else {
+    file.copy(wf, file.path(src_dir, "www", basename(wf)), overwrite = TRUE)
+  }
   cat(sprintf("Copied www asset: %s\n", basename(wf)))
 }
 

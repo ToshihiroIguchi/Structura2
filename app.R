@@ -30,8 +30,25 @@ library(shinyjs)
 library(DT)
 library(rhandsontable)
 library(lavaan)
-library(DiagrammeR)
 library(markdown)
+
+# ---- Download @hpcc-js/wasm assets for offline use if not present ----
+tryCatch({
+  dir.create("www/hpcc-js", showWarnings = FALSE, recursive = TRUE)
+  js_path <- "www/hpcc-js/graphviz.umd.js"
+  wasm_path <- "www/hpcc-js/graphvizlib.wasm"
+  
+  if (!file.exists(js_path)) {
+    message("Downloading graphviz.umd.js for offline use...")
+    download.file("https://cdn.jsdelivr.net/npm/@hpcc-js/wasm/dist/graphviz.umd.js", js_path, mode = "wb")
+  }
+  if (!file.exists(wasm_path)) {
+    message("Downloading graphvizlib.wasm for offline use...")
+    download.file("https://cdn.jsdelivr.net/npm/@hpcc-js/wasm/dist/graphvizlib.wasm", wasm_path, mode = "wb")
+  }
+}, error = function(e) {
+  warning("Failed to download offline Graphviz assets: ", e$message)
+})
 
 # Patch the lavaan option cache to prevent NA bounds crashes during estimation checks
 tryCatch({
@@ -88,7 +105,7 @@ semDiagram <- function(
   if (!inherits(fitted_model, "lavaan"))
     stop("`fitted_model` must be a lavaan object.")
 
-  invisible(lapply(c("DiagrammeR","lavaan"), function(p)
+  invisible(lapply(c("lavaan"), function(p)
     if (!requireNamespace(p, quietly = TRUE))
       stop(sprintf("Package '%s' is required but not installed.", p))))
 
@@ -232,17 +249,8 @@ semDiagram <- function(
     layout, engine, if (nchar(radial_opts)) ", " else "", radial_opts,
     top_label, ratio, fontname, fontname, node_defs, edge_defs)
 
-  tryCatch({
-    DiagrammeR::grViz(graph_code, engine = engine)
-  }, error = function(e) {
-    err_dot <- sprintf("digraph {\n  node [shape=box, color=red, fontname=\"%s\"];\n  \"Error\" [label=\"Path diagram rendering failed:\\n%s\"];\n}", 
-                       fontname, gsub("\"", "'", e$message))
-    tryCatch({
-      DiagrammeR::grViz(err_dot)
-    }, error = function(e2) {
-      NULL
-    })
-  })
+  # Return raw DOT graph code. Layout and rendering will be done on the client side via @hpcc-js/wasm
+  return(graph_code)
 }
 
 
@@ -336,7 +344,53 @@ ui <- fluidPage(
 #lavaan_model { white-space: pre; }
 #approx_eq    { white-space: pre-wrap; }
 ")),
+    tags$script(src = if (file.exists("www/hpcc-js/graphviz.umd.js")) "hpcc-js/graphviz.umd.js" else "https://cdn.jsdelivr.net/npm/@hpcc-js/wasm/dist/graphviz.umd.js"),
     tags$script(HTML("
+      $(document).on('shiny:connected', function() {
+        if (window['@hpcc-js/wasm']) {
+          window['@hpcc-js/wasm'].wasmFolder('hpcc-js');
+        }
+
+        Shiny.addCustomMessageHandler('update_sem_plot', function(message) {
+          var container = document.getElementById('sem_plot_container');
+          if (!container) return;
+          
+          if (message.message) {
+            container.style.display = 'flex';
+            container.style.alignItems = 'center';
+            container.style.justifyContent = 'center';
+            if (message.error) {
+              container.innerHTML = '<div style=\"color:red; padding:10px; text-align:center;\">' + message.message + '</div>';
+            } else {
+              container.innerHTML = '<div style=\"color:#666; padding:10px; text-align:center;\">' + message.message + '</div>';
+            }
+            return;
+          }
+          
+          container.style.display = 'block';
+          var hpccWasm = window['@hpcc-js/wasm'];
+          if (hpccWasm && hpccWasm.Graphviz) {
+            hpccWasm.Graphviz.load().then(function(graphviz) {
+              try {
+                var svg = graphviz.layout(message.dot, 'svg', message.engine);
+                container.innerHTML = svg;
+                var svgElement = container.querySelector('svg');
+                if (svgElement) {
+                  svgElement.setAttribute('width', '100%');
+                  svgElement.setAttribute('height', '100%');
+                }
+              } catch (err) {
+                container.innerHTML = '<div style=\"color:red; padding:10px;\">Layout failed: ' + err.message + '</div>';
+              }
+            }).catch(function(err) {
+              container.innerHTML = '<div style=\"color:red; padding:10px;\">Failed to load Graphviz WASM: ' + err.message + '</div>';
+            });
+          } else {
+            container.innerHTML = '<div style=\"color:red; padding:10px;\">Graphviz library not loaded.</div>';
+          }
+        });
+      });
+
       $(document).on('shiny:visualchange', function(event) {
         setTimeout(function() {
           window.dispatchEvent(new Event('resize'));
@@ -499,8 +553,10 @@ ui <- fluidPage(
                       ),
                       # ---------- Path diagram --------------------
                       h4("Path Diagram"),
-                      div(style = "height:60vh; overflow-y:auto; overflow-x:hidden; border:1px solid #ccc;",
-                          uiOutput("sem_plot_ui"))
+                      div(style = "height:60vh; overflow-y:auto; overflow-x:hidden; border:1px solid #ccc; position: relative;",
+                          tags$div(id = "sem_plot_container", 
+                                   style = "width:100%; height:100%; display: flex; align-items: center; justify-content: center; color: #666;",
+                                   "Define a model to view the path diagram."))
                )
              )),
 
@@ -1128,32 +1184,48 @@ server <- function(input, output, session) {
     datatable(parameterEstimates(model$fit), options = list(pageLength = 15))
   })
 
-  # ----------------- Path diagram UI ----------------------------
-  output$sem_plot_ui <- renderUI({
-    ln <- lavaan_model_str()
-    if (length(ln) == 0)
-      return(div("Define a model to view the path diagram."))
-    tryCatch(grVizOutput("sem_plot"),
-             error = function(e)
-               div(style = "color:red;",
-                   paste("Model Error:", e$message)))
-  })
-
-  output$sem_plot <- renderGrViz({
+  # ----------------- Path diagram server observer ---------------
+  observe({
+    # Reactive dependencies to trigger redraw
     model <- fit_model_safe()
-    validate(need(model$ok, model$msg_friendly))
     std_for_plot <- if (input$analysis_mode == "std") TRUE else input$diagram_std
-
-    # ---- parse layout_style into engine / rankdir ---------------
+    
+    # Parse layout_style into engine / rankdir
     parts  <- strsplit(input$layout_style, "_", fixed = TRUE)[[1]]
     eng    <- parts[1]
     rank   <- ifelse(length(parts) == 2, parts[2], "LR")
-    # -------------------------------------------------------------
-
-    semDiagram(model$fit,
-               standardized = std_for_plot,
-               layout       = rank,
-               engine       = eng)
+    
+    # If the model check fails or not run yet
+    if (!model$ok) {
+      session$sendCustomMessage("update_sem_plot", list(
+        error = TRUE,
+        message = model$msg_friendly
+      ))
+      return()
+    }
+    
+    # If model is empty
+    ln <- lavaan_model_str()
+    if (length(ln) == 0) {
+      session$sendCustomMessage("update_sem_plot", list(
+        error = FALSE,
+        message = "Define a model to view the path diagram."
+      ))
+      return()
+    }
+    
+    # Generate DOT code
+    dot_code <- semDiagram(model$fit,
+                           standardized = std_for_plot,
+                           layout       = rank,
+                           engine       = eng)
+    
+    # Send DOT code to client JS
+    session$sendCustomMessage("update_sem_plot", list(
+      error = FALSE,
+      dot = dot_code,
+      engine = eng
+    ))
   })
 }
 

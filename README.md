@@ -18,7 +18,7 @@ Structura2 is an interactive Shiny application for Structural Equation Modeling 
 * **One-hot Encoding**: Convert categorical variables to dummy indicators for SEM compatibility.
 * **Model Specification**: Define measurement (`Latent =~ Indicators`) and structural (`Dependent ~ Predictors`) models in interactive Handsontable grids powered by **rhandsontable** and **DT** ([cran.r-project.org](https://cran.r-project.org/package%3Dshiny?utm_source=chatgpt.com), [shiny.posit.co](https://shiny.posit.co/?utm_source=chatgpt.com)).
 * **SEM Fitting**: Fit models using **lavaan** with support for mean structures and detailed fit measures.
-* **Visualization**: Render path diagrams via **DiagrammeR**/**semDiagram**, and inspect correlation heatmaps using **rhandsontable**.
+* **Visualization**: Render path diagrams via browser-side **@hpcc-js/wasm**/**semDiagram**, and inspect correlation heatmaps using **rhandsontable**.
 * **Comprehensive Reporting**: View fit indices (p-value, SRMR, RMSEA, AIC, BIC, GFI, AGFI, NFI, CFI), parameter tables, and formatted equations in real time.
 
 ## Launch Application
@@ -36,7 +36,7 @@ To run the traditional Shiny application locally, you need [R](https://www.r-pro
 
 1. **Install Dependencies**: Open R or RStudio and run the following command to install the required packages:
    ```r
-   install.packages(c("shiny", "shinyjs", "DT", "rhandsontable", "lavaan", "DiagrammeR", "markdown"))
+   install.packages(c("shiny", "shinyjs", "DT", "rhandsontable", "lavaan", "markdown"))
    ```
 2. **Run the App**: Set your working directory to the project folder and run:
    ```r

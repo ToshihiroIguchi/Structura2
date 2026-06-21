@@ -8,7 +8,7 @@ The application allows users to:
 - Upload CSV data files with automatic encoding detection
 - Define measurement and structural models via interactive table UI
 - Fit SEM models using `lavaan`
-- Visualize results through path diagrams (`DiagrammeR`/`semDiagram`), fit indices, and parameter tables
+- Visualize results through path diagrams (rendered via browser-side `@hpcc-js/wasm` based on `semDiagram` outputs), fit indices, and parameter tables
 
 ## Language Rules
 
@@ -47,10 +47,10 @@ Structura2/
 | `DT` | CRAN | Interactive data tables |
 | `rhandsontable` | CRAN | Editable spreadsheet-like tables (measurement/structural model, correlation heatmap) |
 | `lavaan` | CRAN | SEM engine |
-| `DiagrammeR` | CRAN | Graphviz-based path diagram rendering |
+| `@hpcc-js/wasm` | CDN / Local | Browser-side WebAssembly Graphviz path diagram rendering |
 | `markdown` | CRAN | Render help.md |
 | `readflex` | GitHub (inlined) | CSV reader with auto encoding detection |
-| `semDiagram` | GitHub (inlined) | SEM path diagram builder using DiagrammeR |
+| `semDiagram` | GitHub (inlined) | SEM path diagram builder (outputs DOT format) |
 
 ## WebR / ShinyLive Constraints
 
@@ -59,7 +59,7 @@ When modifying this app, keep these WebR limitations in mind:
 1. **No source compilation**: Only pre-compiled WASM binaries can be used. Packages must be available at `repo.r-wasm.org` or R-universe.
 2. **Limited locale support**: `Sys.setlocale()` does not work. The environment is fixed to "C" locale.
 3. **Browser memory constraints**: Large file uploads are limited by browser tab memory.
-4. **No system binaries**: Graphviz `dot` engine may not be available. `DiagrammeR::grViz()` functionality must be verified.
+4. **No system binaries**: Graphviz `dot` engine is not required on the server since rendering is offloaded to the client browser via `@hpcc-js/wasm`.
 
 ## Error Handling Policy
 
