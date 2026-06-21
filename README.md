@@ -21,21 +21,33 @@ Structura is an interactive Shiny application for Structural Equation Modeling (
 
 ## Installation
 
-Install required packages from github and CRAN:
+Install the required R packages from CRAN:
 
 ```r
-devtools::install_github("ToshihiroIguchi/semDiagram", dependencies = TRUE, upgrade = "never", build = FALSE, build_vignettes = FALSE)
-devtools::install_github("ToshihiroIguchi/readflex", dependencies = TRUE, upgrade = "never", build = FALSE, build_vignettes = FALSE)
-install.packages(c("shiny", "shinyjs", "DT", "rhandsontable", "lavaan", "DiagrammeR", "ggplot2", "reshape2", "markdown", "scales"))
+install.packages(c("shiny", "shinyjs", "DT", "rhandsontable", "lavaan", "DiagrammeR", "ggplot2", "reshape2", "markdown", "shinylive"))
 ```
 
 ## Launch Application
 
-From your R console, run:
+### 1. Run Locally (Traditional Shiny)
+From your R console in the project directory, run:
 
 ```r
-shiny::runGitHub("Structura", "ToshihiroIguchi", ref = "main")
+shiny::runApp(".")
 ```
+
+### 2. Export and Run as Static Site (ShinyLive WebAssembly)
+To compile the application into a fully static website powered by WebR (WASM):
+
+```bash
+# Run the export script
+Rscript export_shinylive.R
+
+# Host the generated site locally
+python -m http.server 8000 --directory site
+```
+Open your browser and navigate to `http://localhost:8000`.
+
 
 ## Hosting the Shiny App Directly from GitHub
 

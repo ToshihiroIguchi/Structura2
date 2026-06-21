@@ -10,22 +10,352 @@ options(
   shiny.sanitize.errors = TRUE
 )
 
+# ---- WebR / Parallel Compatibility Patch -------------------------
+# Patch parallel::detectCores BEFORE loading any library to intercept lavaan's startup checks.
+tryCatch({
+  if (requireNamespace("parallel", quietly = TRUE)) {
+    ns <- asNamespace("parallel")
+    if (bindingIsLocked("detectCores", ns)) {
+      unlockBinding("detectCores", ns)
+    }
+    assign("detectCores", function(...) 1L, envir = ns)
+    lockBinding("detectCores", ns)
+  }
+}, error = function(e) NULL)
+
 # ---- Libraries --------------------------------------------------
 
 library(shiny)
 library(shinyjs)
 library(DT)
 library(rhandsontable)
-library(readflex)
 library(lavaan)
 library(DiagrammeR)
-library(semDiagram)
 library(ggplot2)
 library(reshape2)
 library(markdown)
 
+# Patch the lavaan option cache to prevent NA bounds crashes during estimation checks
+tryCatch({
+  env <- lavaan:::lavaan_cache_env
+  for (chk_name in c("opt_check", "opt.check")) {
+    if (exists(chk_name, envir = env)) {
+      opt_check <- get(chk_name, envir = env)
+      if (!is.null(opt_check$ncpus) && !is.null(opt_check$ncpus$nm)) {
+        bounds <- opt_check$ncpus$nm$bounds
+        if (any(is.na(bounds))) {
+          opt_check$ncpus$nm$bounds[is.na(bounds)] <- 1L
+          assign(chk_name, opt_check, envir = env)
+        }
+      }
+    }
+  }
+}, error = function(e) NULL)
+
+# ---- Inlined Utilities (from utils.R) ----------------------------
+
+# 1. readflex: CSV reader with auto encoding detection
+readflex <- function(file,
+                     ...,
+                     encodings = c(
+                       "UTF-8", "UTF-8-BOM", "UTF-16LE", "UTF-16BE",
+                       "Shift_JIS", "CP932", "EUC-JP", "ISO-2022-JP",
+                       "ISO-8859-1", "Windows-1252", "latin1",
+                       "GB18030", "GB2312", "GBK", "Big5", "Big5-HKSCS",
+                       "EUC-KR", "ISO-2022-KR"
+                     ),
+                     guess_n_max = 1000,
+                     verbose = FALSE,
+                     stringsAsFactors = FALSE,
+                     max_file_size_mb = 100) {
+  
+  stopifnot(is.character(file), length(file) == 1)
+  stopifnot(is.numeric(guess_n_max), guess_n_max > 0)
+  stopifnot(is.logical(verbose), length(verbose) == 1)
+  stopifnot(is.character(encodings), length(encodings) > 0)
+  stopifnot(is.logical(stringsAsFactors), length(stringsAsFactors) == 1)
+  stopifnot(is.numeric(max_file_size_mb), max_file_size_mb > 0)
+  
+  if (!file.exists(file)) {
+    stop(sprintf("[readflex] File not found: %s", file))
+  }
+  
+  if (file.size(file) == 0) {
+    warning(sprintf("[readflex] File is empty: %s", file))
+    return(data.frame())
+  }
+  
+  file_size_mb <- file.size(file) / (1024 * 1024)
+  if (file_size_mb > max_file_size_mb) {
+    stop(sprintf(
+      "[readflex] File size (%.1f MB) exceeds limit (%.1f MB). Consider using a smaller file or increasing max_file_size_mb parameter.",
+      file_size_mb, max_file_size_mb
+    ))
+  }
+  
+  try_read <- function(enc) {
+    if (verbose) message(sprintf("[readflex] Trying encoding: %s", enc))
+    tryCatch(
+      utils::read.csv(
+        file,
+        fileEncoding = enc,
+        ...,
+        stringsAsFactors = stringsAsFactors
+      ),
+      error   = function(e) e,
+      warning = function(w) w
+    )
+  }
+
+  detected <- character(0)
+  if (requireNamespace("readr", quietly = TRUE)) {
+    tryCatch({
+      info <- readr::guess_encoding(file, n_max = guess_n_max)
+      if (nrow(info) > 0) {
+        detected <- unique(info$encoding)
+        if (verbose) message("[readflex] Detected with readr: ", paste(detected, collapse = ", "))
+      }
+    }, error = function(e) NULL)
+  }
+  if (length(detected) == 0 && requireNamespace("stringi", quietly = TRUE)) {
+    txt <- tryCatch(base::readLines(file, n = guess_n_max, warn = FALSE),
+                    error = function(e) character(0))
+    if (length(txt) > 0) {
+      tryCatch({
+        info2 <- stringi::stri_enc_detect(paste(txt, collapse = "\n"))[[1]]
+        detected <- unique(info2$Encoding[order(-info2$Confidence)])
+        if (verbose) message("[readflex] Detected with stringi: ", paste(detected, collapse = ", "))
+      }, error = function(e) NULL)
+    }
+  }
+
+  trial_encs <- unique(c(detected, encodings))
+  if (verbose) message("[readflex] Trial order: ", paste(trial_encs, collapse = ", "))
+
+  for (enc in trial_encs) {
+    res <- try_read(enc)
+    if (inherits(res, "data.frame")) {
+      if (verbose) message(sprintf("[readflex] Success with: %s", enc))
+      return(res)
+    }
+  }
+
+  stop(sprintf(
+    "[readflex] Failed to read '%s'. Tried encodings: %s",
+    file, paste(trial_encs, collapse = ", ")
+  ))
+}
+
+# 2. semDiagram: Visual path diagrams robust against NA and multicollinearity
+semDiagram <- function(
+    fitted_model,
+    digits            = 3,
+    standardized      = TRUE,
+    alpha             = 0.05,
+    low_alpha         = 0.2,
+    min_width         = 1,
+    max_width         = 5,
+    pos_color         = "blue",
+    neg_color         = "red",
+    fontname          = "Helvetica",
+    node_fontsize     = 11,
+    edge_fontsize     = 9,
+    show_residuals    = FALSE,
+    show_intercepts   = FALSE,
+    show_fit          = TRUE,
+    show_collinearity = TRUE,
+    layout            = "LR",
+    ratio             = "fill",
+    curvature         = 0.3,
+    engine            = "dot",
+    twopi_compact     = TRUE) {
+
+  engine <- match.arg(engine, c("dot","neato","fdp","circo","twopi"))
+
+  alpha_color <- function(col, alpha_val) {
+    if (is.na(alpha_val) || alpha_val < 0 || alpha_val > 1) alpha_val <- 1
+    rgb_mat <- grDevices::col2rgb(col) / 255
+    grDevices::rgb(rgb_mat[1,], rgb_mat[2,], rgb_mat[3,], alpha = alpha_val)
+  }
+
+  if (!inherits(fitted_model, "lavaan"))
+    stop("`fitted_model` must be a lavaan object.")
+
+  invisible(lapply(c("DiagrammeR","lavaan"), function(p)
+    if (!requireNamespace(p, quietly = TRUE))
+      stop(sprintf("Package '%s' is required but not installed.", p))))
+
+  params <- lavaan::parameterEstimates(fitted_model, standardized = TRUE)
+  scale_col <- if (standardized) "std.all" else "est"
+
+  fit_measures <- lavaan::fitMeasures(
+    fitted_model,
+    c("pvalue","srmr","rmsea","gfi","agfi","nfi","cfi","aic","bic"))
+  n_obs <- lavaan::lavInspect(fitted_model, "nobs")
+
+  condition_number <- NA
+  max_cond_index <- NA
+  tryCatch({
+    samp_cov <- lavaan::lavInspect(fitted_model, "sampstat")$cov
+    if (!is.null(samp_cov) && nrow(samp_cov) > 0) {
+      samp_cor <- stats::cov2cor(samp_cov)
+      eig_vals <- eigen(samp_cor, symmetric = TRUE, only.values = TRUE)$values
+      if (length(eig_vals) > 0 && min(eig_vals) > 1e-12) {
+        condition_number <- max(eig_vals) / min(eig_vals)
+        condition_indices <- sqrt(max(eig_vals) / eig_vals)
+        max_cond_index <- max(condition_indices)
+      }
+    }
+  }, error = function(e) NULL)
+
+  edge_rows <- params[params$op %in% c("=~","~","~~") & params$lhs != params$rhs, ]
+  vals <- abs(edge_rows[[scale_col]]); vals <- vals[!is.na(vals)]
+  max_abs <- if (standardized) 1 else (if (length(vals) == 0 || !is.finite(max(vals))) 1 else max(vals))
+
+  colorize_thresh <- function(v, thr, invert = FALSE) {
+    if (is.na(v)) "gray50"
+    else if (invert) {
+      if (v > thr) "red" else "gray20"
+    } else {
+      if (v <= thr) "red" else "gray20"
+    }
+  }
+
+  fit_block <- if (show_fit) {
+    paste0(
+      sprintf("N = %d | ", n_obs),
+      sprintf("<font color='%s'>p = %.3f</font> | ",
+              colorize_thresh(fit_measures["pvalue"], 0.05), fit_measures["pvalue"]),
+      sprintf("<font color='%s'>SRMR = %.3f</font> | ",
+              colorize_thresh(fit_measures["srmr"], 0.08, invert = TRUE), fit_measures["srmr"]),
+      sprintf("<font color='%s'>RMSEA = %.3f</font> | ",
+              colorize_thresh(fit_measures["rmsea"], 0.08, invert = TRUE), fit_measures["rmsea"]),
+      sprintf("AIC = %.1f | BIC = %.1f<BR/>", fit_measures["aic"], fit_measures["bic"]),
+      sprintf("<font color='%s'>GFI = %.3f</font> | ",
+              colorize_thresh(fit_measures["gfi"], 0.90), fit_measures["gfi"]),
+      sprintf("<font color='%s'>AGFI = %.3f</font> | ",
+              colorize_thresh(fit_measures["agfi"], 0.90), fit_measures["agfi"]),
+      sprintf("<font color='%s'>NFI = %.3f</font> | ",
+              colorize_thresh(fit_measures["nfi"], 0.90), fit_measures["nfi"]),
+      sprintf("<font color='%s'>CFI = %.3f</font>",
+              colorize_thresh(fit_measures["cfi"], 0.90), fit_measures["cfi"])
+    )
+  } else ""
+
+  coll_block <- if (show_collinearity) {
+    paste0(
+      sprintf("<font color='%s'>Condition Number = %.1f</font>  | ",
+              colorize_thresh(condition_number, 30, invert = TRUE), condition_number),
+      sprintf("<font color='%s'>Max Condition Index = %.1f</font>",
+              colorize_thresh(max_cond_index, 30, invert = TRUE), max_cond_index)
+    )
+  } else ""
+
+  coeff_text <- if (standardized) "Coefficients: <b>Standardized</b>" else "Coefficients: <b>Unstandardized</b>"
+  intercept_text <- if (show_intercepts) "Intercepts: <b>Shown</b>" else "Intercepts: <b>Hidden</b>"
+  annot_block <- sprintf("%s   | %s", coeff_text, intercept_text)
+
+  label_parts <- c(annot_block, if (show_fit) fit_block else NULL, if (show_collinearity) coll_block else NULL)
+  top_label <- sprintf("<%s>", paste(label_parts, collapse = "<BR/>"))
+
+  latents   <- unique(params$lhs[params$op == "=~"])
+  observeds <- setdiff(unique(c(params$lhs, params$rhs)), c(latents, "1", ""))
+  nodes <- list()
+  for (lv in latents) nodes[[lv]] <- list(
+    shape = "ellipse", label = lv, style = "filled", fillcolor = "#F0F0F0",
+    fontname = fontname, fontsize = node_fontsize)
+  for (ov in observeds) nodes[[ov]] <- list(
+    shape = "box", label = ov, fontname = fontname, fontsize = node_fontsize)
+
+  edges <- list()
+  for (i in seq_len(nrow(params))) {
+    p <- params[i, ]
+    if (p$op %in% c("=~","~","~~") && p$lhs != p$rhs) {
+      value <- if (standardized) p$std.all else p$est
+      if (is.na(value)) value <- p$est
+
+      pen <- (abs(value) / max_abs) * (max_width - min_width) + min_width
+      if (!is.finite(pen)) pen <- min_width
+
+      alpha_edge <- if (is.na(p$pvalue)) low_alpha else if (p$pvalue < alpha) 1 else low_alpha
+      col <- alpha_color(if (value >= 0) pos_color else neg_color, alpha_edge)
+
+      e_base <- switch(p$op,
+                       "=~" = list(from = p$lhs, to = p$rhs, arrowhead = "vee"),
+                       "~"  = list(from = p$rhs, to = p$lhs, arrowhead = "vee"),
+                       "~~" = list(from = p$lhs, to = p$rhs,
+                                   arrowhead = "vee", arrowtail = "vee",
+                                   dir = "both", style = "dashed"))
+      e_base$label    <- sprintf("%.*f", digits, value)
+      e_base$penwidth <- pen
+      e_base$color    <- col
+      e_base$fontsize <- edge_fontsize
+      e_base$fontname <- fontname
+      if (p$op == "~~") {
+        e_base$constraint <- FALSE
+        e_base$dir        <- "both"
+      }
+      edges[[length(edges) + 1]] <- e_base
+    }
+  }
+
+  node_defs <- paste(vapply(names(nodes), function(n) {
+    attrs <- paste(names(nodes[[n]]), vapply(nodes[[n]], function(x)
+      if (is.numeric(x)) as.character(x) else sprintf("\"%s\"", x), character(1)),
+      sep = "=", collapse = ", ")
+    sprintf("  \"%s\" [%s];", n, attrs)
+  }, character(1)), collapse = "\n")
+
+  edge_defs <- paste(vapply(edges, function(e) {
+    attrs <- paste(names(e)[-1:-2], vapply(e[-1:-2], function(x)
+      if (is.numeric(x)) as.character(x) else sprintf("\"%s\"", x), character(1)),
+      sep = "=", collapse = ", ")
+    sprintf("  \"%s\" -> \"%s\" [%s];", e$from, e$to, attrs)
+  }, character(1)), collapse = "\n")
+
+  radial_opts <- if (engine == "circo") {
+    c("splines=true", "nodesep=0.4", "sep=\"+4\"", "mindist=1")
+  } else if (engine == "twopi" && twopi_compact) {
+    c("splines=true", "nodesep=0.2", "sep=\"+2\"", "ranksep=0.5", "normalize=true")
+  } else character(0)
+  radial_opts <- paste(radial_opts, collapse = ", ")
+
+  graph_code <- sprintf(
+    "digraph {\n  rankdir=%s;\n  graph [layout=%s%s%s, overlap=false,\n         labelloc=\"t\", labeljust=\"c\", label=%s, ratio=%s];\n  node  [fontname=\"%s\", margin=0.05];\n  edge  [fontname=\"%s\", fontcolor=\"#333333\"];\n\n%s\n\n%s\n}",
+    layout, engine, if (nchar(radial_opts)) ", " else "", radial_opts,
+    top_label, ratio, fontname, fontname, node_defs, edge_defs)
+
+  tryCatch({
+    DiagrammeR::grViz(graph_code, engine = engine)
+  }, error = function(e) {
+    err_dot <- sprintf("digraph {\n  node [shape=box, color=red, fontname=\"%s\"];\n  \"Error\" [label=\"Path diagram rendering failed:\\n%s\"];\n}", 
+                       fontname, gsub("\"", "'", e$message))
+    tryCatch({
+      DiagrammeR::grViz(err_dot)
+    }, error = function(e2) {
+      NULL
+    })
+  })
+}
+
+# 3. Data Loader utility (robust for WebR)
+loadDataOnce <- function(file) {
+  tryCatch({
+    df <- readflex(file$datapath, stringsAsFactors = FALSE)
+    if (is.null(df) || nrow(df) == 0) {
+      stop("The loaded dataset has no data rows.")
+    }
+    names(df) <- make.names(names(df), unique = TRUE)
+    return(df)
+  }, error = function(e) {
+    stop(paste("File reading failed:", e$message))
+  })
+}
+
+# ------------------------------------------------------------------
+
 `%||%` <- function(x, y) if (!is.null(x)) x else y
-Sys.setlocale("LC_CTYPE", "ja_JP.UTF-8")
+tryCatch(Sys.setlocale("LC_CTYPE", "ja_JP.UTF-8"), error = function(e) NULL)
 
 # ---- Helper: Approximate Equations -----------------------------
 #   * Indicator  =  intercept + loading * Latent
@@ -89,10 +419,7 @@ lavaan_to_equations <- function(fit, digits = 3) {
   eq_lines
 }
 
-loadDataOnce <- function(fileInput) {
-  req(fileInput)
-  readflex(fileInput$datapath, stringsAsFactors = FALSE)
-}
+
 
 # ================================================================
 # UI
@@ -113,7 +440,19 @@ ui <- fluidPage(
 .alert-box { background:#fff3cd;border:1px solid #ffeeba;border-radius:6px;padding:10px;margin-bottom:10px; }
 #lavaan_model { white-space: pre; }
 #approx_eq    { white-space: pre-wrap; }
-"))
+")),
+    tags$script(HTML("
+      $(document).on('shiny:visualchange', function(event) {
+        setTimeout(function() {
+          window.dispatchEvent(new Event('resize'));
+        }, 150);
+      });
+      $(document).on('shown.bs.tab', 'a[data-toggle=\"tab\"]', function(e) {
+        setTimeout(function() {
+          window.dispatchEvent(new Event('resize'));
+        }, 150);
+      });
+    "))
   ),
   div(id = "app-logo",
       img(src = "logo.png", height = 40,
@@ -166,13 +505,10 @@ ui <- fluidPage(
                       actionButton("run_model", "Run / Update Model",
                                    class = "btn btn-success"),
                       tags$hr(),
-                      tags$details(
-                        tags$summary(
-                          style = "cursor: pointer; list-style: none; margin-bottom: 10px;",
-                          h4("Measurement Model", style = "display: inline; margin: 0;")
-                        ),
-                        rHandsontableOutput("input_table"),
-                        actionButton("add_row", "Add Row", class = "btn btn-primary")
+                      h4("Measurement Model"),
+                      div(style = "margin-top: 10px; margin-bottom: 15px;",
+                          rHandsontableOutput("input_table"),
+                          actionButton("add_row", "Add Row", class = "btn btn-primary", style = "margin-top: 10px;")
                       ),
                       tags$hr(),
                       h4("Structural Model"),
@@ -181,17 +517,14 @@ ui <- fluidPage(
                         style = "font-size: 12px; color: #666; margin-bottom: 10px;"),
                       rHandsontableOutput("checkbox_matrix"),
                       tags$hr(),
-                      tags$details(
-                        tags$summary(
-                          style = "cursor: pointer; list-style: none; margin-bottom: 10px;",
-                          h4("Manual Equations", style = "display: inline; margin: 0;")
-                        ),
-                        textAreaInput("extra_eq",
-                                      "Additional lavaan syntax (one formula per line):",
-                                      value = "",
-                                      placeholder = "y1 ~ x1 + x2\nlatent2 =~ y3 + y4",
-                                      rows = 4,
-                                      resize = "vertical")
+                      h4("Manual Equations"),
+                      div(style = "margin-top: 10px;",
+                          textAreaInput("extra_eq",
+                                        "Additional lavaan syntax (one formula per line):",
+                                        value = "",
+                                        placeholder = "y1 ~ x1 + x2\nlatent2 =~ y3 + y4",
+                                        rows = 4,
+                                        resize = "vertical")
                       ),
                       tags$hr(),
                       h4("lavaan Syntax"),
@@ -276,9 +609,18 @@ server <- function(input, output, session) {
   data <- reactiveVal(NULL)
 
   observeEvent(input$datafile, {
-    data(loadDataOnce(input$datafile))
-    updateRadioButtons(session, "sample_ds", selected = "None")
-    removeModal()
+    tryCatch({
+      data(loadDataOnce(input$datafile))
+      updateRadioButtons(session, "sample_ds", selected = "None")
+      removeModal()
+    }, error = function(e) {
+      showModal(modalDialog(
+        title = "Data Load Error",
+        div(class = "alert alert-danger", e$message),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+    })
   })
 
   observeEvent(input$sample_ds, {
@@ -312,47 +654,64 @@ server <- function(input, output, session) {
   })
 
   processed_data <- reactive({
+    message("DEBUGLOG: processed_data start")
     req(data())
-    idx <- as.numeric(unlist(input$datatable_rows_all))
-    if (!length(idx)) idx <- seq_len(nrow(data()))
-    df <- data()[idx, , drop = FALSE]
-    df[] <- lapply(df, function(x) if (is.factor(x)) as.character(x) else x)
+    message("DEBUGLOG: processed_data data validated")
+    tryCatch({
+      idx <- as.numeric(unlist(input$datatable_rows_all))
+      if (!length(idx)) idx <- seq_len(nrow(data()))
+      df <- data()[idx, , drop = FALSE]
+      df[] <- lapply(df, function(x) if (is.factor(x)) as.character(x) else x)
 
-    # --- log10 transform -----------------------------------------
-    if (!is.null(input$log_columns)) {
-      col_order <- names(df)
-      for (col in input$log_columns) {
-        log_col      <- paste0("log_", col)
-        df[[log_col]] <- log10(df[[col]])
-        pos           <- match(col, col_order)
-        col_order[pos] <- log_col
-        df[[col]]      <- NULL
+      # --- log10 transform -----------------------------------------
+      if (!is.null(input$log_columns)) {
+        col_order <- names(df)
+        for (col in input$log_columns) {
+          log_col      <- paste0("log_", col)
+          df[[log_col]] <- log10(df[[col]])
+          pos           <- match(col, col_order)
+          col_order[pos] <- log_col
+          df[[col]]      <- NULL
+        }
+        df <- df[, col_order, drop = FALSE]
       }
-      df <- df[, col_order, drop = FALSE]
-    }
 
-    # --- one-hot encode ------------------------------------------
-    chars <- names(df)[vapply(df, is.character, logical(1))]
-    multi <- chars[vapply(df[chars], function(x) {
-      u <- unique(x); length(u) > 1 && length(u) < nrow(df)
-    }, logical(1))]
-    if (length(multi)) {
-      mm <- model.matrix(~ . - 1, data = df[multi])
-      df <- cbind(df[setdiff(names(df), multi)],
-                  as.data.frame(mm, check.names = TRUE))
-    }
-    names(df) <- make.names(names(df), unique = TRUE)
+      # --- one-hot encode ------------------------------------------
+      chars <- names(df)[vapply(df, is.character, logical(1))]
+      multi <- chars[vapply(df[chars], function(x) {
+        u <- unique(x); length(u) > 1 && length(u) < nrow(df)
+      }, logical(1))]
+      if (length(multi)) {
+        mm <- model.matrix(~ . - 1, data = df[multi])
+        df <- cbind(df[setdiff(names(df), multi)],
+                    as.data.frame(mm, check.names = TRUE))
+      }
+      names(df) <- make.names(names(df), unique = TRUE)
 
-    # --- standardize if requested --------------------------------
-    if (input$analysis_mode == "std") {
-      num_cols <- vapply(df, is.numeric, logical(1))
-      df[num_cols] <- scale(df[num_cols])
-    }
-    df
+      # --- standardize if requested --------------------------------
+      if (input$analysis_mode == "std") {
+        num_cols <- names(df)[vapply(df, is.numeric, logical(1))]
+        for (col in num_cols) {
+          col_sd <- sd(df[[col]], na.rm = TRUE)
+          if (is.na(col_sd) || col_sd < 1e-12) {
+            col_mean <- mean(df[[col]], na.rm = TRUE)
+            df[[col]] <- df[[col]] - col_mean
+          } else {
+            df[[col]] <- scale(df[[col]])[, 1]
+          }
+        }
+      }
+      df
+    }, error = function(e) {
+      warning(paste("Data preprocessing failed:", e$message))
+      data.frame()
+    })
   })
 
   output$display_column_ui <- renderUI({
+    message("DEBUGLOG: display_column_ui start")
     df <- processed_data(); req(df)
+    message("DEBUGLOG: display_column_ui df validated")
     
     # Identify columns with zero variance (constant columns)
     numeric_cols <- sapply(df, is.numeric)
@@ -396,26 +755,35 @@ server <- function(input, output, session) {
 
   output$corr_heatmap <- renderPlot({
     req(!is.null(input$display_columns))
-    df <- processed_data()
-    all_cols <- intersect(input$display_columns, names(df))
-    num_cols <- all_cols[sapply(df[, all_cols, drop = FALSE], is.numeric)]
-    if (length(num_cols) < 2) return(NULL)
-    cm <- cor(df[, num_cols, drop = FALSE], use = "pairwise.complete.obs")
-    mf <- reshape2::melt(round(cm, 3))
-    ggplot(mf, aes(x = Var2, y = Var1, fill = value)) +
-      geom_tile() +
-      geom_text(aes(label = sprintf('%.3f', value))) +
-      scale_fill_gradient2(midpoint = 0) +
-      theme_minimal() +
-      labs(x = NULL, y = NULL, fill = "Correlation")
+    tryCatch({
+      df <- processed_data()
+      all_cols <- intersect(input$display_columns, names(df))
+      num_cols <- all_cols[sapply(df[, all_cols, drop = FALSE], is.numeric)]
+      if (length(num_cols) < 2) return(NULL)
+      cm <- cor(df[, num_cols, drop = FALSE], use = "pairwise.complete.obs")
+      cm[is.nan(cm)] <- NA
+      mf <- reshape2::melt(round(cm, 3))
+      ggplot(mf, aes(x = Var2, y = Var1, fill = value)) +
+        geom_tile() +
+        geom_text(aes(label = ifelse(is.na(value), "NA", sprintf('%.3f', value)))) +
+        scale_fill_gradient2(midpoint = 0) +
+        theme_minimal() +
+        labs(x = NULL, y = NULL, fill = "Correlation")
+    }, error = function(e) {
+      ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, label = paste("Correlation Heatmap Error:\n", e$message), color = "red", size = 4) + 
+        theme_void()
+    })
   })
 
   # ---------- Measurement table ----------------------------------
 
   input_table_data <- reactiveVal(NULL)
 
-  observeEvent(input$display_columns, ignoreNULL = FALSE, {
-    inds <- as.character(input$display_columns %||% names(processed_data()))
+  observeEvent(data(), {
+    req(data())
+    message("DEBUGLOG: Initializing input_table_data from loaded data")
+    inds <- names(data())[sapply(data(), is.numeric)]
     init <- data.frame(Latent    = "LatentVariable1",
                        Indicator = "",
                        Operator  = "=~",
@@ -425,8 +793,26 @@ server <- function(input, output, session) {
     input_table_data(init)
   })
 
+  observeEvent(input$display_columns, ignoreNULL = TRUE, {
+    message("DEBUGLOG: Updating input_table_data columns from display_columns")
+    inds <- input$display_columns
+    df <- input_table_data()
+    if (!is.null(df)) {
+      meta <- df[, c("Latent", "Indicator", "Operator"), drop = FALSE]
+      new_checkboxes <- as.data.frame(matrix(FALSE, nrow = nrow(df), ncol = length(inds)))
+      colnames(new_checkboxes) <- inds
+      common_cols <- intersect(colnames(df), inds)
+      if (length(common_cols) > 0) {
+        new_checkboxes[, common_cols] <- df[, common_cols]
+      }
+      input_table_data(cbind(meta, new_checkboxes))
+    }
+  })
+
   output$input_table <- renderRHandsontable({
+    message("DEBUGLOG: renderRHandsontable input_table run")
     df <- input_table_data(); req(df)
+    message(paste("DEBUGLOG: input_table df validated. Cols:", paste(colnames(df), collapse = ",")))
     rh <- rhandsontable(df, rowHeaders = FALSE) %>%
       hot_table(highlightReadOnly = TRUE)
     rh <- hot_col(rh, "Latent")
@@ -624,12 +1010,38 @@ server <- function(input, output, session) {
                   msg_friendly = "Define a model to proceed.",
                   fit = NULL))
     tryCatch({
+      # Patch lavaan options cache inside WebR to prevent NA-related crashes
+      tryCatch({
+        if (requireNamespace("parallel", quietly = TRUE)) {
+          ns <- asNamespace("parallel")
+          unlockBinding("detectCores", ns)
+          assign("detectCores", function(...) 1L, envir = ns)
+          lockBinding("detectCores", ns)
+        }
+      }, error = function(e) NULL)
+      tryCatch({
+        env <- lavaan:::lavaan_cache_env
+        for (chk_name in c("opt_check", "opt.check")) {
+          if (exists(chk_name, envir = env)) {
+            opt_check <- get(chk_name, envir = env)
+            if (!is.null(opt_check$ncpus) && !is.null(opt_check$ncpus$nm)) {
+              bounds <- opt_check$ncpus$nm$bounds
+              if (any(is.na(bounds))) {
+                opt_check$ncpus$nm$bounds[is.na(bounds)] <- 1L
+                assign(chk_name, opt_check, envir = env)
+              }
+            }
+          }
+        }
+      }, error = function(e) NULL)
+
       fm <- sem(paste(ln, collapse = "\n"),
                 data          = processed_data(),
                 missing       = input$missing_method,
                 fixed.x       = FALSE,
                 parser        = "old",
-                meanstructure = (input$analysis_mode == "raw"))
+                meanstructure = (input$analysis_mode == "raw"),
+                ncpus         = 1L)
       list(ok = lavInspect(fm, "converged"),
            msg_friendly = if (lavInspect(fm, "converged"))
              "" else
