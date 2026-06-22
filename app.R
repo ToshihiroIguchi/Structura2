@@ -540,6 +540,12 @@ ui <- fluidPage(
                       # -------------- Run button -------------------
                       actionButton("run_model", "Run / Update Model",
                                    class = "btn btn-success"),
+                      shinyjs::hidden(
+                        div(id = "latent_error_box",
+                            class = "alert alert-danger",
+                            style = "margin-top: 10px; font-weight: bold;",
+                            textOutput("latent_error_msg"))
+                      ),
                       tags$hr(),
                       h4("Measurement Model"),
                       div(style = "margin-top: 10px; margin-bottom: 15px;",
@@ -952,7 +958,40 @@ server <- function(input, output, session) {
   observeEvent(input$input_table, {
     tbl <- hot_to_r(input$input_table); req(tbl)
     tbl$Latent    <- make.names(tbl$Latent, unique = FALSE)
-    convs         <- make.unique(c(names(processed_data()), tbl$Latent))
+    
+    obs_names <- names(processed_data())
+    latent_names <- tbl$Latent[nzchar(tbl$Latent)]
+    
+    has_conflict <- FALSE
+    conflict_msg <- ""
+    
+    # 1. Check duplicate name with observed variables in dataset
+    conflicting_with_obs <- intersect(latent_names, obs_names)
+    if (length(conflicting_with_obs) > 0) {
+      has_conflict <- TRUE
+      conflict_msg <- sprintf("Error: Latent variable names cannot be the same as observed variables in the dataset: %s", 
+                              paste(conflicting_with_obs, collapse = ", "))
+    }
+    
+    # 2. Check duplicate name with other latent variables
+    if (!has_conflict && any(duplicated(latent_names))) {
+      has_conflict <- TRUE
+      duplicated_names <- unique(latent_names[duplicated(latent_names)])
+      conflict_msg <- sprintf("Error: Latent variable names must be unique. Duplicate names found: %s", 
+                              paste(duplicated_names, collapse = ", "))
+    }
+    
+    # UI control for validation output and model execution button state
+    if (has_conflict) {
+      shinyjs::disable("run_model")
+      output$latent_error_msg <- renderText(conflict_msg)
+      shinyjs::show("latent_error_box")
+    } else {
+      shinyjs::enable("run_model")
+      shinyjs::hide("latent_error_box")
+    }
+    
+    convs         <- make.unique(c(obs_names, tbl$Latent))
     tbl$Indicator <- tail(convs, nrow(tbl))
     input_table_data(tbl)
   })
