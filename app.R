@@ -380,6 +380,73 @@ ui <- fluidPage(
 ")),
     tags$script(src = if (file.exists("www/hpcc-js/graphviz.umd.js")) "hpcc-js/graphviz.umd.js" else "https://cdn.jsdelivr.net/npm/@hpcc-js/wasm/dist/graphviz.umd.js"),
     tags$script(HTML("
+      // Progress bar logic (JavaScript-driven to avoid R blocking issues)
+      (function() {
+        var interval;
+        var width = 0;
+
+        // Guarantee function is registered immediately even if DOM elements aren't ready yet
+        window.finishStructuraPreload = function(success, errorMsg) {
+          if (interval) clearInterval(interval);
+          var bar = document.getElementById('structura-preload-bar');
+          var status = document.getElementById('structura-preload-status');
+          
+          if (success) {
+            if (bar) bar.style.width = '100%';
+            if (status) status.innerText = 'Ready!';
+            setTimeout(function() {
+              var container = document.getElementById('structura-preload-container');
+              if (container) {
+                container.style.opacity = '0';
+                setTimeout(function() {
+                  container.style.display = 'none';
+                }, 500);
+              }
+            }, 300);
+          } else {
+            if (bar) {
+              bar.style.backgroundColor = '#ef4444';
+              bar.style.width = '100%';
+            }
+            if (status) {
+              status.innerText = 'Error loading application: ' + errorMsg;
+              status.style.color = '#f87171';
+            }
+          }
+        };
+
+        // Poll for DOM elements before starting the progress bar updates
+        var startTimer = function() {
+          var bar = document.getElementById('structura-preload-bar');
+          var status = document.getElementById('structura-preload-status');
+          if (!bar || !status) {
+            setTimeout(startTimer, 100);
+            return;
+          }
+
+          interval = setInterval(function() {
+            if (width >= 90) {
+              clearInterval(interval);
+              return;
+            }
+            var step = (90 - width) * 0.08;
+            if (step < 0.2) step = 0.2;
+            width += step;
+            bar.style.width = width + '%';
+            
+            if (width < 30) {
+              status.innerText = 'Connecting to analysis environment...';
+            } else if (width < 65) {
+              status.innerText = 'Initializing R runtime and utilities...';
+            } else {
+              status.innerText = 'Loading structural equation engine (lavaan)...';
+            }
+          }, 150);
+        };
+
+        startTimer();
+      })();
+
       window.__hpcc_wasmFolder = 'hpcc-js';
 
       $(document).on('shiny:connected', function() {
@@ -640,33 +707,11 @@ server <- function(input, output, session) {
   # Dynamic Lazy Loader sequence triggered on Shiny session connection
   observeEvent(TRUE, {
     tryCatch({
-      # Step 1: Initial wait & status update
-      Sys.sleep(0.2)
-      runjs("document.getElementById('structura-preload-status').innerText = 'Initializing analysis runtime...';")
-      runjs("document.getElementById('structura-preload-bar').style.width = '30%';")
-      Sys.sleep(0.1)
-      
-      # Step 2: Load lavaan (only package we defer now, direct call to bypass WebR VFS bugs)
-      runjs("document.getElementById('structura-preload-status').innerText = 'Initializing structural equation engine (lavaan)...';")
-      runjs("document.getElementById('structura-preload-bar').style.width = '75%';")
-      Sys.sleep(0.1)
+      # Load lavaan (only package we defer now, direct call to bypass WebR VFS bugs)
       library(lavaan)
       
-      # Finalize UI transition
-      Sys.sleep(0.1)
-      runjs("document.getElementById('structura-preload-bar').style.width = '100%';")
-      Sys.sleep(0.1)
-      
-      # Smoothly hide preload splash panel and reveal app layout
-      runjs("
-        var container = document.getElementById('structura-preload-container');
-        if (container) {
-          container.style.opacity = '0';
-          setTimeout(function() {
-            container.style.display = 'none';
-          }, 500);
-        }
-      ")
+      # Complete the progress bar and transition out successfully
+      runjs("if (window.finishStructuraPreload) { window.finishStructuraPreload(true); } else { $('#structura-preload-container').hide(); }")
       shinyjs::show("structura-main-app")
       
       # Show the initial load data modal dialog after dependencies are loaded
@@ -687,8 +732,9 @@ server <- function(input, output, session) {
         )
       )
     }, error = function(e) {
-      runjs(sprintf("document.getElementById('structura-preload-status').innerText = 'Error loading application: %s';", e$message))
-      runjs("document.getElementById('structura-preload-bar').style.backgroundColor = '#ef4444';")
+      err_msg <- gsub("'", "\\'", e$message, fixed = TRUE)
+      err_msg <- gsub("\n", " ", err_msg, fixed = TRUE)
+      runjs(sprintf("if (window.finishStructuraPreload) { window.finishStructuraPreload(false, '%s'); }", err_msg))
       warning("Structura2 lazy loading failed: ", e$message)
     })
   }, once = TRUE)

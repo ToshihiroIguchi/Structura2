@@ -79,7 +79,7 @@ if (file.exists("www/favicon.ico")) {
   cat("Copied favicon.ico to site root\n")
 }
 
-# Update the HTML title and inject favicon.ico link in index.html
+# Update the HTML title and inject favicon.ico link & custom CSS in index.html
 index_html <- file.path(dest_dir, "index.html")
 if (file.exists(index_html)) {
   html_content <- readLines(index_html, warn = FALSE)
@@ -87,12 +87,45 @@ if (file.exists(index_html)) {
   # Update title (using case-insensitive regex for title tag to be robust)
   html_content <- gsub("<title>.*?</title>", "<title>Structura2</title>", html_content, ignore.case = TRUE)
   
-  # Inject favicon.ico before </head> (using more robust match for head closing tag)
-  favicon_tag <- '    <link rel="icon" type="image/x-icon" href="./favicon.ico" />\n  </head>'
-  html_content <- gsub("</head>", favicon_tag, html_content, ignore.case = TRUE)
+  # Inject favicon.ico and custom CSS overrides before </head>
+  custom_css <- paste0(
+    '    <link rel="icon" type="image/x-icon" href="./favicon.ico" />\n',
+    '    <style>\n',
+    '      body, html {\n',
+    '        background-color: #0f172a !important;\n',
+    '        color: #f8fafc !important;\n',
+    '      }\n',
+    '      #root {\n',
+    '        background-color: #0f172a !important;\n',
+    '      }\n',
+    '      .shinylive-loading, .loading-message, #shinylive-app-loading {\n',
+    '        background-color: #0f172a !important;\n',
+    '        color: #f8fafc !important;\n',
+    '      }\n',
+    '      .shinylive-spinner, .loading-spinner, .spinner {\n',
+    '        border-color: rgba(255, 255, 255, 0.1) !important;\n',
+    '        border-left-color: #3b82f6 !important;\n',
+    '      }\n',
+    '    </style>\n',
+    '  </head>'
+  )
+  html_content <- gsub("</head>", custom_css, html_content, ignore.case = TRUE)
+  
+  # Inject static splash screen inside <div id="root"></div>
+  static_splash <- paste0(
+    '    <div style="height: 100vh; width: 100vw; display: flex; flex-direction: column; justify-content: center; align-items: center; background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); color: white; font-family: system-ui, -apple-system, sans-serif;" id="root">\n',
+    '      <div style="border: 4px solid rgba(255,255,255,0.1); width: 50px; height: 50px; border-radius: 50%; border-left-color: #3b82f6; animation: structura-spin 1s linear infinite; margin-bottom: 24px;"></div>\n',
+    '      <h2 style="margin: 0; font-weight: 300; letter-spacing: 2px;">Structura2</h2>\n',
+    '      <p style="color: #94a3b8; margin-top: 12px; font-size: 14px;">Loading WebR Engine...</p>\n',
+    '      <style>\n',
+    '        @keyframes structura-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }\n',
+    '      </style>\n',
+    '    </div>'
+  )
+  html_content <- gsub('<div style="height: 100vh; width: 100vw" id="root"></div>', static_splash, html_content, fixed = TRUE)
   
   writeLines(html_content, index_html)
-  cat("Updated index.html title to 'Structura2' and injected favicon link\n")
+  cat("Updated index.html with Structura2 dark theme loader and favicon\n")
 }
 
 # Clean up temp directory
