@@ -9,14 +9,14 @@
 
 ## Description
 
-Structura2 is an interactive Shiny application for Structural Equation Modeling (SEM) in **R** ([r-project.org](https://www.r-project.org/?utm_source=chatgpt.com)), making it easy to upload data, specify models, and visualize results in a unified interface. It leverages the **lavaan** package for comprehensive latent variable analysis ([cran.r-project.org](https://cran.r-project.org/package%3Dlavaan?utm_source=chatgpt.com)).
+Structura2 is an interactive Shiny application for Structural Equation Modeling (SEM) in **R** ([r-project.org](https://www.r-project.org/)), making it easy to upload data, specify models, and visualize results in a unified interface. It leverages the **lavaan** package for comprehensive latent variable analysis ([cran.r-project.org](https://cran.r-project.org/package=lavaan)).
 
 ## Features
 
-* **Data Upload & Inspection**: Upload CSV files with automatic encoding handling via **readflex**.
+* **Data Upload & Inspection**: Upload CSV files with automatic encoding detection (UTF-8, Shift-JIS, etc.) handled directly in the browser.
 * **Log-transform**: Apply common logarithm (log10) to positive numeric columns.
 * **One-hot Encoding**: Convert categorical variables to dummy indicators for SEM compatibility.
-* **Model Specification**: Define measurement (`Latent =~ Indicators`) and structural (`Dependent ~ Predictors`) models in interactive Handsontable grids powered by **rhandsontable** and **DT** ([cran.r-project.org](https://cran.r-project.org/package%3Dshiny?utm_source=chatgpt.com), [shiny.posit.co](https://shiny.posit.co/?utm_source=chatgpt.com)).
+* **Model Specification**: Define measurement (`Latent =~ Indicators`) and structural (`Dependent ~ Predictors`) models in interactive Handsontable grids powered by **rhandsontable** and **DT** ([cran.r-project.org](https://cran.r-project.org/package=shiny), [shiny.posit.co](https://shiny.posit.co/)).
 * **SEM Fitting**: Fit models using **lavaan** with support for mean structures and detailed fit measures.
 * **Visualization**: Render path diagrams via browser-side **@hpcc-js/wasm**/**semDiagram**, and inspect correlation heatmaps using **rhandsontable**.
 * **Comprehensive Reporting**: View fit indices (p-value, SRMR, RMSEA, AIC, BIC, GFI, AGFI, NFI, CFI), parameter tables, and formatted equations in real time.
@@ -152,7 +152,7 @@ shiny::runGitHub(
 
 ## License
 
-Released under the **MIT License** © 2025 Toshihiro Iguchi.
+Released under the **MIT License** © 2025-2026 Toshihiro Iguchi.
 
 ## Author
 

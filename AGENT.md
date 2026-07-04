@@ -23,9 +23,7 @@ This rule applies without exception.
 
 ```
 Structura2/
-├── app.R              # Main Shiny application (UI + Server)
-├── global.R           # Global library loads and shared helpers
-├── utils.R            # Inlined functions from readflex & semDiagram packages
+├── app.R              # Main Shiny application (UI + Server with inlined semDiagram)
 ├── help.md            # User-facing help documentation
 ├── export_shinylive.R # Script to export the app as a static ShinyLive site
 ├── www/
@@ -49,8 +47,8 @@ Structura2/
 | `lavaan` | CRAN | SEM engine |
 | `@hpcc-js/wasm` | CDN / Local | Browser-side WebAssembly Graphviz path diagram rendering |
 | `markdown` | CRAN | Render help.md |
-| `readflex` | GitHub (inlined) | CSV reader with auto encoding detection |
-| `semDiagram` | GitHub (inlined) | SEM path diagram builder (outputs DOT format) |
+| (Browser JS) | Built-in | HTML5 FileReader and TextDecoder for auto encoding detection |
+| `semDiagram` | Inlined (app.R) | SEM path diagram builder (outputs DOT format) |
 
 ## WebR / ShinyLive Constraints
 
