@@ -1058,32 +1058,35 @@ server <- function(input, output, session) {
     r2_matrix <- matrix(0, nrow = length(dep_vars), ncol = length(pred_vars),
                         dimnames = list(dep_vars, pred_vars))
     
-    for (i in seq_along(dep_vars)) {
-      dep <- dep_vars[i]
-      if (is.numeric(data[[dep]])) {
-        for (j in seq_along(pred_vars)) {
-          pred <- pred_vars[j]
-          if (is.numeric(data[[pred]]) && dep != pred) {
-            tryCatch({
-              # Use pairwise correlation for better handling of missing data
-              correlation <- cor(data[[dep]], data[[pred]], 
-                               use = "pairwise.complete.obs")
-              # Handle NA or infinite correlation values
-              if (is.na(correlation) || !is.finite(correlation)) {
-                r2_matrix[i, j] <- 0
-              } else {
-                r2_val <- correlation^2
-                r2_matrix[i, j] <- ifelse(is.na(r2_val) || !is.finite(r2_val), 0, r2_val)
-              }
-            }, error = function(e) {
-              r2_matrix[i, j] <- 0
-            })
-          }
+    all_vars <- union(dep_vars, pred_vars)
+    available_vars <- intersect(all_vars, names(data))
+    numeric_vars <- available_vars[sapply(data[available_vars], is.numeric)]
+    
+    if (length(numeric_vars) > 1) {
+      tryCatch({
+        cor_matrix <- cor(data[numeric_vars], use = "pairwise.complete.obs")
+        r2_full <- cor_matrix^2
+        r2_full[!is.finite(r2_full)] <- 0
+        
+        dep_in <- intersect(dep_vars, numeric_vars)
+        pred_in <- intersect(pred_vars, numeric_vars)
+        if (length(dep_in) > 0 && length(pred_in) > 0) {
+          r2_matrix[dep_in, pred_in] <- r2_full[dep_in, pred_in]
         }
-      }
+      }, error = function(e) {
+        # Keep 0 on error
+      })
     }
+    diag(r2_matrix) <- 0
     r2_matrix
   }
+
+  cached_r2_matrix <- reactive({
+    df <- processed_data(); req(df)
+    items <- model_items()
+    if (!length(items)) return(NULL)
+    compute_r2_matrix(df, items, items)
+  })
 
   # ---------- Structural table -----------------------------------
 
@@ -1142,62 +1145,46 @@ server <- function(input, output, session) {
       items <- mat$Dependent
       if (!length(items)) return()
       
-      # Compute R² matrix for color coding
-      r2_matrix <- compute_r2_matrix(df, items, items)
+      # Use cached R2 matrix, preventing recalculations on checkbox click
+      r2_matrix <- cached_r2_matrix(); req(r2_matrix)
       
       rh <- rhandsontable(mat, rowHeaders = FALSE) %>%
         hot_table(highlightReadOnly = TRUE, fixedColumnsLeft = 2)
       rh <- hot_col(rh, "Dependent", readOnly = TRUE)
       rh <- hot_col(rh, "Operator",  readOnly = TRUE)
-    
-      # Set diagonal cells as readOnly before applying renderers
-      for (i in seq_along(items)) {
-        diag_col_index <- match(items[i], colnames(mat))
-        if (!is.na(diag_col_index)) {
-          rh <- hot_cell(rh, row = i, col = diag_col_index, readOnly = TRUE)
-        }
-      }
       
-      # Apply color coding using custom renderer for each checkbox column
-      for (col_name in items) {
-        r2_colors <- sapply(seq_along(items), function(row_idx) {
-          dep_var <- items[row_idx]
-          if (dep_var == col_name) {
-            return("#FFFFFF")
+      # Store R2 matrix once in the widget payload
+      rh$x$r2_matrix <- r2_matrix
+      
+      # Define static JS renderer referencing the shared R2 matrix
+      # (Note: Col index offset is -2 because 'Dependent' and 'Operator' columns are on the left)
+      renderer_js <- "
+        function(instance, td, row, col, prop, value, cellProperties) {
+          Handsontable.renderers.CheckboxRenderer.apply(this, arguments);
+          var params = instance.params || instance.getSettings();
+          var r2_matrix = params.r2_matrix;
+          var col_var_idx = col - 2;
+          
+          if (r2_matrix && col_var_idx >= 0 && col_var_idx < r2_matrix.length) {
+            var r2_val = r2_matrix[row][col_var_idx];
+            if (r2_val !== undefined && r2_val !== null && r2_val > 0) {
+              var red_intensity = Math.min(1, r2_val);
+              var r = 255;
+              var g = Math.round(255 - red_intensity * 0.7 * 255);
+              var b = Math.round(255 - red_intensity * 0.7 * 255);
+              td.style.backgroundColor = 'rgb(' + r + ',' + g + ',' + b + ')';
+            }
           }
           
-          r2_val <- tryCatch({
-            if (dep_var %in% rownames(r2_matrix) && col_name %in% colnames(r2_matrix)) {
-              val <- r2_matrix[dep_var, col_name]
-              if (is.na(val) || !is.finite(val)) 0 else val
-            } else {
-              0
-            }
-          }, error = function(e) 0)
-          
-          r2_val <- ifelse(is.na(r2_val) || !is.finite(r2_val), 0, r2_val)
-          red_intensity <- min(1, max(0, r2_val))
-          rgb(1, 1 - red_intensity * 0.7, 1 - red_intensity * 0.7)
-        })
-        
-        colors_js <- paste0("['", paste(r2_colors, collapse = "','"), "']")
-        diag_row <- match(col_name, items) - 1
-        
-        renderer_js <- paste0("
-          function(instance, td, row, col, prop, value, cellProperties) {
-            Handsontable.renderers.CheckboxRenderer.apply(this, arguments);
-            var colors = ", colors_js, ";
-            if (colors[row]) {
-              td.style.backgroundColor = colors[row];
-            }
-            if (row === ", diag_row, ") {
-              cellProperties.readOnly = true;
-              td.style.backgroundColor = '#f0f0f0';
-              td.style.cursor = 'not-allowed';
-              td.classList.add('htDimmed');
-            }
-          }")
-        
+          if (row === col_var_idx) {
+            cellProperties.readOnly = true;
+            td.style.backgroundColor = '#f0f0f0';
+            td.style.cursor = 'not-allowed';
+            td.classList.add('htDimmed');
+          }
+        }"
+      
+      for (col_name in items) {
         rh <- hot_col(rh, col_name, type = "checkbox", renderer = renderer_js)
       }
       rh

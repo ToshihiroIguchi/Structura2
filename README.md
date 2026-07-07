@@ -33,7 +33,7 @@ Structura2 is an interactive Shiny application for Structural Equation Modeling 
 
 ## Launch Application
 
-There are several ways to launch and run **Structura2**, depending on whether you want to run it online, locally via standard Shiny, or as a compiled static site.
+There are several ways to launch and run **Structura2**, depending on whether you want to run it online, locally via standard Shiny, or directly from GitHub.
 
 ### Option 1: Live Demo (No Setup Required)
 
@@ -42,9 +42,22 @@ Simply access the application online via GitHub Pages:
 
 This version is compiled into WebAssembly using ShinyLive and runs entirely inside your web browser. You do not need to install R or any libraries.
 
-### Option 2: Run Locally (Traditional Shiny App)
+### Option 2: Launch Directly from GitHub (Recommended for Quick Local Runs)
 
-To run the traditional Shiny application locally, you need [R](https://www.r-project.org/) installed.
+You can launch **Structura2** instantly from your R console without manually cloning or downloading the repository.
+
+1. **Install Dependencies**: Open R or RStudio and run the following command to install the required packages:
+   ```r
+   install.packages(c("shiny", "shinyjs", "DT", "rhandsontable", "lavaan", "markdown"))
+   ```
+2. **Run the App**: Execute the following command in your R console:
+   ```r
+   shiny::runGitHub("Structura2", "ToshihiroIguchi", ref = "main")
+   ```
+
+### Option 3: Run Locally (Traditional Shiny App)
+
+To run the traditional Shiny application locally using cloned files, you need [R](https://www.r-project.org/) installed.
 
 1. **Install Dependencies**: Open R or RStudio and run the following command to install the required packages:
    ```r
@@ -56,7 +69,7 @@ To run the traditional Shiny application locally, you need [R](https://www.r-pro
    ```
    The app will open in your default browser (usually at `http://127.0.0.1:xxxx`).
 
-### Option 3: Compile and Serve Static Site Locally (ShinyLive WebAssembly)
+### Option 4: Compile and Serve Static Site Locally (ShinyLive WebAssembly)
 
 You can compile the app to a static site and serve it using a local web server.
 
@@ -80,7 +93,7 @@ You can compile the app to a static site and serve it using a local web server.
      ```
 4. **Access the App**: Open your web browser and navigate to `http://localhost:8000`.
 
-### Option 4: Hosting and Sharing Across LAN (Traditional Shiny)
+### Option 5: Hosting the Shiny App Directly from GitHub (Sharing Across LAN)
 
 You can launch **Structura2** directly from its GitHub repository as a traditional Shiny application (not ShinyLive) and make it accessible across your LAN. This requires a local installation of R.
 This script automatically detects your host's IPv4 address and configures Shiny's host/port options so other devices on your local network can connect.

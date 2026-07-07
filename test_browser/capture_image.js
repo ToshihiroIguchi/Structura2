@@ -78,8 +78,8 @@ async function capture() {
 
   console.log('Waiting for shinylive iframe...');
   await page.waitForSelector('iframe', { timeout: 30000 });
-  const iframeElement = await page.$('iframe');
-  const frame = await iframeElement.contentFrame();
+  const appFrame = await page.$('iframe');
+  const frame = await appFrame.contentFrame();
   if (!frame) throw new Error('Could not get iframe contentFrame');
 
   console.log('Waiting for startup modal inside iframe...');
@@ -93,6 +93,10 @@ async function capture() {
 
   console.log('Waiting for datatable to load...');
   await frame.waitForSelector('#datatable', { timeout: 30000 });
+  
+  console.log('Taking SS1: Data Loaded...');
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  await appFrame.screenshot({ path: path.join(__dirname, '01_data_loaded.png') });
   
   console.log('Switching to Model tab...');
   await frame.evaluate(() => {
@@ -148,31 +152,47 @@ async function capture() {
       
       // Blur to ensure Handsontable registers and sends changes to Shiny
       document.body.click();
-      
-      // 2. Wait for Structural Model to update and include "LatentVariable1"
-      console.log('Waiting for LatentVariable1 to appear in structural model headers...');
+      return true;
+    } catch (e) {
+      console.error('Error in setupModel evaluation:', e.message);
+      return false;
+    }
+  });
+
+  if (!setupSuccess) {
+    throw new Error('Failed to set up measurement model checkbox structure.');
+  }
+
+  // 2. Wait for Structural Model to update and include "LatentVariable1"
+  console.log('Waiting for LatentVariable1 to appear in structural model headers...');
+  const latentFound = await frame.evaluate(async () => {
+    const structTable = document.querySelector('#checkbox_matrix');
+    if (!structTable) return false;
+    for (let i = 0; i < 20; i++) {
+      const structHeaders = Array.from(structTable.querySelectorAll('.ht_clone_top thead th')).map(th => th.innerText.trim());
+      if (structHeaders.includes('LatentVariable1')) {
+        return true;
+      }
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    return false;
+  });
+
+  if (!latentFound) {
+    throw new Error('LatentVariable1 did not appear in structural model headers.');
+  }
+  
+  console.log('Taking SS2: Model Initial...');
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  await appFrame.screenshot({ path: path.join(__dirname, '02_model_initial.png') });
+
+  console.log('Configuring structural paths...');
+  const structSuccess = await frame.evaluate(async () => {
+    try {
       const structTable = document.querySelector('#checkbox_matrix');
-      if (!structTable) throw new Error('Structural table (#checkbox_matrix) not found');
-      
-      let latentFound = false;
-      let structHeaders = [];
-      
-      for (let i = 0; i < 20; i++) { // Poll for up to 10 seconds (20 * 500ms)
-        structHeaders = Array.from(structTable.querySelectorAll('.ht_clone_top thead th')).map(th => th.innerText.trim());
-        if (structHeaders.includes('LatentVariable1')) {
-          latentFound = true;
-          break;
-        }
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
-      
-      if (!latentFound) {
-        throw new Error('LatentVariable1 did not appear in structural model headers. Available headers: ' + JSON.stringify(structHeaders));
-      }
-      
-      console.log('LatentVariable1 appeared in structural model headers!');
-      
+      const structHeaders = Array.from(structTable.querySelectorAll('.ht_clone_top thead th')).map(th => th.innerText.trim());
       const structRows = Array.from(structTable.querySelectorAll('.ht_master tbody tr'));
+      
       const x4Row = structRows.find(row => {
         const firstCell = row.querySelector('td');
         return firstCell && firstCell.innerText.trim() === 'x4';
@@ -181,13 +201,9 @@ async function capture() {
       if (!x4Row) throw new Error('Row x4 not found in structural model');
       const structTds = x4Row.querySelectorAll('td');
       
-      console.log('structHeaders raw:', JSON.stringify(structHeaders));
-      console.log('structTds count:', structTds.length);
-      
       let dataStructHeaders = structHeaders;
       if (structHeaders.length > structTds.length) {
         dataStructHeaders = structHeaders.slice(structHeaders.length - structTds.length);
-        console.log('structHeaders sliced to match tds:', JSON.stringify(dataStructHeaders));
       }
       
       const x7_idx = dataStructHeaders.indexOf('x7');
@@ -196,7 +212,7 @@ async function capture() {
       const latent_idx = dataStructHeaders.indexOf('LatentVariable1');
       
       if (x7_idx === -1 || x8_idx === -1 || x9_idx === -1 || latent_idx === -1) {
-        throw new Error('Target columns not found in structural model headers: ' + JSON.stringify(dataStructHeaders));
+        throw new Error('Target columns not found in structural model headers');
       }
       
       structTds[x7_idx].querySelector('input[type="checkbox"]').click();
@@ -206,14 +222,18 @@ async function capture() {
       
       return true;
     } catch (e) {
-      console.error('Error in setupModel evaluation:', e.message);
+      console.error('Error configuring structural paths:', e.message);
       return false;
     }
   });
 
-  if (!setupSuccess) {
-    throw new Error('Failed to set up model checkbox structure.');
+  if (!structSuccess) {
+    throw new Error('Failed to configure structural paths.');
   }
+
+  console.log('Taking SS3: Structural Interactions...');
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  await appFrame.screenshot({ path: path.join(__dirname, '03_structural_interactions.png') });
 
   console.log('Model structure configured. Clicking Run / Update Model...');
   await frame.evaluate(() => {
@@ -227,11 +247,12 @@ async function capture() {
   // Extra wait for layout and rendering stabilization
   await new Promise(resolve => setTimeout(resolve, 2000));
 
-  console.log('Taking high-quality screenshot...');
-  const appFrame = await page.$('iframe');
+  console.log('Taking SS4: Model Execution...');
+  await appFrame.screenshot({ path: path.join(__dirname, '04_model_execution.png') });
+  
+  // Also save to default image.png at root for backward compatibility
   await appFrame.screenshot({ path: path.join(__dirname, '..', 'image.png') });
   
-  console.log('Screenshot captured and saved to image.png!');
-  
+  console.log('All screenshots captured successfully!');
   await browser.close();
 }
