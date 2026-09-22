@@ -328,7 +328,8 @@ sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, 
                                 needs_meanstructure = FALSE, strategy = c("adaptive", "exhaustive", "sa", "ga"),
                                 max_exhaustive_comb = 1024, sa_ga_threshold = 20,
                                 sa_max_iter = 200, sa_alpha = 0.90,
-                                ga_pop_size = 20, ga_max_gen = 15, ga_pmut = 0.10) {
+                                ga_pop_size = 20, ga_max_gen = 15, ga_pmut = 0.10,
+                                progress_cb = NULL) {
   criterion <- match.arg(criterion)
   strategy  <- match.arg(strategy)
   
@@ -478,7 +479,14 @@ sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, 
 
   if (eff_strategy == "exhaustive") {
     grid <- expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE))
-    for (row_i in seq_len(nrow(grid))) {
+    total_grid_rows <- nrow(grid)
+    for (row_i in seq_len(total_grid_rows)) {
+      if (!is.null(progress_cb)) {
+        progress_cb(
+          val = row_i / total_grid_rows,
+          detail = sprintf("Exhaustive: %d / %d candidates evaluated (%.0f%%)", row_i, total_grid_rows, (row_i / total_grid_rows) * 100)
+        )
+      }
       state <- as.logical(grid[row_i, ])
       test_s_df <- struct_df
       removed_paths_vec <- c()
@@ -502,6 +510,12 @@ sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, 
     
     T_val <- 10.0
     for (iter in seq_len(sa_max_iter)) {
+      if (!is.null(progress_cb)) {
+        progress_cb(
+          val = iter / sa_max_iter,
+          detail = sprintf("Simulated Annealing: Iteration %d / %d (Temp: %.2f)", iter, sa_max_iter, T_val)
+        )
+      }
       flip_pos <- sample.int(M, 1)
       cand_vec <- curr_vec
       cand_vec[flip_pos] <- !cand_vec[flip_pos]
@@ -569,6 +583,12 @@ sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, 
     }
 
     for (gen in seq_len(ga_max_gen)) {
+      if (!is.null(progress_cb)) {
+        progress_cb(
+          val = gen / ga_max_gen,
+          detail = sprintf("Genetic Algorithm: Generation %d / %d", gen, ga_max_gen)
+        )
+      }
       scores <- apply(pop, 1, evaluate_chrom)
       
       best_idx <- which.min(scores)
@@ -1962,8 +1982,6 @@ server <- function(input, output, session) {
   observeEvent(input$run_prune_explore, {
     removeModal() # Close Modal 1
     
-    showNotification("Running automated structural optimization...", type = "message", duration = 3)
-    
     base_model <- get_or_fit_baseline_model()
     if (!isTRUE(base_model$ok)) {
       showModal(modalDialog(
@@ -1993,25 +2011,30 @@ server <- function(input, output, session) {
                             input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
 
     res <- tryCatch({
-      sem_optimize_hybrid(
-        base_fit            = base_model$fit,
-        data                = processed_data(),
-        meas_lines          = mlines,
-        struct_df           = struct_table_data(),
-        lock_df             = prune_lock_table_data(),
-        extra_lines         = extra,
-        criterion           = input$prune_criterion,
-        missing_method      = input$missing_method,
-        needs_meanstructure = needs_meanstructure,
-        strategy            = input$prune_strategy,
-        max_exhaustive_comb = input$max_exhaustive_comb %||% 1024,
-        sa_ga_threshold     = input$sa_ga_threshold %||% 20,
-        sa_max_iter         = input$sa_max_iter %||% 200,
-        sa_alpha            = input$sa_alpha %||% 0.90,
-        ga_pop_size         = input$ga_pop_size %||% 20,
-        ga_max_gen          = input$ga_max_gen %||% 15,
-        ga_pmut             = input$ga_pmut %||% 0.10
-      )
+      withProgress(message = "Auto-Optimize Model in Progress", value = 0, {
+        sem_optimize_hybrid(
+          base_fit            = base_model$fit,
+          data                = processed_data(),
+          meas_lines          = mlines,
+          struct_df           = struct_table_data(),
+          lock_df             = prune_lock_table_data(),
+          extra_lines         = extra,
+          criterion           = input$prune_criterion,
+          missing_method      = input$missing_method,
+          needs_meanstructure = needs_meanstructure,
+          strategy            = input$prune_strategy,
+          max_exhaustive_comb = input$max_exhaustive_comb %||% 1024,
+          sa_ga_threshold     = input$sa_ga_threshold %||% 20,
+          sa_max_iter         = input$sa_max_iter %||% 200,
+          sa_alpha            = input$sa_alpha %||% 0.90,
+          ga_pop_size         = input$ga_pop_size %||% 20,
+          ga_max_gen          = input$ga_max_gen %||% 15,
+          ga_pmut             = input$ga_pmut %||% 0.10,
+          progress_cb         = function(val, detail) {
+            setProgress(value = val, detail = detail)
+          }
+        )
+      })
     }, error = function(e) {
       list(candidates = list(), message = paste("Optimization error:", e$message))
     })
