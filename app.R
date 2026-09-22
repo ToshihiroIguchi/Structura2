@@ -320,6 +320,307 @@ lavaan_to_equations <- function(fit, digits = 3) {
 
 
 
+# ---- Helper: Multi-Algorithm Model Optimization Engine ---------------------------
+# Evaluates candidate path-pruned models using Exhaustive Search, Simulated Annealing (SA),
+# Genetic Algorithm (GA), or Adaptive Auto-Switch without artificial p-value pre-filtering.
+sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, extra_lines = character(0),
+                                criterion = c("AIC", "BIC"), missing_method = "listwise",
+                                needs_meanstructure = FALSE, strategy = c("adaptive", "exhaustive", "sa", "ga"),
+                                max_exhaustive_comb = 1024,
+                                sa_max_iter = 200, sa_alpha = 0.90,
+                                ga_pop_size = 20, ga_max_gen = 15, ga_pmut = 0.10) {
+  criterion <- match.arg(criterion)
+  strategy  <- match.arg(strategy)
+  
+  if (is.null(base_fit) || !isTRUE(lavaan::lavInspect(base_fit, "converged"))) {
+    stop("The baseline model must be successfully fitted before optimization.")
+  }
+  
+  base_ms <- lavaan::fitMeasures(base_fit, c("aic", "bic", "cfi", "rmsea", "srmr", "pvalue"))
+  base_score <- if (criterion == "AIC") base_ms["aic"] else base_ms["bic"]
+  
+  pred_cols <- names(struct_df)[3:ncol(struct_df)]
+  active_paths <- list()
+  
+  for (i in seq_len(nrow(struct_df))) {
+    dep <- struct_df$Dependent[i]
+    if (!nzchar(dep)) next
+    for (p in pred_cols) {
+      if (isTRUE(as.logical(struct_df[i, p]))) {
+        is_locked <- FALSE
+        if (!is.null(lock_df) && p %in% names(lock_df) && i <= nrow(lock_df)) {
+          is_locked <- isTRUE(as.logical(lock_df[i, p]))
+        }
+        active_paths[[length(active_paths) + 1]] <- list(
+          dep = dep, pred = p, locked = is_locked
+        )
+      }
+    }
+  }
+  
+  removable_paths <- Filter(function(x) !x$locked, active_paths)
+  M <- length(removable_paths)
+  
+  if (M == 0) {
+    return(list(
+      candidates = list(),
+      message = "No unlocked structural paths available for optimization. All active paths are locked."
+    ))
+  }
+
+  fit_candidate <- function(curr_struct_df) {
+    slines <- lapply(seq_len(nrow(curr_struct_df)), function(i) {
+      dp <- curr_struct_df$Dependent[i]
+      if (!nzchar(dp)) return(NULL)
+      preds <- names(curr_struct_df)[3:ncol(curr_struct_df)]
+      ps <- preds[as.logical(curr_struct_df[i, preds])]
+      if (!length(ps)) return(NULL)
+      paste0(dp, " ~ ", paste(ps, collapse = " + "))
+    })
+    all_syntax <- unlist(c(meas_lines, slines, extra_lines))
+    if (!length(all_syntax)) return(NULL)
+    
+    tryCatch({
+      lavaan::sem(paste(all_syntax, collapse = "\n"),
+                  data          = data,
+                  missing       = missing_method,
+                  fixed.x       = FALSE,
+                  parser        = "old",
+                  meanstructure = needs_meanstructure,
+                  ncpus         = 1L)
+    }, error = function(e) NULL)
+  }
+
+  build_candidate_record <- function(curr_s_df, removed_str) {
+    fm <- fit_candidate(curr_s_df)
+    if (is.null(fm) || !lavaan::lavInspect(fm, "converged")) {
+      return(list(
+        removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
+        struct_df = curr_s_df,
+        fit = NULL,
+        aic = NA_real_, bic = NA_real_, delta_aic = NA_real_, delta_bic = NA_real_,
+        cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
+        converged = FALSE,
+        status = "[Non-converged]"
+      ))
+    }
+    
+    ms <- lavaan::fitMeasures(fm, c("aic", "bic", "cfi", "rmsea", "srmr"))
+    c_aic <- as.numeric(ms["aic"])
+    c_bic <- as.numeric(ms["bic"])
+    d_aic <- c_aic - base_ms["aic"]
+    d_bic <- c_bic - base_ms["bic"]
+    c_cfi <- as.numeric(ms["cfi"])
+    c_rmsea <- as.numeric(ms["rmsea"])
+    c_srmr <- as.numeric(ms["srmr"])
+    
+    stat <- "[Good]"
+    if ((criterion == "AIC" && d_aic < -0.01) || (criterion == "BIC" && d_bic < -0.01)) {
+      stat <- "[Improved]"
+    }
+    if ((!is.na(c_cfi) && c_cfi < 0.90) || (!is.na(c_rmsea) && c_rmsea > 0.08) || (!is.na(c_srmr) && c_srmr > 0.08)) {
+      stat <- "[Degraded Fit]"
+    }
+    
+    list(
+      removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
+      struct_df = curr_s_df,
+      fit = fm,
+      aic = c_aic, bic = c_bic,
+      delta_aic = d_aic, delta_bic = d_bic,
+      cfi = c_cfi, rmsea = c_rmsea, srmr = c_srmr,
+      converged = TRUE,
+      status = stat
+    )
+  }
+
+  total_comb <- 2^M
+  
+  eff_strategy <- strategy
+  if (strategy == "adaptive") {
+    if (total_comb <= max_exhaustive_comb) {
+      eff_strategy <- "exhaustive"
+    } else if (M <= 20) {
+      eff_strategy <- "sa"
+    } else {
+      eff_strategy <- "ga"
+    }
+  }
+
+  candidates_map <- list()
+  
+  make_key <- function(s_df) {
+    lines <- c()
+    for (i in seq_len(nrow(s_df))) {
+      dp <- s_df$Dependent[i]
+      ps <- pred_cols[as.logical(s_df[i, pred_cols])]
+      if (length(ps)) lines <- c(lines, paste0(dp, "~", paste(sort(ps), collapse = ",")))
+    }
+    paste(sort(lines), collapse = ";")
+  }
+
+  base_key <- make_key(struct_df)
+  candidates_map[[base_key]] <- list(
+    removed_str = "None (Baseline Model)",
+    struct_df = struct_df,
+    fit = base_fit,
+    aic = as.numeric(base_ms["aic"]),
+    bic = as.numeric(base_ms["bic"]),
+    delta_aic = 0.0,
+    delta_bic = 0.0,
+    cfi = as.numeric(base_ms["cfi"]),
+    rmsea = as.numeric(base_ms["rmsea"]),
+    srmr = as.numeric(base_ms["srmr"]),
+    converged = TRUE,
+    status = "[Baseline]"
+  )
+
+  if (eff_strategy == "exhaustive") {
+    grid <- expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE))
+    for (row_i in seq_len(nrow(grid))) {
+      state <- as.logical(grid[row_i, ])
+      test_s_df <- struct_df
+      removed_paths_vec <- c()
+      for (idx in seq_along(removable_paths)) {
+        rp <- removable_paths[[idx]]
+        keep <- state[idx]
+        if (!keep) {
+          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+          removed_paths_vec <- c(removed_paths_vec, paste0(rp$dep, " ~ ", rp$pred))
+        }
+      }
+      k_str <- make_key(test_s_df)
+      if (!k_str %in% names(candidates_map)) {
+        rem_label <- paste(removed_paths_vec, collapse = "; ")
+        candidates_map[[k_str]] <- build_candidate_record(test_s_df, rem_label)
+      }
+    }
+  } else if (eff_strategy == "sa") {
+    curr_vec <- rep(TRUE, M)
+    curr_df <- struct_df
+    
+    T_val <- 10.0
+    for (iter in seq_len(sa_max_iter)) {
+      flip_pos <- sample.int(M, 1)
+      cand_vec <- curr_vec
+      cand_vec[flip_pos] <- !cand_vec[flip_pos]
+      
+      test_s_df <- struct_df
+      rem_vec <- c()
+      for (idx in seq_along(removable_paths)) {
+        rp <- removable_paths[[idx]]
+        if (!cand_vec[idx]) {
+          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+          rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
+        }
+      }
+      
+      k_str <- make_key(test_s_df)
+      if (!k_str %in% names(candidates_map)) {
+        rem_label <- paste(rem_vec, collapse = "; ")
+        candidates_map[[k_str]] <- build_candidate_record(test_s_df, rem_label)
+      }
+      
+      c_rec <- candidates_map[[k_str]]
+      curr_rec <- candidates_map[[make_key(curr_df)]]
+      
+      if (c_rec$converged) {
+        c_score <- if (criterion == "AIC") c_rec$aic else c_rec$bic
+        curr_score <- if (!is.null(curr_rec) && curr_rec$converged) {
+          if (criterion == "AIC") curr_rec$aic else curr_rec$bic
+        } else Inf
+        
+        dE <- c_score - curr_score
+        if (dE < 0 || runif(1) < exp(-dE / T_val)) {
+          curr_vec <- cand_vec
+          curr_df <- test_s_df
+        }
+      }
+      T_val <- T_val * sa_alpha
+    }
+  } else if (eff_strategy == "ga") {
+    pop <- matrix(sample(c(TRUE, FALSE), ga_pop_size * M, replace = TRUE),
+                  nrow = ga_pop_size, ncol = M)
+    pop[1, ] <- TRUE
+    
+    evaluate_chrom <- function(chrom_vec) {
+      test_s_df <- struct_df
+      rem_vec <- c()
+      for (idx in seq_along(removable_paths)) {
+        rp <- removable_paths[[idx]]
+        if (!chrom_vec[idx]) {
+          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+          rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
+        }
+      }
+      k_str <- make_key(test_s_df)
+      if (!k_str %in% names(candidates_map)) {
+        rem_label <- paste(rem_vec, collapse = "; ")
+        candidates_map[[k_str]] <<- build_candidate_record(test_s_df, rem_label)
+      }
+      rec <- candidates_map[[k_str]]
+      if (!rec$converged) return(Inf)
+      if (criterion == "AIC") rec$aic else rec$bic
+    }
+
+    for (gen in seq_len(ga_max_gen)) {
+      scores <- apply(pop, 1, evaluate_chrom)
+      
+      best_idx <- which.min(scores)
+      best_chrom <- pop[best_idx, ]
+      
+      new_pop <- pop
+      new_pop[1, ] <- best_chrom
+      
+      for (p in seq(2, ga_pop_size, by = 2)) {
+        i1 <- sample.int(ga_pop_size, 2); parent1 <- pop[i1[which.min(scores[i1])], ]
+        i2 <- sample.int(ga_pop_size, 2); parent2 <- pop[i2[which.min(scores[i2])], ]
+        
+        if (M > 1 && runif(1) < 0.80) {
+          x_pt <- sample.int(M - 1, 1)
+          child1 <- c(parent1[1:x_pt], parent2[(x_pt + 1):M])
+          child2 <- c(parent2[1:x_pt], parent1[(x_pt + 1):M])
+        } else {
+          child1 <- parent1
+          child2 <- parent2
+        }
+        
+        mut1 <- runif(M) < ga_pmut; child1[mut1] <- !child1[mut1]
+        mut2 <- runif(M) < ga_pmut; child2[mut2] <- !child2[mut2]
+        
+        new_pop[p, ] <- child1
+        if (p + 1 <= ga_pop_size) new_pop[p + 1, ] <- child2
+      }
+      pop <- new_pop
+    }
+  }
+
+  candidates_list <- unname(candidates_map)
+  
+  scores <- vapply(candidates_list, function(x) {
+    if (!x$converged) return(Inf)
+    if (criterion == "AIC") x$aic else x$bic
+  }, numeric(1))
+  
+  ord <- order(scores, decreasing = FALSE)
+  sorted_candidates <- candidates_list[ord]
+  
+  if (length(sorted_candidates) > 0 && sorted_candidates[[1]]$converged && sorted_candidates[[1]]$status != "[Baseline]") {
+    sorted_candidates[[1]]$status <- "[Optimal]"
+  }
+  
+  list(
+    candidates = sorted_candidates,
+    criterion = criterion,
+    strategy_used = eff_strategy,
+    message = "Success"
+  )
+}
+
+
+
+
+
 # ================================================================
 # UI
 # ================================================================
@@ -489,6 +790,45 @@ ui <- fluidPage(
             container.innerHTML = '<div style=\"color:red; padding:10px;\">Graphviz library not loaded.</div>';
           }
         });
+
+        Shiny.addCustomMessageHandler('update_prune_preview_plot', function(message) {
+          var container = document.getElementById('prune_preview_container');
+          if (!container) return;
+          
+          if (message.message) {
+            container.style.display = 'flex';
+            container.style.alignItems = 'center';
+            container.style.justifyContent = 'center';
+            if (message.error) {
+              container.innerHTML = '<div style=\"color:red; padding:10px; text-align:center;\">' + message.message + '</div>';
+            } else {
+              container.innerHTML = '<div style=\"color:#666; padding:10px; text-align:center;\">' + message.message + '</div>';
+            }
+            return;
+          }
+          
+          container.style.display = 'block';
+          var hpccWasm = window['@hpcc-js/wasm/graphviz'];
+          if (hpccWasm && hpccWasm.Graphviz) {
+            hpccWasm.Graphviz.load().then(function(graphviz) {
+              try {
+                var svg = graphviz.layout(message.dot, 'svg', message.engine);
+                container.innerHTML = svg;
+                var svgElement = container.querySelector('svg');
+                if (svgElement) {
+                  svgElement.setAttribute('width', '100%');
+                  svgElement.setAttribute('height', '100%');
+                }
+              } catch (err) {
+                container.innerHTML = '<div style=\"color:red; padding:10px;\">Layout failed: ' + err.message + '</div>';
+              }
+            }).catch(function(err) {
+              container.innerHTML = '<div style=\"color:red; padding:10px;\">Failed to load Graphviz WASM: ' + err.message + '</div>';
+            });
+          } else {
+            container.innerHTML = '<div style=\"color:red; padding:10px;\">Graphviz library not loaded.</div>';
+          }
+        });
       });
 
       $(document).on('shiny:visualchange', function(event) {
@@ -604,9 +944,13 @@ ui <- fluidPage(
                         checkboxInput("diagram_std",
                                       "Show standardized coefficients in diagram",
                                       value = TRUE)),
-                      # -------------- Run button -------------------
-                      actionButton("run_model", "Run / Update Model",
-                                   class = "btn btn-success"),
+                       # -------------- Run & Auto-Optimize buttons -------------------
+                       div(style = "display: flex; gap: 10px; align-items: center; margin-bottom: 10px;",
+                           actionButton("run_model", "Run / Update Model",
+                                        class = "btn btn-success"),
+                           actionButton("prune_model_btn", "Auto-Optimize Model", icon = icon("cogs"),
+                                        class = "btn btn-info")
+                       ),
                       shinyjs::hidden(
                         div(id = "latent_error_box",
                             class = "alert alert-danger",
@@ -1138,6 +1482,7 @@ server <- function(input, output, session) {
   })
 
   output$checkbox_matrix <- renderRHandsontable({
+    struct_table_trigger()
     tryCatch({
       df <- processed_data(); req(df)
       meas <- input_table_data(); req(meas)
@@ -1389,6 +1734,361 @@ server <- function(input, output, session) {
       dot = dot_code,
       engine = eng
     ))
+  })
+
+  # ----------------- Auto-Optimize Model Server Observers ---------------
+  struct_table_trigger <- reactiveVal(0)
+  prune_lock_table_data <- reactiveVal(NULL)
+  prune_results <- reactiveVal(NULL)
+  selected_prune_cand <- reactiveVal(NULL)
+
+  # Trigger Auto-Optimize Step 1 Modal
+  observeEvent(input$prune_model_btn, {
+    base_model <- fit_model_safe()
+    if (!isTRUE(base_model$ok)) {
+      showModal(modalDialog(
+        title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
+        div(class = "alert alert-warning",
+            "Please define and fit a valid baseline model before running Auto-Optimize."),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+      return()
+    }
+
+    struct_df <- isolate(struct_table_data())
+    if (is.null(struct_df) || nrow(struct_df) == 0) {
+      showModal(modalDialog(
+        title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
+        div(class = "alert alert-warning",
+            "No structural model defined. Please set up structural paths first."),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+      return()
+    }
+
+    # Initialize lock table data (FALSE = unlocked by default)
+    lock_df <- struct_df
+    pred_cols <- names(struct_df)[3:ncol(struct_df)]
+    for (col in pred_cols) {
+      lock_df[[col]] <- FALSE
+    }
+    prune_lock_table_data(lock_df)
+
+    showModal(modalDialog(
+      title = span(icon("cogs"), "Auto-Optimize Model: Step 1 - Strategy, Parameters & Path Locking"),
+      size = "l",
+      div(
+        style = "padding: 10px;",
+        p("Select structural paths to ", tags$b("LOCK [x] (protect from pruning)"), "."),
+        p("Highlighted cells represent active paths in your current model. Unchecked active paths will be evaluated for optimization.",
+          style = "font-size: 13px; color: #555;"),
+        rHandsontableOutput("prune_lock_table"),
+        tags$hr(),
+        fluidRow(
+          column(width = 6,
+                 radioButtons("prune_criterion", "Optimization Criterion:",
+                              choices = c("AIC (Predictive Accuracy / Balanced)" = "AIC",
+                                          "BIC (Stronger Sparsity Penalty)" = "BIC"),
+                              selected = "AIC")
+          ),
+          column(width = 6,
+                 radioButtons("prune_strategy", "Search Algorithm Strategy:",
+                              choices = c("Adaptive Auto-Switch (Recommended)" = "adaptive",
+                                          "Exhaustive Search (100% Exact All-Subset)" = "exhaustive",
+                                          "Simulated Annealing (SA - Fast Trajectory Search)" = "sa",
+                                          "Genetic Algorithm (GA - Evolutionary Search)" = "ga"),
+                              selected = "adaptive")
+          )
+        ),
+        tags$hr(),
+        h5(icon("sliders-h"), " Algorithm Hyper-Parameters:"),
+        conditionalPanel(
+          condition = "input.prune_strategy == 'adaptive' || input.prune_strategy == 'exhaustive'",
+          numericInput("max_exhaustive_comb", "Exhaustive Search Max Combinations Threshold:",
+                       value = 1024, min = 64, max = 8192, step = 64)
+        ),
+        conditionalPanel(
+          condition = "input.prune_strategy == 'sa' || (input.prune_strategy == 'adaptive')",
+          fluidRow(
+            column(width = 6,
+                   numericInput("sa_max_iter", "SA Max Iterations:", value = 200, min = 50, max = 1000)
+            ),
+            column(width = 6,
+                   numericInput("sa_alpha", "SA Cooling Rate (Alpha):", value = 0.90, min = 0.50, max = 0.99, step = 0.01)
+            )
+          )
+        ),
+        conditionalPanel(
+          condition = "input.prune_strategy == 'ga' || (input.prune_strategy == 'adaptive')",
+          fluidRow(
+            column(width = 4,
+                   numericInput("ga_pop_size", "GA Population Size:", value = 20, min = 10, max = 100)
+            ),
+            column(width = 4,
+                   numericInput("ga_max_gen", "GA Generations:", value = 15, min = 5, max = 50)
+            ),
+            column(width = 4,
+                   numericInput("ga_pmut", "GA Mutation Rate:", value = 0.10, min = 0.01, max = 0.50, step = 0.01)
+            )
+          )
+        )
+      ),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("run_prune_explore", "Run Optimization", icon = icon("play"), class = "btn btn-primary")
+      )
+    ))
+  })
+
+  # Render Lock Table in Modal 1
+  output$prune_lock_table <- renderRHandsontable({
+    lock_df <- prune_lock_table_data(); req(lock_df)
+    struct_df <- struct_table_data(); req(struct_df)
+    
+    rh <- rhandsontable(lock_df, rowHeaders = FALSE) %>%
+      hot_table(highlightReadOnly = TRUE, fixedColumnsLeft = 2)
+    rh <- hot_col(rh, "Dependent", readOnly = TRUE)
+    rh <- hot_col(rh, "Operator",  readOnly = TRUE)
+    
+    pred_cols <- names(struct_df)[3:ncol(struct_df)]
+    rh$x$struct_matrix <- as.matrix(struct_df[, pred_cols, drop = FALSE])
+    
+    renderer_js <- "
+      function(instance, td, row, col, prop, value, cellProperties) {
+        Handsontable.renderers.CheckboxRenderer.apply(this, arguments);
+        var params = instance.params || instance.getSettings();
+        var struct_matrix = params.struct_matrix;
+        var col_var_idx = col - 2;
+        
+        if (struct_matrix && col_var_idx >= 0 && col_var_idx < struct_matrix[0].length) {
+          var is_active = struct_matrix[row][col_var_idx];
+          if (is_active === true || is_active === 'TRUE' || is_active === 'true') {
+            td.style.backgroundColor = '#e0f2fe';
+            td.style.fontWeight = 'bold';
+            cellProperties.readOnly = false;
+          } else {
+            cellProperties.readOnly = true;
+            td.style.backgroundColor = '#f0f0f0';
+            td.style.cursor = 'not-allowed';
+            td.classList.add('htDimmed');
+          }
+        }
+      }"
+    
+    for (col_name in pred_cols) {
+      rh <- hot_col(rh, col_name, type = "checkbox", renderer = renderer_js)
+    }
+    rh
+  })
+
+  observeEvent(input$prune_lock_table, {
+    tbl <- hot_to_r(input$prune_lock_table); req(tbl)
+    prune_lock_table_data(tbl)
+  })
+
+  # 2. Run Candidate Search & Display Step 2 Modal
+  observeEvent(input$run_prune_explore, {
+    removeModal() # Close Modal 1
+    
+    showNotification("Running automated structural optimization...", type = "message", duration = 3)
+    
+    base_model <- fit_model_safe()
+    meas_syntax <- hot_to_r(input$input_table)
+    mlines <- unlist(lapply(seq_len(nrow(meas_syntax)), function(i) {
+      lt   <- meas_syntax$Latent[i]; if (!nzchar(lt)) return(NULL)
+      vars <- names(meas_syntax)[4:ncol(meas_syntax)]
+      inds <- vars[as.logical(meas_syntax[i, vars])]
+      if (!length(inds)) return(NULL)
+      paste0(lt, " =~ ", paste(inds, collapse = " + "))
+    }))
+    
+    extra <- strsplit(input$extra_eq, "\\n")[[1]]
+    extra <- trimws(extra)
+    extra <- extra[nzchar(extra)]
+    
+    needs_meanstructure <- (input$analysis_mode == "raw" || 
+                            input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
+
+    res <- tryCatch({
+      sem_optimize_hybrid(
+        base_fit            = base_model$fit,
+        data                = processed_data(),
+        meas_lines          = mlines,
+        struct_df           = struct_table_data(),
+        lock_df             = prune_lock_table_data(),
+        extra_lines         = extra,
+        criterion           = input$prune_criterion,
+        missing_method      = input$missing_method,
+        needs_meanstructure = needs_meanstructure,
+        strategy            = input$prune_strategy,
+        max_exhaustive_comb = input$max_exhaustive_comb %||% 1024,
+        sa_max_iter         = input$sa_max_iter %||% 200,
+        sa_alpha            = input$sa_alpha %||% 0.90,
+        ga_pop_size         = input$ga_pop_size %||% 20,
+        ga_max_gen          = input$ga_max_gen %||% 15,
+        ga_pmut             = input$ga_pmut %||% 0.10
+      )
+    }, error = function(e) {
+      list(candidates = list(), message = paste("Optimization error:", e$message))
+    })
+
+    if (length(res$candidates) == 0) {
+      showModal(modalDialog(
+        title = span(icon("info-circle"), "Auto-Optimize Result"),
+        div(class = "alert alert-warning", res$message),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+      return()
+    }
+
+    prune_results(res)
+    selected_prune_cand(res$candidates[[1]])
+
+    # Open Step 2 Modal (Candidate Ranking Catalog)
+    showModal(modalDialog(
+      title = span(icon("list"), "Auto-Optimize Model: Step 2 - Candidate Ranking Catalog"),
+      size = "l",
+      div(
+        style = "padding: 10px;",
+        p(sprintf("Strategy Used: %s. Click any candidate row in the table below to preview its path diagram. Models with degraded fit indices are flagged.", toupper(res$strategy_used))),
+        DTOutput("prune_candidates_table"),
+        tags$hr(),
+        h5("Path Diagram Preview for Selected Candidate:"),
+        div(style = "height: 320px; border: 1px solid #ccc; position: relative; border-radius: 4px; overflow: hidden;",
+            tags$div(id = "prune_preview_container", 
+                     style = "width:100%; height:100%; display: flex; align-items: center; justify-content: center; color: #666;",
+                     "Select a candidate row above to view preview."))
+      ),
+      footer = tagList(
+        modalButton("Close / Cancel"),
+        actionButton("apply_pruned_model", "Apply Selected Model to UI", icon = icon("check"), class = "btn btn-success")
+      )
+    ))
+  })
+
+  # Render Candidate Ranking Table
+  output$prune_candidates_table <- renderDT({
+    res <- prune_results(); req(res)
+    cands <- res$candidates
+    if (!length(cands)) return(NULL)
+    
+    crit <- res$criterion
+    df_list <- lapply(seq_along(cands), function(i) {
+      c_item <- cands[[i]]
+      data.frame(
+        Rank = i,
+        Status = c_item$status,
+        `Removed Paths` = c_item$removed_str,
+        AIC = if (is.na(c_item$aic)) "—" else sprintf("%.2f", c_item$aic),
+        BIC = if (is.na(c_item$bic)) "—" else sprintf("%.2f", c_item$bic),
+        `ΔAIC` = if (is.na(c_item$delta_aic)) "—" else sprintf("%+.2f", c_item$delta_aic),
+        `ΔBIC` = if (is.na(c_item$delta_bic)) "—" else sprintf("%+.2f", c_item$delta_bic),
+        CFI = if (is.na(c_item$cfi)) "—" else sprintf("%.3f", c_item$cfi),
+        RMSEA = if (is.na(c_item$rmsea)) "—" else sprintf("%.3f", c_item$rmsea),
+        SRMR = if (is.na(c_item$srmr)) "—" else sprintf("%.3f", c_item$srmr),
+        check.names = FALSE,
+        stringsAsFactors = FALSE
+      )
+    })
+    
+    tbl <- do.call(rbind, df_list)
+    
+    datatable(
+      tbl,
+      selection = "single",
+      rownames = FALSE,
+      options = list(pageLength = 6, dom = 'tp', scrollX = TRUE)
+    )
+  }, server = FALSE)
+
+  # Candidate Row Selection Observer -> Redraw Preview Path Diagram
+  observeEvent(input$prune_candidates_table_rows_selected, {
+    res <- prune_results(); req(res)
+    sel_idx <- input$prune_candidates_table_rows_selected
+    if (is.null(sel_idx) || sel_idx > length(res$candidates)) return()
+    
+    cand <- res$candidates[[sel_idx]]
+    selected_prune_cand(cand)
+    
+    if (!cand$converged || is.null(cand$fit)) {
+      session$sendCustomMessage("update_prune_preview_plot", list(
+        error = TRUE,
+        message = "Candidate model did not converge."
+      ))
+      return()
+    }
+    
+    std_for_plot <- if (input$analysis_mode == "std") TRUE else input$diagram_std
+    parts <- strsplit(input$layout_style, "_", fixed = TRUE)[[1]]
+    eng   <- parts[1]
+    rank  <- ifelse(length(parts) == 2, parts[2], "LR")
+    
+    dot_code <- semDiagram(cand$fit,
+                           standardized = std_for_plot,
+                           layout       = rank,
+                           engine       = eng)
+    
+    session$sendCustomMessage("update_prune_preview_plot", list(
+      error = FALSE,
+      dot = dot_code,
+      engine = eng
+    ))
+  })
+
+  # Initial trigger for selected preview on Step 2 Modal open
+  observe({
+    cand <- selected_prune_cand()
+    if (is.null(cand)) return()
+    
+    if (!cand$converged || is.null(cand$fit)) {
+      session$sendCustomMessage("update_prune_preview_plot", list(
+        error = TRUE,
+        message = "Candidate model did not converge."
+      ))
+      return()
+    }
+    
+    std_for_plot <- if (input$analysis_mode == "std") TRUE else input$diagram_std
+    parts <- strsplit(input$layout_style, "_", fixed = TRUE)[[1]]
+    eng   <- parts[1]
+    rank  <- ifelse(length(parts) == 2, parts[2], "LR")
+    
+    dot_code <- semDiagram(cand$fit,
+                           standardized = std_for_plot,
+                           layout       = rank,
+                           engine       = eng)
+    
+    session$sendCustomMessage("update_prune_preview_plot", list(
+      error = FALSE,
+      dot = dot_code,
+      engine = eng
+    ))
+  })
+
+  # Apply Selected Model to Main UI with Instant Sync & Automatic Model Refitting
+  observeEvent(input$apply_pruned_model, {
+    cand <- selected_prune_cand()
+    if (is.null(cand) || is.null(cand$struct_df)) {
+      showNotification("Please select a valid candidate model to apply.", type = "error")
+      return()
+    }
+    
+    # 1. Update structural data frame
+    struct_table_data(cand$struct_df)
+    
+    # 2. Trigger reactive update for checkbox_matrix rhandsontable
+    struct_table_trigger(struct_table_trigger() + 1)
+    
+    # 3. Close Modal
+    removeModal()
+    
+    # 4. Trigger automatic model re-fitting so path diagram, fit indices, and params update immediately
+    shinyjs::click("run_model")
+    
+    showNotification("Selected model applied to structural UI and refitted successfully!", type = "message", duration = 4)
   })
 }
 
