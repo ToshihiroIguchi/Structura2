@@ -326,7 +326,7 @@ lavaan_to_equations <- function(fit, digits = 3) {
 sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, extra_lines = character(0),
                                 criterion = c("AIC", "BIC"), missing_method = "listwise",
                                 needs_meanstructure = FALSE, strategy = c("adaptive", "exhaustive", "sa", "ga"),
-                                max_exhaustive_comb = 1024,
+                                max_exhaustive_comb = 1024, sa_ga_threshold = 20,
                                 sa_max_iter = 200, sa_alpha = 0.90,
                                 ga_pop_size = 20, ga_max_gen = 15, ga_pmut = 0.10) {
   criterion <- match.arg(criterion)
@@ -440,7 +440,7 @@ sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, 
   if (strategy == "adaptive") {
     if (total_comb <= max_exhaustive_comb) {
       eff_strategy <- "exhaustive"
-    } else if (M <= 20) {
+    } else if (M <= sa_ga_threshold) {
       eff_strategy <- "sa"
     } else {
       eff_strategy <- "ga"
@@ -456,7 +456,8 @@ sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, 
       ps <- pred_cols[as.logical(s_df[i, pred_cols])]
       if (length(ps)) lines <- c(lines, paste0(dp, "~", paste(sort(ps), collapse = ",")))
     }
-    paste(sort(lines), collapse = ";")
+    res <- paste(sort(lines), collapse = ";")
+    if (!nzchar(res)) "EMPTY_PATH" else res
   }
 
   base_key <- make_key(struct_df)
@@ -524,19 +525,23 @@ sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, 
       c_rec <- candidates_map[[k_str]]
       curr_rec <- candidates_map[[make_key(curr_df)]]
       
-      if (c_rec$converged) {
+      if (!is.null(c_rec) && isTRUE(c_rec$converged)) {
         c_score <- if (criterion == "AIC") c_rec$aic else c_rec$bic
-        curr_score <- if (!is.null(curr_rec) && curr_rec$converged) {
+        curr_score <- if (!is.null(curr_rec) && isTRUE(curr_rec$converged)) {
           if (criterion == "AIC") curr_rec$aic else curr_rec$bic
         } else Inf
         
-        dE <- c_score - curr_score
-        if (dE < 0 || runif(1) < exp(-dE / T_val)) {
-          curr_vec <- cand_vec
-          curr_df <- test_s_df
+        dE <- as.numeric(c_score - curr_score)
+        if (!is.na(dE) && !is.nan(dE)) {
+          eff_T <- max(T_val, 1e-6)
+          prob <- if (dE < 0) 1.0 else exp(-dE / eff_T)
+          if (!is.na(prob) && !is.nan(prob) && runif(1) < prob) {
+            curr_vec <- cand_vec
+            curr_df <- test_s_df
+          }
         }
       }
-      T_val <- T_val * sa_alpha
+      T_val <- max(T_val * sa_alpha, 1e-6)
     }
   } else if (eff_strategy == "ga") {
     pop <- matrix(sample(c(TRUE, FALSE), ga_pop_size * M, replace = TRUE),
@@ -559,7 +564,7 @@ sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, 
         candidates_map[[k_str]] <<- build_candidate_record(test_s_df, rem_label)
       }
       rec <- candidates_map[[k_str]]
-      if (!rec$converged) return(Inf)
+      if (is.null(rec) || !isTRUE(rec$converged)) return(Inf)
       if (criterion == "AIC") rec$aic else rec$bic
     }
 
@@ -948,8 +953,10 @@ ui <- fluidPage(
                        div(style = "display: flex; gap: 10px; align-items: center; margin-bottom: 10px;",
                            actionButton("run_model", "Run / Update Model",
                                         class = "btn btn-success"),
-                           actionButton("prune_model_btn", "Auto-Optimize Model", icon = icon("cogs"),
-                                        class = "btn btn-info")
+                           shinyjs::hidden(
+                             actionButton("prune_model_btn", "Auto-Optimize Model", icon = icon("sliders-h"),
+                                          class = "btn btn-info")
+                           )
                        ),
                       shinyjs::hidden(
                         div(id = "latent_error_box",
@@ -1226,6 +1233,7 @@ server <- function(input, output, session) {
       }
     )
   })
+  outputOptions(output, "display_column_ui", suspendWhenHidden = FALSE)
 
   output$filtered_table <- renderDT({
     df <- processed_data(); req(df)
@@ -1742,26 +1750,75 @@ server <- function(input, output, session) {
   prune_results <- reactiveVal(NULL)
   selected_prune_cand <- reactiveVal(NULL)
 
+  # Dynamic visibility toggle for Auto-Optimize button based on structural path selection
+  observe({
+    struct_df <- struct_table_data()
+    has_active_path <- FALSE
+    if (!is.null(struct_df) && nrow(struct_df) > 0 && ncol(struct_df) >= 3) {
+      pred_cols <- names(struct_df)[3:ncol(struct_df)]
+      if (length(pred_cols) > 0) {
+        matrix_vals <- struct_df[, pred_cols, drop = FALSE]
+        has_active_path <- any(sapply(matrix_vals, function(col) any(as.logical(col), na.rm = TRUE)))
+      }
+    }
+    
+    if (has_active_path) {
+      shinyjs::show("prune_model_btn")
+    } else {
+      shinyjs::hide("prune_model_btn")
+    }
+  })
+
+  # Helper to fetch current fitted baseline model or dynamically fit it if missing/unfitted
+  get_or_fit_baseline_model <- function() {
+    base_model <- fit_model_safe()
+    if (isTRUE(base_model$ok)) return(base_model)
+    
+    ln <- isolate(lavaan_model_str())
+    if (length(ln) == 0) {
+      return(list(ok = FALSE, msg_friendly = "Please define measurement and structural paths before running Auto-Optimize.", fit = NULL))
+    }
+    
+    needs_meanstructure <- (input$analysis_mode == "raw" || 
+                            input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
+    tryCatch({
+      fm <- sem(paste(ln, collapse = "\n"),
+                data          = processed_data(),
+                missing       = input$missing_method,
+                fixed.x       = FALSE,
+                parser        = "old",
+                meanstructure = needs_meanstructure,
+                ncpus         = 1L)
+      list(ok = lavInspect(fm, "converged"),
+           msg_friendly = if (lavInspect(fm, "converged")) "" else "Model did not converge.",
+           fit = fm)
+    }, error = function(e) {
+      list(ok = FALSE, msg_friendly = paste("Estimation failed:", e$message), fit = NULL)
+    })
+  }
+
   # Trigger Auto-Optimize Step 1 Modal
   observeEvent(input$prune_model_btn, {
-    base_model <- fit_model_safe()
-    if (!isTRUE(base_model$ok)) {
-      showModal(modalDialog(
-        title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
-        div(class = "alert alert-warning",
-            "Please define and fit a valid baseline model before running Auto-Optimize."),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
-      return()
-    }
-
     struct_df <- isolate(struct_table_data())
     if (is.null(struct_df) || nrow(struct_df) == 0) {
       showModal(modalDialog(
         title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
         div(class = "alert alert-warning",
             "No structural model defined. Please set up structural paths first."),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+      return()
+    }
+
+    # Automatically fit baseline model if fit_model_safe() is not yet fitted or non-converged
+    base_model <- get_or_fit_baseline_model()
+
+    if (!isTRUE(base_model$ok)) {
+      showModal(modalDialog(
+        title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
+        div(class = "alert alert-warning",
+            paste0("Could not fit baseline model for optimization: ", base_model$msg_friendly)),
         easyClose = TRUE,
         footer = modalButton("Dismiss")
       ))
@@ -1777,7 +1834,7 @@ server <- function(input, output, session) {
     prune_lock_table_data(lock_df)
 
     showModal(modalDialog(
-      title = span(icon("cogs"), "Auto-Optimize Model: Step 1 - Strategy, Parameters & Path Locking"),
+      title = span(icon("sliders-h"), "Auto-Optimize Model: Step 1 - Strategy, Parameters & Path Locking"),
       size = "l",
       div(
         style = "padding: 10px;",
@@ -1788,49 +1845,62 @@ server <- function(input, output, session) {
         tags$hr(),
         fluidRow(
           column(width = 6,
-                 radioButtons("prune_criterion", "Optimization Criterion:",
-                              choices = c("AIC (Predictive Accuracy / Balanced)" = "AIC",
-                                          "BIC (Stronger Sparsity Penalty)" = "BIC"),
-                              selected = "AIC")
+                 selectInput("prune_criterion", "Optimization Criterion:",
+                             choices = c("AIC (Predictive Accuracy / Balanced)" = "AIC",
+                                         "BIC (Stronger Sparsity Penalty)" = "BIC"),
+                             selected = "AIC")
           ),
           column(width = 6,
-                 radioButtons("prune_strategy", "Search Algorithm Strategy:",
-                              choices = c("Adaptive Auto-Switch (Recommended)" = "adaptive",
-                                          "Exhaustive Search (100% Exact All-Subset)" = "exhaustive",
-                                          "Simulated Annealing (SA - Fast Trajectory Search)" = "sa",
-                                          "Genetic Algorithm (GA - Evolutionary Search)" = "ga"),
-                              selected = "adaptive")
+                 selectInput("prune_strategy", "Search Algorithm Strategy:",
+                             choices = c("Adaptive Auto-Switch (Recommended)" = "adaptive",
+                                         "Exhaustive Search (100% Exact All-Subset)" = "exhaustive",
+                                         "Simulated Annealing (SA - Fast Trajectory Search)" = "sa",
+                                         "Genetic Algorithm (GA - Evolutionary Search)" = "ga"),
+                             selected = "adaptive")
           )
         ),
-        tags$hr(),
-        h5(icon("sliders-h"), " Algorithm Hyper-Parameters:"),
-        conditionalPanel(
-          condition = "input.prune_strategy == 'adaptive' || input.prune_strategy == 'exhaustive'",
-          numericInput("max_exhaustive_comb", "Exhaustive Search Max Combinations Threshold:",
-                       value = 1024, min = 64, max = 8192, step = 64)
-        ),
-        conditionalPanel(
-          condition = "input.prune_strategy == 'sa' || (input.prune_strategy == 'adaptive')",
-          fluidRow(
-            column(width = 6,
-                   numericInput("sa_max_iter", "SA Max Iterations:", value = 200, min = 50, max = 1000)
+        tags$details(
+          style = "margin-top: 15px; border: 1px solid #ddd; padding: 10px; border-radius: 4px; background-color: #fafafa;",
+          tags$summary(
+            style = "font-weight: bold; cursor: pointer; color: #333;",
+            icon("sliders-h"), " Advanced Algorithm Hyper-Parameters"
+          ),
+          div(
+            style = "margin-top: 10px;",
+            conditionalPanel(
+              condition = "input.prune_strategy == 'adaptive' || input.prune_strategy == 'exhaustive'",
+              numericInput("max_exhaustive_comb", "Exhaustive Search Max Combinations Threshold:",
+                           value = 1024, min = 64, max = 8192, step = 64)
             ),
-            column(width = 6,
-                   numericInput("sa_alpha", "SA Cooling Rate (Alpha):", value = 0.90, min = 0.50, max = 0.99, step = 0.01)
-            )
-          )
-        ),
-        conditionalPanel(
-          condition = "input.prune_strategy == 'ga' || (input.prune_strategy == 'adaptive')",
-          fluidRow(
-            column(width = 4,
-                   numericInput("ga_pop_size", "GA Population Size:", value = 20, min = 10, max = 100)
+            conditionalPanel(
+              condition = "input.prune_strategy == 'adaptive'",
+              numericInput("sa_ga_threshold", "SA / GA Switching Threshold (Max paths for SA):",
+                           value = 20, min = 5, max = 100, step = 1)
             ),
-            column(width = 4,
-                   numericInput("ga_max_gen", "GA Generations:", value = 15, min = 5, max = 50)
+            conditionalPanel(
+              condition = "input.prune_strategy == 'sa' || (input.prune_strategy == 'adaptive')",
+              fluidRow(
+                column(width = 6,
+                       numericInput("sa_max_iter", "SA Max Iterations:", value = 200, min = 50, max = 1000)
+                ),
+                column(width = 6,
+                       numericInput("sa_alpha", "SA Cooling Rate (Alpha):", value = 0.90, min = 0.50, max = 0.99, step = 0.01)
+                )
+              )
             ),
-            column(width = 4,
-                   numericInput("ga_pmut", "GA Mutation Rate:", value = 0.10, min = 0.01, max = 0.50, step = 0.01)
+            conditionalPanel(
+              condition = "input.prune_strategy == 'ga' || (input.prune_strategy == 'adaptive')",
+              fluidRow(
+                column(width = 4,
+                       numericInput("ga_pop_size", "GA Population Size:", value = 20, min = 10, max = 100)
+                ),
+                column(width = 4,
+                       numericInput("ga_max_gen", "GA Generations:", value = 15, min = 5, max = 50)
+                ),
+                column(width = 4,
+                       numericInput("ga_pmut", "GA Mutation Rate:", value = 0.10, min = 0.01, max = 0.50, step = 0.01)
+                )
+              )
             )
           )
         )
@@ -1894,7 +1964,18 @@ server <- function(input, output, session) {
     
     showNotification("Running automated structural optimization...", type = "message", duration = 3)
     
-    base_model <- fit_model_safe()
+    base_model <- get_or_fit_baseline_model()
+    if (!isTRUE(base_model$ok)) {
+      showModal(modalDialog(
+        title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
+        div(class = "alert alert-warning",
+            paste0("Could not fit baseline model for optimization: ", base_model$msg_friendly)),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+      return()
+    }
+
     meas_syntax <- hot_to_r(input$input_table)
     mlines <- unlist(lapply(seq_len(nrow(meas_syntax)), function(i) {
       lt   <- meas_syntax$Latent[i]; if (!nzchar(lt)) return(NULL)
@@ -1924,6 +2005,7 @@ server <- function(input, output, session) {
         needs_meanstructure = needs_meanstructure,
         strategy            = input$prune_strategy,
         max_exhaustive_comb = input$max_exhaustive_comb %||% 1024,
+        sa_ga_threshold     = input$sa_ga_threshold %||% 20,
         sa_max_iter         = input$sa_max_iter %||% 200,
         sa_alpha            = input$sa_alpha %||% 0.90,
         ga_pop_size         = input$ga_pop_size %||% 20,
