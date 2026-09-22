@@ -1626,7 +1626,8 @@ server <- function(input, output, session) {
       msg <- if (input$run_model > 0) "Define a model to proceed." else ""
       return(list(ok = FALSE,
                   msg_friendly = msg,
-                  fit = NULL))
+                  fit = NULL,
+                  syntax = NULL))
     }
     tryCatch({
       # Use meanstructure = TRUE if FIML is selected to prevent lavaan error
@@ -1644,7 +1645,8 @@ server <- function(input, output, session) {
            msg_friendly = if (lavInspect(fm, "converged"))
              "" else
                "Model did not converge. Check for variables with correlation = 1 and remove or combine them.",
-           fit = fm)
+           fit = fm,
+           syntax = ln)
     }, error = function(e) {
       # Enhanced error message with specific diagnosis
       error_msg <- conditionMessage(e)
@@ -1664,7 +1666,8 @@ server <- function(input, output, session) {
       
       list(ok = FALSE,
            msg_friendly = paste0(friendly_msg, "\n\nTechnical details: ", error_msg),
-           fit = NULL)
+           fit = NULL,
+           syntax = NULL)
     })
   }, ignoreNULL = FALSE)  # Initial auto-execution
 
@@ -1779,7 +1782,7 @@ server <- function(input, output, session) {
   prune_results <- reactiveVal(NULL)
   selected_prune_cand <- reactiveVal(NULL)
 
-  # Dynamic visibility toggle for Auto-Optimize button based on structural path selection
+  # Dynamic visibility toggle for Auto-Optimize button based on structural path selection, model convergence, and syntax synchronization
   observe({
     struct_df <- struct_table_data()
     has_active_path <- FALSE
@@ -1791,40 +1794,19 @@ server <- function(input, output, session) {
       }
     }
     
-    if (has_active_path) {
+    model_res <- fit_model_safe()
+    current_syntax <- lavaan_model_str()
+    is_model_ready <- !is.null(model_res) &&
+                      isTRUE(model_res$ok) &&
+                      !is.null(model_res$syntax) &&
+                      identical(model_res$syntax, current_syntax)
+    
+    if (has_active_path && is_model_ready) {
       shinyjs::show("prune_model_btn")
     } else {
       shinyjs::hide("prune_model_btn")
     }
   })
-
-  # Helper to fetch current fitted baseline model or dynamically fit it if missing/unfitted
-  get_or_fit_baseline_model <- function() {
-    base_model <- fit_model_safe()
-    if (isTRUE(base_model$ok)) return(base_model)
-    
-    ln <- isolate(lavaan_model_str())
-    if (length(ln) == 0) {
-      return(list(ok = FALSE, msg_friendly = "Please define measurement and structural paths before running Auto-Optimize.", fit = NULL))
-    }
-    
-    needs_meanstructure <- (input$analysis_mode == "raw" || 
-                            input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
-    tryCatch({
-      fm <- sem(paste(ln, collapse = "\n"),
-                data          = processed_data(),
-                missing       = input$missing_method,
-                fixed.x       = FALSE,
-                parser        = "old",
-                meanstructure = needs_meanstructure,
-                ncpus         = 1L)
-      list(ok = lavInspect(fm, "converged"),
-           msg_friendly = if (lavInspect(fm, "converged")) "" else "Model did not converge.",
-           fit = fm)
-    }, error = function(e) {
-      list(ok = FALSE, msg_friendly = paste("Estimation failed:", e$message), fit = NULL)
-    })
-  }
 
   # Trigger Auto-Optimize Step 1 Modal
   observeEvent(input$prune_model_btn, {
@@ -1840,8 +1822,7 @@ server <- function(input, output, session) {
       return()
     }
 
-    # Automatically fit baseline model if fit_model_safe() is not yet fitted or non-converged
-    base_model <- get_or_fit_baseline_model()
+    base_model <- fit_model_safe()
 
     if (!isTRUE(base_model$ok)) {
       showModal(modalDialog(
@@ -1910,7 +1891,7 @@ server <- function(input, output, session) {
               condition = "input.prune_strategy == 'sa' || (input.prune_strategy == 'adaptive')",
               fluidRow(
                 column(width = 6,
-                       numericInput("sa_max_iter", "SA Max Iterations:", value = 200, min = 50, max = 1000)
+                       numericInput("sa_max_iter", "SA Max Iterations:", value = 80, min = 20, max = 500)
                 ),
                 column(width = 6,
                        numericInput("sa_alpha", "SA Cooling Rate (Alpha):", value = 0.90, min = 0.50, max = 0.99, step = 0.01)
@@ -1921,10 +1902,10 @@ server <- function(input, output, session) {
               condition = "input.prune_strategy == 'ga' || (input.prune_strategy == 'adaptive')",
               fluidRow(
                 column(width = 4,
-                       numericInput("ga_pop_size", "GA Population Size:", value = 20, min = 10, max = 100)
+                       numericInput("ga_pop_size", "GA Population Size:", value = 12, min = 6, max = 50)
                 ),
                 column(width = 4,
-                       numericInput("ga_max_gen", "GA Generations:", value = 15, min = 5, max = 50)
+                       numericInput("ga_max_gen", "GA Generations:", value = 10, min = 5, max = 30)
                 ),
                 column(width = 4,
                        numericInput("ga_pmut", "GA Mutation Rate:", value = 0.10, min = 0.01, max = 0.50, step = 0.01)
@@ -1989,98 +1970,115 @@ server <- function(input, output, session) {
 
   # 2. Run Candidate Search & Display Step 2 Modal
   observeEvent(input$run_prune_explore, {
-    removeModal() # Close Modal 1
-    
-    base_model <- get_or_fit_baseline_model()
-    if (!isTRUE(base_model$ok)) {
-      showModal(modalDialog(
-        title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
-        div(class = "alert alert-warning",
-            paste0("Could not fit baseline model for optimization: ", base_model$msg_friendly)),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
-      return()
-    }
-
-    meas_syntax <- hot_to_r(input$input_table)
-    mlines <- unlist(lapply(seq_len(nrow(meas_syntax)), function(i) {
-      lt   <- meas_syntax$Latent[i]; if (!nzchar(lt)) return(NULL)
-      vars <- names(meas_syntax)[4:ncol(meas_syntax)]
-      inds <- vars[as.logical(meas_syntax[i, vars])]
-      if (!length(inds)) return(NULL)
-      paste0(lt, " =~ ", paste(inds, collapse = " + "))
-    }))
-    
-    extra <- strsplit(input$extra_eq, "\\n")[[1]]
-    extra <- trimws(extra)
-    extra <- extra[nzchar(extra)]
-    
-    needs_meanstructure <- (input$analysis_mode == "raw" || 
-                            input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
-
-    res <- tryCatch({
-      withProgress(message = "Auto-Optimize Model in Progress", value = 0, {
-        sem_optimize_hybrid(
-          base_fit            = base_model$fit,
-          data                = processed_data(),
-          meas_lines          = mlines,
-          struct_df           = struct_table_data(),
-          lock_df             = prune_lock_table_data(),
-          extra_lines         = extra,
-          criterion           = input$prune_criterion,
-          missing_method      = input$missing_method,
-          needs_meanstructure = needs_meanstructure,
-          strategy            = input$prune_strategy,
-          max_exhaustive_comb = input$max_exhaustive_comb %||% 1024,
-          sa_ga_threshold     = input$sa_ga_threshold %||% 20,
-          sa_max_iter         = input$sa_max_iter %||% 200,
-          sa_alpha            = input$sa_alpha %||% 0.90,
-          ga_pop_size         = input$ga_pop_size %||% 20,
-          ga_max_gen          = input$ga_max_gen %||% 15,
-          ga_pmut             = input$ga_pmut %||% 0.10,
-          progress_cb         = function(val, detail) {
-            setProgress(value = val, detail = detail)
-          }
-        )
-      })
-    }, error = function(e) {
-      list(candidates = list(), message = paste("Optimization error:", e$message))
-    })
-
-    if (length(res$candidates) == 0) {
-      showModal(modalDialog(
-        title = span(icon("info-circle"), "Auto-Optimize Result"),
-        div(class = "alert alert-warning", res$message),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
-      return()
-    }
-
-    prune_results(res)
-    selected_prune_cand(res$candidates[[1]])
-
-    # Open Step 2 Modal (Candidate Ranking Catalog)
+    # Immediately display Progress Modal so UI remains responsive with active spinner feedback
     showModal(modalDialog(
-      title = span(icon("list"), "Auto-Optimize Model: Step 2 - Candidate Ranking Catalog"),
-      size = "l",
+      title = span(icon("sync", class = "fa-spin"), " Auto-Optimize Model: Optimizing Model Space..."),
+      size = "m",
+      footer = NULL,
+      easyClose = FALSE,
       div(
-        style = "padding: 10px;",
-        p(sprintf("Strategy Used: %s. Click any candidate row in the table below to preview its path diagram. Models with degraded fit indices are flagged.", toupper(res$strategy_used))),
-        DTOutput("prune_candidates_table"),
-        tags$hr(),
-        h5("Path Diagram Preview for Selected Candidate:"),
-        div(style = "height: 320px; border: 1px solid #ccc; position: relative; border-radius: 4px; overflow: hidden;",
-            tags$div(id = "prune_preview_container", 
-                     style = "width:100%; height:100%; display: flex; align-items: center; justify-content: center; color: #666;",
-                     "Select a candidate row above to view preview."))
-      ),
-      footer = tagList(
-        modalButton("Close / Cancel"),
-        actionButton("apply_pruned_model", "Apply Selected Model to UI", icon = icon("check"), class = "btn btn-success")
+        style = "text-align: center; padding: 25px 15px;",
+        div(class = "structura-preload-spinner", style = "margin: 0 auto 20px auto; border-left-color: #3b82f6; width: 45px; height: 45px;"),
+        h4("Evaluating Structural Models...", style = "font-weight: 600; color: #1e293b; margin-bottom: 10px;"),
+        p("Please wait while the optimization algorithm searches candidate model space.", style = "color: #64748b; font-size: 14px; margin-bottom: 15px;"),
+        div(id = "prune_progress_status", style = "font-weight: 500; color: #2563eb; font-size: 13px;",
+            "Initializing baseline model and structural constraints...")
       )
     ))
+
+    # Defer optimization execution by 100ms via later::later to allow browser JS to render Progress Modal to DOM
+    later::later(function() {
+      base_model <- fit_model_safe()
+      if (!isTRUE(base_model$ok)) {
+        showModal(modalDialog(
+          title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
+          div(class = "alert alert-warning",
+              paste0("Could not fit baseline model for optimization: ", base_model$msg_friendly)),
+          easyClose = TRUE,
+          footer = modalButton("Dismiss")
+        ))
+        return()
+      }
+
+      meas_syntax <- hot_to_r(input$input_table)
+      mlines <- unlist(lapply(seq_len(nrow(meas_syntax)), function(i) {
+        lt   <- meas_syntax$Latent[i]; if (!nzchar(lt)) return(NULL)
+        vars <- names(meas_syntax)[4:ncol(meas_syntax)]
+        inds <- vars[as.logical(meas_syntax[i, vars])]
+        if (!length(inds)) return(NULL)
+        paste0(lt, " =~ ", paste(inds, collapse = " + "))
+      }))
+      
+      extra <- strsplit(input$extra_eq, "\\n")[[1]]
+      extra <- trimws(extra)
+      extra <- extra[nzchar(extra)]
+      
+      needs_meanstructure <- (input$analysis_mode == "raw" || 
+                              input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
+
+      res <- tryCatch({
+        withProgress(message = "Auto-Optimize Model in Progress", value = 0, {
+          sem_optimize_hybrid(
+            base_fit            = base_model$fit,
+            data                = processed_data(),
+            meas_lines          = mlines,
+            struct_df           = struct_table_data(),
+            lock_df             = prune_lock_table_data(),
+            extra_lines         = extra,
+            criterion           = input$prune_criterion,
+            missing_method      = input$missing_method,
+            needs_meanstructure = needs_meanstructure,
+            strategy            = input$prune_strategy,
+            max_exhaustive_comb = input$max_exhaustive_comb %||% 1024,
+            sa_ga_threshold     = input$sa_ga_threshold %||% 20,
+            sa_max_iter         = input$sa_max_iter %||% 80,
+            sa_alpha            = input$sa_alpha %||% 0.90,
+            ga_pop_size         = input$ga_pop_size %||% 12,
+            ga_max_gen          = input$ga_max_gen %||% 10,
+            ga_pmut             = input$ga_pmut %||% 0.10,
+            progress_cb         = function(val, detail) {
+              setProgress(value = val, detail = detail)
+            }
+          )
+        })
+      }, error = function(e) {
+        list(candidates = list(), message = paste("Optimization error:", e$message))
+      })
+
+      if (length(res$candidates) == 0) {
+        showModal(modalDialog(
+          title = span(icon("info-circle"), "Auto-Optimize Result"),
+          div(class = "alert alert-warning", res$message),
+          easyClose = TRUE,
+          footer = modalButton("Dismiss")
+        ))
+        return()
+      }
+
+      prune_results(res)
+      selected_prune_cand(res$candidates[[1]])
+
+      # Open Step 2 Modal (Candidate Ranking Catalog)
+      showModal(modalDialog(
+        title = span(icon("list"), "Auto-Optimize Model: Step 2 - Candidate Ranking Catalog"),
+        size = "l",
+        div(
+          style = "padding: 10px;",
+          p(sprintf("Strategy Used: %s. Click any candidate row in the table below to preview its path diagram. Models with degraded fit indices are flagged.", toupper(res$strategy_used))),
+          DTOutput("prune_candidates_table"),
+          tags$hr(),
+          h5("Path Diagram Preview for Selected Candidate:"),
+          div(style = "height: 320px; border: 1px solid #ccc; position: relative; border-radius: 4px; overflow: hidden;",
+              tags$div(id = "prune_preview_container", 
+                       style = "width:100%; height:100%; display: flex; align-items: center; justify-content: center; color: #666;",
+                       "Select a candidate row above to view preview."))
+        ),
+        footer = tagList(
+          modalButton("Close / Cancel"),
+          actionButton("apply_pruned_model", "Apply Selected Model to UI", icon = icon("check"), class = "btn btn-success")
+        )
+      ))
+    }, 100)
   })
 
   # Render Candidate Ranking Table
