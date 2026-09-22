@@ -1463,6 +1463,7 @@ server <- function(input, output, session) {
   # ---------- Structural table -----------------------------------
 
   struct_table_data <- reactiveVal(NULL)
+  struct_table_trigger <- reactiveVal(0)
 
   model_items <- reactive({
     df <- processed_data(); req(df)
@@ -1478,6 +1479,7 @@ server <- function(input, output, session) {
     items <- model_items()
     if (!length(items)) {
       struct_table_data(NULL)
+      struct_table_trigger(struct_table_trigger() + 1)
       return()
     }
     
@@ -1490,31 +1492,39 @@ server <- function(input, output, session) {
     # Preserve old settings if available
     if (!is.null(old_tbl)) {
       common_deps <- intersect(old_tbl$Dependent, items)
-      common_cols <- intersect(colnames(old_tbl), items)
+      common_cols <- intersect(setdiff(colnames(old_tbl), c("Dependent", "Operator")), items)
       if (length(common_deps) > 0 && length(common_cols) > 0) {
         for (dep in common_deps) {
           old_row_idx <- which(old_tbl$Dependent == dep)
           new_row_idx <- which(mat$Dependent == dep)
           if (length(old_row_idx) == 1 && length(new_row_idx) == 1) {
-            mat[new_row_idx, common_cols] <- old_tbl[old_row_idx, common_cols]
+            for (cc in common_cols) {
+              val <- old_tbl[old_row_idx, cc]
+              mat[new_row_idx, cc] <- isTRUE(as.logical(val))
+            }
           }
         }
       }
     }
     struct_table_data(mat)
+    struct_table_trigger(struct_table_trigger() + 1)
   })
 
   observeEvent(input$checkbox_matrix, {
     tbl <- hot_to_r(input$checkbox_matrix); req(tbl)
+    pred_cols <- setdiff(colnames(tbl), c("Dependent", "Operator"))
+    for (col in pred_cols) {
+      tbl[[col]] <- vapply(tbl[[col]], function(x) isTRUE(as.logical(x)), logical(1))
+    }
     struct_table_data(tbl)
   })
 
   output$checkbox_matrix <- renderRHandsontable({
     struct_table_trigger()
     tryCatch({
-      df <- processed_data(); req(df)
-      meas <- input_table_data(); req(meas)
-      mat <- struct_table_data(); req(mat)
+      df <- isolate(processed_data()); req(df)
+      meas <- isolate(input_table_data()); req(meas)
+      mat <- isolate(struct_table_data()); req(mat)
       items <- mat$Dependent
       if (!length(items)) return()
       
@@ -1765,7 +1775,6 @@ server <- function(input, output, session) {
   })
 
   # ----------------- Auto-Optimize Model Server Observers ---------------
-  struct_table_trigger <- reactiveVal(0)
   prune_lock_table_data <- reactiveVal(NULL)
   prune_results <- reactiveVal(NULL)
   selected_prune_cand <- reactiveVal(NULL)
