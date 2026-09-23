@@ -854,6 +854,108 @@ ui <- fluidPage(
             container.innerHTML = '<div style=\"color:red; padding:10px;\">Graphviz library not loaded.</div>';
           }
         });
+
+        // Real-time Optimization Live Canvas Line Chart Renderer
+        Shiny.addCustomMessageHandler('update_optimization_live_chart', function(msg) {
+          var canvas = document.getElementById('opt_chart_canvas');
+          if (!canvas) return;
+          var ctx = canvas.getContext('2d');
+          var w = canvas.width, h = canvas.height;
+          
+          ctx.clearRect(0, 0, w, h);
+          ctx.fillStyle = '#0f172a';
+          ctx.fillRect(0, 0, w, h);
+          
+          var padLeft = 45, padRight = 25, padTop = 25, padBottom = 30;
+          var graphW = w - padLeft - padRight;
+          var graphH = h - padTop - padBottom;
+          
+          var scores = Array.isArray(msg.scores) ? msg.scores : (msg.scores !== null && msg.scores !== undefined ? [msg.scores] : []);
+          var bestScores = Array.isArray(msg.best_scores) ? msg.best_scores : (msg.best_scores !== null && msg.best_scores !== undefined ? [msg.best_scores] : []);
+          var allVals = scores.concat([msg.baseScore]).filter(function(v) { return typeof v === 'number' && !isNaN(v) && isFinite(v); });
+          if (allVals.length === 0) allVals = [0, 100];
+          
+          var maxVal = Math.max.apply(null, allVals);
+          var minVal = Math.min.apply(null, allVals);
+          if (maxVal === minVal) { maxVal += 5; minVal -= 5; }
+          var valRange = maxVal - minVal;
+          
+          ctx.strokeStyle = '#334155';
+          ctx.lineWidth = 1;
+          ctx.font = '10px sans-serif';
+          ctx.fillStyle = '#94a3b8';
+          
+          for (var g = 0; g <= 4; g++) {
+            var gy = padTop + (g / 4) * graphH;
+            ctx.beginPath();
+            ctx.moveTo(padLeft, gy);
+            ctx.lineTo(w - padRight, gy);
+            ctx.stroke();
+            var gVal = maxVal - (g / 4) * valRange;
+            ctx.fillText(gVal.toFixed(1), 5, gy + 3);
+          }
+          
+          var baseY = padTop + (1 - (msg.baseScore - minVal) / valRange) * graphH;
+          ctx.setLineDash([4, 4]);
+          ctx.strokeStyle = '#64748b';
+          ctx.beginPath();
+          ctx.moveTo(padLeft, baseY);
+          ctx.lineTo(w - padRight, baseY);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillText('Baseline', w - 50, baseY - 4);
+          
+          var maxSteps = msg.maxIter || 80;
+          
+          if (scores.length > 0) {
+            ctx.fillStyle = '#64748b';
+            for (var i = 0; i < scores.length; i++) {
+              if (isNaN(scores[i]) || !isFinite(scores[i])) continue;
+              var sx = padLeft + (i / maxSteps) * graphW;
+              var sy = padTop + (1 - (scores[i] - minVal) / valRange) * graphH;
+              ctx.beginPath();
+              ctx.arc(sx, sy, 2, 0, 2 * Math.PI);
+              ctx.fill();
+            }
+          }
+          
+          if (bestScores.length > 0) {
+            ctx.strokeStyle = '#3b82f6';
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            for (var j = 0; j < bestScores.length; j++) {
+              if (isNaN(bestScores[j]) || !isFinite(bestScores[j])) continue;
+              var bx = padLeft + (j / maxSteps) * graphW;
+              var by = padTop + (1 - (bestScores[j] - minVal) / valRange) * graphH;
+              if (j === 0) ctx.moveTo(bx, by); else ctx.lineTo(bx, by);
+            }
+            ctx.stroke();
+            
+            var lastIdx = bestScores.length - 1;
+            var currX = padLeft + (lastIdx / maxSteps) * graphW;
+            var currY = padTop + (1 - (bestScores[lastIdx] - minVal) / valRange) * graphH;
+            ctx.fillStyle = '#60a5fa';
+            ctx.beginPath();
+            ctx.arc(currX, currY, 5, 0, 2 * Math.PI);
+            ctx.fill();
+          }
+          
+          ctx.fillStyle = '#94a3b8';
+          ctx.fillText('0', padLeft, h - 10);
+          ctx.fillText('Step ' + msg.step + ' / ' + maxSteps, padLeft + graphW / 2 - 25, h - 10);
+          ctx.fillText(maxSteps, w - padRight - 15, h - 10);
+          
+          var statusElem = document.getElementById('prune_progress_status');
+          if (statusElem && msg.detail) {
+            statusElem.innerHTML = msg.detail;
+          }
+          
+          var barElem = document.getElementById('prune_progress_bar_inner');
+          if (barElem) {
+            var pct = Math.min(100, Math.round((msg.step / maxSteps) * 100));
+            barElem.style.width = pct + '%';
+          }
+        });
       });
 
       $(document).on('shiny:visualchange', function(event) {
@@ -1591,7 +1693,7 @@ server <- function(input, output, session) {
     mlines <- lapply(seq_len(nrow(meas)), function(i) {
       lt   <- meas$Latent[i]; if (!nzchar(lt)) return(NULL)
       vars <- names(meas)[4:ncol(meas)]
-      inds <- vars[as.logical(meas[i, vars])];
+      inds <- vars[vapply(meas[i, vars], function(x) isTRUE(as.logical(x)), logical(1))]
       if (!length(inds)) return(NULL)
       paste0(lt, " =~ ", paste(inds, collapse = " + "))
     })
@@ -1599,7 +1701,7 @@ server <- function(input, output, session) {
     slines <- lapply(seq_len(nrow(struc)), function(i) {
       dp    <- struc$Dependent[i]; if (!nzchar(dp)) return(NULL)
       preds <- names(struc)[3:ncol(struc)]
-      ps    <- preds[as.logical(struc[i, preds])]
+      ps    <- preds[vapply(struc[i, preds], function(x) isTRUE(as.logical(x)), logical(1))]
       if (!length(ps)) return(NULL)
       paste0(dp, " ~ ", paste(ps, collapse = " + "))
     })
@@ -1968,97 +2070,220 @@ server <- function(input, output, session) {
     prune_lock_table_data(tbl)
   })
 
-  # 2. Run Candidate Search & Display Step 2 Modal
+  # Reactive state variables for stepwise optimization stepper engine
+  opt_running <- reactiveVal(FALSE)
+  opt_step <- reactiveVal(0)
+  opt_state <- reactiveVal(NULL)
+
+  # 2. Run Candidate Search & Display Step 2 Modal via Stepwise Stepper Engine
   observeEvent(input$run_prune_explore, {
-    # Immediately display Progress Modal so UI remains responsive with active spinner feedback
+    base_model <- fit_model_safe()
+    if (!isTRUE(base_model$ok)) {
+      showModal(modalDialog(
+        title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
+        div(class = "alert alert-warning",
+            paste0("Could not fit baseline model for optimization: ", base_model$msg_friendly)),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+      return()
+    }
+
+    struct_df <- struct_table_data()
+    lock_df <- prune_lock_table_data()
+    pred_cols <- names(struct_df)[3:ncol(struct_df)]
+    active_paths <- list()
+
+    for (i in seq_len(nrow(struct_df))) {
+      dep <- struct_df$Dependent[i]
+      if (!nzchar(dep)) next
+      for (p in pred_cols) {
+        if (isTRUE(as.logical(struct_df[i, p]))) {
+          is_locked <- FALSE
+          if (!is.null(lock_df) && p %in% names(lock_df) && i <= nrow(lock_df)) {
+            is_locked <- isTRUE(as.logical(lock_df[i, p]))
+          }
+          active_paths[[length(active_paths) + 1]] <- list(
+            dep = dep, pred = p, locked = is_locked
+          )
+        }
+      }
+    }
+
+    removable_paths <- Filter(function(x) !x$locked, active_paths)
+    M <- length(removable_paths)
+
+    if (M == 0) {
+      showModal(modalDialog(
+        title = span(icon("info-circle"), "Auto-Optimize Warning"),
+        div(class = "alert alert-warning", "No unlocked structural paths available for optimization. All active paths are locked."),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+      return()
+    }
+
+    criterion <- input$prune_criterion
+    strategy <- input$prune_strategy
+    total_comb <- 2^M
+    max_comb <- input$max_exhaustive_comb %||% 1024
+    sa_ga_thresh <- input$sa_ga_threshold %||% 20
+
+    eff_strategy <- strategy
+    if (strategy == "adaptive") {
+      if (total_comb <= max_comb) {
+        eff_strategy <- "exhaustive"
+      } else if (M <= sa_ga_thresh) {
+        eff_strategy <- "sa"
+      } else {
+        eff_strategy <- "ga"
+      }
+    }
+
+    base_ms <- lavaan::fitMeasures(base_model$fit, c("aic", "bic", "cfi", "rmsea", "srmr"))
+    base_score <- if (criterion == "AIC") as.numeric(base_ms["aic"]) else as.numeric(base_ms["bic"])
+
+    meas_syntax <- hot_to_r(input$input_table)
+    mlines <- unlist(lapply(seq_len(nrow(meas_syntax)), function(i) {
+      lt   <- meas_syntax$Latent[i]; if (!nzchar(lt)) return(NULL)
+      vars <- names(meas_syntax)[4:ncol(meas_syntax)]
+      inds <- vars[as.logical(meas_syntax[i, vars])]
+      if (!length(inds)) return(NULL)
+      paste0(lt, " =~ ", paste(inds, collapse = " + "))
+    }))
+
+    extra <- strsplit(input$extra_eq, "\\n")[[1]]
+    extra <- trimws(extra); extra <- extra[nzchar(extra)]
+    needs_meanstructure <- (input$analysis_mode == "raw" || 
+                            input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
+
+    # Display Progress Modal with live HTML5 Canvas Chart
     showModal(modalDialog(
       title = span(icon("sync", class = "fa-spin"), " Auto-Optimize Model: Optimizing Model Space..."),
       size = "m",
       footer = NULL,
       easyClose = FALSE,
       div(
-        style = "text-align: center; padding: 25px 15px;",
-        div(class = "structura-preload-spinner", style = "margin: 0 auto 20px auto; border-left-color: #3b82f6; width: 45px; height: 45px;"),
-        h4("Evaluating Structural Models...", style = "font-weight: 600; color: #1e293b; margin-bottom: 10px;"),
-        p("Please wait while the optimization algorithm searches candidate model space.", style = "color: #64748b; font-size: 14px; margin-bottom: 15px;"),
-        div(id = "prune_progress_status", style = "font-weight: 500; color: #2563eb; font-size: 13px;",
+        style = "text-align: center; padding: 15px;",
+        div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;",
+            span(style = "font-weight: bold; color: #475569; font-size: 13px;",
+                 sprintf("Strategy: %s | Criterion: %s", toupper(eff_strategy), criterion)),
+            span(id = "prune_iter_badge", class = "badge badge-primary", style = "font-size: 12px; background-color: #2563eb;", "Step 0")
+        ),
+        tags$canvas(id = "opt_chart_canvas", width = "540", height = "200",
+                    style = "border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.15); background-color: #0f172a; width: 100%; max-width: 540px; height: 200px;"),
+        div(style = "width: 100%; background-color: #e2e8f0; border-radius: 6px; height: 8px; overflow: hidden; margin-top: 12px;",
+            div(id = "prune_progress_bar_inner", style = "width: 0%; height: 100%; background-color: #3b82f6; transition: width 0.15s ease;")
+        ),
+        div(id = "prune_progress_status", style = "margin-top: 10px; font-weight: 600; color: #1e293b; font-size: 13px;",
             "Initializing baseline model and structural constraints...")
       )
     ))
 
-    # Defer optimization execution by 100ms via later::later to allow browser JS to render Progress Modal to DOM
-    later::later(function() {
-      base_model <- fit_model_safe()
-      if (!isTRUE(base_model$ok)) {
-        showModal(modalDialog(
-          title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
-          div(class = "alert alert-warning",
-              paste0("Could not fit baseline model for optimization: ", base_model$msg_friendly)),
-          easyClose = TRUE,
-          footer = modalButton("Dismiss")
-        ))
-        return()
+    # Initialize stepper state
+    sa_max_iter <- input$sa_max_iter %||% 80
+    ga_pop_size <- input$ga_pop_size %||% 12
+    ga_max_gen  <- input$ga_max_gen %||% 10
+
+    max_steps <- if (eff_strategy == "exhaustive") total_comb else if (eff_strategy == "sa") sa_max_iter else ga_max_gen
+    grid_matrix <- if (eff_strategy == "exhaustive") expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE)) else NULL
+
+    state_obj <- list(
+      eff_strategy = eff_strategy,
+      criterion = criterion,
+      base_fit = base_model$fit,
+      base_ms = base_ms,
+      base_score = base_score,
+      removable_paths = removable_paths,
+      M = M,
+      struct_df = struct_df,
+      pred_cols = pred_cols,
+      data = processed_data(),
+      meas_lines = mlines,
+      extra_lines = extra,
+      missing_method = input$missing_method,
+      needs_meanstructure = needs_meanstructure,
+      max_steps = max_steps,
+      grid_matrix = grid_matrix,
+      candidates_map = list(),
+      scores_hist = numeric(0),
+      best_scores_hist = numeric(0),
+      curr_vec = rep(TRUE, M),
+      curr_df = struct_df,
+      T_val = 10.0,
+      sa_alpha = input$sa_alpha %||% 0.90,
+      pop = if (eff_strategy == "ga") matrix(sample(c(TRUE, FALSE), ga_pop_size * M, replace = TRUE), nrow = ga_pop_size, ncol = M) else NULL,
+      ga_pop_size = ga_pop_size,
+      ga_max_gen = ga_max_gen,
+      ga_pmut = input$ga_pmut %||% 0.10
+    )
+
+    if (eff_strategy == "ga") state_obj$pop[1, ] <- TRUE
+
+    make_key <- function(s_df) {
+      lines <- c()
+      for (i in seq_len(nrow(s_df))) {
+        dp <- s_df$Dependent[i]
+        ps <- pred_cols[as.logical(s_df[i, pred_cols])]
+        if (length(ps)) lines <- c(lines, paste0(dp, "~", paste(sort(ps), collapse = ",")))
       }
+      res <- paste(sort(lines), collapse = ";")
+      if (!nzchar(res)) "EMPTY_PATH" else res
+    }
 
-      meas_syntax <- hot_to_r(input$input_table)
-      mlines <- unlist(lapply(seq_len(nrow(meas_syntax)), function(i) {
-        lt   <- meas_syntax$Latent[i]; if (!nzchar(lt)) return(NULL)
-        vars <- names(meas_syntax)[4:ncol(meas_syntax)]
-        inds <- vars[as.logical(meas_syntax[i, vars])]
-        if (!length(inds)) return(NULL)
-        paste0(lt, " =~ ", paste(inds, collapse = " + "))
-      }))
+    base_key <- make_key(struct_df)
+    state_obj$candidates_map[[base_key]] <- list(
+      removed_str = "None (Baseline Model)",
+      struct_df = struct_df,
+      fit = base_model$fit,
+      aic = as.numeric(base_ms["aic"]),
+      bic = as.numeric(base_ms["bic"]),
+      delta_aic = 0.0,
+      delta_bic = 0.0,
+      cfi = as.numeric(base_ms["cfi"]),
+      rmsea = as.numeric(base_ms["rmsea"]),
+      srmr = as.numeric(base_ms["srmr"]),
+      converged = TRUE,
+      status = "[Baseline]"
+    )
+
+    opt_state(state_obj)
+    opt_step(0)
+    opt_running(TRUE)
+  })
+
+  # Stepwise optimization execution observer with real-time UI yielding
+  observe({
+    req(opt_running())
+    step <- opt_step()
+    st <- opt_state()
+    req(st)
+
+    if (step >= st$max_steps) {
+      opt_running(FALSE)
       
-      extra <- strsplit(input$extra_eq, "\\n")[[1]]
-      extra <- trimws(extra)
-      extra <- extra[nzchar(extra)]
+      candidates_list <- unname(st$candidates_map)
+      scores <- vapply(candidates_list, function(x) {
+        if (!x$converged) return(Inf)
+        if (st$criterion == "AIC") x$aic else x$bic
+      }, numeric(1))
       
-      needs_meanstructure <- (input$analysis_mode == "raw" || 
-                              input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
-
-      res <- tryCatch({
-        withProgress(message = "Auto-Optimize Model in Progress", value = 0, {
-          sem_optimize_hybrid(
-            base_fit            = base_model$fit,
-            data                = processed_data(),
-            meas_lines          = mlines,
-            struct_df           = struct_table_data(),
-            lock_df             = prune_lock_table_data(),
-            extra_lines         = extra,
-            criterion           = input$prune_criterion,
-            missing_method      = input$missing_method,
-            needs_meanstructure = needs_meanstructure,
-            strategy            = input$prune_strategy,
-            max_exhaustive_comb = input$max_exhaustive_comb %||% 1024,
-            sa_ga_threshold     = input$sa_ga_threshold %||% 20,
-            sa_max_iter         = input$sa_max_iter %||% 80,
-            sa_alpha            = input$sa_alpha %||% 0.90,
-            ga_pop_size         = input$ga_pop_size %||% 12,
-            ga_max_gen          = input$ga_max_gen %||% 10,
-            ga_pmut             = input$ga_pmut %||% 0.10,
-            progress_cb         = function(val, detail) {
-              setProgress(value = val, detail = detail)
-            }
-          )
-        })
-      }, error = function(e) {
-        list(candidates = list(), message = paste("Optimization error:", e$message))
-      })
-
-      if (length(res$candidates) == 0) {
-        showModal(modalDialog(
-          title = span(icon("info-circle"), "Auto-Optimize Result"),
-          div(class = "alert alert-warning", res$message),
-          easyClose = TRUE,
-          footer = modalButton("Dismiss")
-        ))
-        return()
+      ord <- order(scores, decreasing = FALSE)
+      sorted_candidates <- candidates_list[ord]
+      if (length(sorted_candidates) > 0 && sorted_candidates[[1]]$converged && sorted_candidates[[1]]$status != "[Baseline]") {
+        sorted_candidates[[1]]$status <- "[Optimal]"
       }
-
+      
+      res <- list(
+        candidates = sorted_candidates,
+        criterion = st$criterion,
+        strategy_used = st$eff_strategy,
+        message = "Success"
+      )
+      
       prune_results(res)
       selected_prune_cand(res$candidates[[1]])
-
-      # Open Step 2 Modal (Candidate Ranking Catalog)
+      
       showModal(modalDialog(
         title = span(icon("list"), "Auto-Optimize Model: Step 2 - Candidate Ranking Catalog"),
         size = "l",
@@ -2078,7 +2303,205 @@ server <- function(input, output, session) {
           actionButton("apply_pruned_model", "Apply Selected Model to UI", icon = icon("check"), class = "btn btn-success")
         )
       ))
-    }, 100)
+      return()
+    }
+
+    fit_candidate_local <- function(curr_struct_df) {
+      slines <- lapply(seq_len(nrow(curr_struct_df)), function(i) {
+        dp <- curr_struct_df$Dependent[i]
+        if (!nzchar(dp)) return(NULL)
+        preds <- names(curr_struct_df)[3:ncol(curr_struct_df)]
+        ps <- preds[as.logical(curr_struct_df[i, preds])]
+        if (!length(ps)) return(NULL)
+        paste0(dp, " ~ ", paste(ps, collapse = " + "))
+      })
+      all_syntax <- unlist(c(st$meas_lines, slines, st$extra_lines))
+      if (!length(all_syntax)) return(NULL)
+      
+      tryCatch({
+        lavaan::sem(paste(all_syntax, collapse = "\n"),
+                    data          = st$data,
+                    missing       = st$missing_method,
+                    fixed.x       = FALSE,
+                    parser        = "old",
+                    meanstructure = st$needs_meanstructure,
+                    ncpus         = 1L)
+      }, error = function(e) NULL)
+    }
+
+    make_key_local <- function(s_df) {
+      lines <- c()
+      for (i in seq_len(nrow(s_df))) {
+        dp <- s_df$Dependent[i]
+        ps <- st$pred_cols[as.logical(s_df[i, st$pred_cols])]
+        if (length(ps)) lines <- c(lines, paste0(dp, "~", paste(sort(ps), collapse = ",")))
+      }
+      res <- paste(sort(lines), collapse = ";")
+      if (!nzchar(res)) "EMPTY_PATH" else res
+    }
+
+    build_candidate_record_local <- function(curr_s_df, removed_str) {
+      fm <- fit_candidate_local(curr_s_df)
+      if (is.null(fm) || !lavaan::lavInspect(fm, "converged")) {
+        return(list(
+          removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
+          struct_df = curr_s_df, fit = NULL,
+          aic = NA_real_, bic = NA_real_, delta_aic = NA_real_, delta_bic = NA_real_,
+          cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
+          converged = FALSE, status = "[Non-converged]"
+        ))
+      }
+      ms <- lavaan::fitMeasures(fm, c("aic", "bic", "cfi", "rmsea", "srmr"))
+      c_aic <- as.numeric(ms["aic"]); c_bic <- as.numeric(ms["bic"])
+      d_aic <- c_aic - as.numeric(st$base_ms["aic"])
+      d_bic <- c_bic - as.numeric(st$base_ms["bic"])
+      c_cfi <- as.numeric(ms["cfi"]); c_rmsea <- as.numeric(ms["rmsea"]); c_srmr <- as.numeric(ms["srmr"])
+      
+      stat <- "[Good]"
+      if ((st$criterion == "AIC" && d_aic < -0.01) || (st$criterion == "BIC" && d_bic < -0.01)) stat <- "[Improved]"
+      if ((!is.na(c_cfi) && c_cfi < 0.90) || (!is.na(c_rmsea) && c_rmsea > 0.08) || (!is.na(c_srmr) && c_srmr > 0.08)) stat <- "[Degraded Fit]"
+      
+      list(
+        removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
+        struct_df = curr_s_df, fit = fm,
+        aic = c_aic, bic = c_bic, delta_aic = d_aic, delta_bic = d_bic,
+        cfi = c_cfi, rmsea = c_rmsea, srmr = c_srmr, converged = TRUE, status = stat
+      )
+    }
+
+    curr_score_step <- st$base_score
+
+    if (st$eff_strategy == "exhaustive") {
+      row_i <- step + 1
+      state_vec <- as.logical(st$grid_matrix[row_i, ])
+      test_s_df <- st$struct_df
+      removed_paths_vec <- c()
+      for (idx in seq_along(st$removable_paths)) {
+        rp <- st$removable_paths[[idx]]
+        if (!state_vec[idx]) {
+          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+          removed_paths_vec <- c(removed_paths_vec, paste0(rp$dep, " ~ ", rp$pred))
+        }
+      }
+      k_str <- make_key_local(test_s_df)
+      if (!k_str %in% names(st$candidates_map)) {
+        rem_label <- paste(removed_paths_vec, collapse = "; ")
+        st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
+      }
+      rec <- st$candidates_map[[k_str]]
+      if (!is.null(rec) && isTRUE(rec$converged)) {
+        curr_score_step <- if (st$criterion == "AIC") rec$aic else rec$bic
+      }
+    } else if (st$eff_strategy == "sa") {
+      flip_pos <- sample.int(st$M, 1)
+      cand_vec <- st$curr_vec
+      cand_vec[flip_pos] <- !cand_vec[flip_pos]
+      
+      test_s_df <- st$struct_df
+      rem_vec <- c()
+      for (idx in seq_along(st$removable_paths)) {
+        rp <- st$removable_paths[[idx]]
+        if (!cand_vec[idx]) {
+          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+          rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
+        }
+      }
+      k_str <- make_key_local(test_s_df)
+      if (!k_str %in% names(st$candidates_map)) {
+        rem_label <- paste(rem_vec, collapse = "; ")
+        st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
+      }
+      c_rec <- st$candidates_map[[k_str]]
+      curr_rec <- st$candidates_map[[make_key_local(st$curr_df)]]
+      
+      if (!is.null(c_rec) && isTRUE(c_rec$converged)) {
+        c_score <- if (st$criterion == "AIC") c_rec$aic else c_rec$bic
+        curr_score_step <- c_score
+        curr_score <- if (!is.null(curr_rec) && isTRUE(curr_rec$converged)) {
+          if (st$criterion == "AIC") curr_rec$aic else curr_rec$bic
+        } else Inf
+        
+        dE <- as.numeric(c_score - curr_score)
+        if (!is.na(dE) && !is.nan(dE)) {
+          eff_T <- max(st$T_val, 1e-6)
+          prob <- if (dE < 0) 1.0 else exp(-dE / eff_T)
+          if (!is.na(prob) && !is.nan(prob) && runif(1) < prob) {
+            st$curr_vec <- cand_vec
+            st$curr_df <- test_s_df
+          }
+        }
+      }
+      st$T_val <- max(st$T_val * st$sa_alpha, 1e-6)
+    } else if (st$eff_strategy == "ga") {
+      evaluate_chrom_local <- function(chrom_vec) {
+        test_s_df <- st$struct_df
+        rem_vec <- c()
+        for (idx in seq_along(st$removable_paths)) {
+          rp <- st$removable_paths[[idx]]
+          if (!chrom_vec[idx]) {
+            test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+            rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
+          }
+        }
+        k_str <- make_key_local(test_s_df)
+        if (!k_str %in% names(st$candidates_map)) {
+          rem_label <- paste(rem_vec, collapse = "; ")
+          st$candidates_map[[k_str]] <<- build_candidate_record_local(test_s_df, rem_label)
+        }
+        rec <- st$candidates_map[[k_str]]
+        if (is.null(rec) || !isTRUE(rec$converged)) return(Inf)
+        if (st$criterion == "AIC") rec$aic else rec$bic
+      }
+
+      scores_ga <- apply(st$pop, 1, evaluate_chrom_local)
+      best_idx <- which.min(scores_ga)
+      curr_score_step <- scores_ga[best_idx]
+      
+      new_pop <- st$pop
+      new_pop[1, ] <- st$pop[best_idx, ]
+      
+      for (p in seq(2, st$ga_pop_size, by = 2)) {
+        i1 <- sample.int(st$ga_pop_size, 2); parent1 <- st$pop[i1[which.min(scores_ga[i1])], ]
+        i2 <- sample.int(st$ga_pop_size, 2); parent2 <- st$pop[i2[which.min(scores_ga[i2])], ]
+        if (st$M > 1 && runif(1) < 0.80) {
+          x_pt <- sample.int(st$M - 1, 1)
+          child1 <- c(parent1[1:x_pt], parent2[(x_pt + 1):st$M])
+          child2 <- c(parent2[1:x_pt], parent1[(x_pt + 1):st$M])
+        } else {
+          child1 <- parent1; child2 <- parent2
+        }
+        mut1 <- runif(st$M) < st$ga_pmut; child1[mut1] <- !child1[mut1]
+        mut2 <- runif(st$M) < st$ga_pmut; child2[mut2] <- !child2[mut2]
+        new_pop[p, ] <- child1
+        if (p + 1 <= st$ga_pop_size) new_pop[p + 1, ] <- child2
+      }
+      st$pop <- new_pop
+    }
+
+    st$scores_hist <- c(st$scores_hist, curr_score_step)
+    valid_scores <- Filter(function(v) is.numeric(v) && !is.na(v) && is.finite(v), st$scores_hist)
+    best_curr <- if (length(valid_scores) > 0) min(min(valid_scores), st$base_score) else st$base_score
+    st$best_scores_hist <- c(st$best_scores_hist, best_curr)
+
+    opt_state(st)
+
+    detail_msg <- sprintf(
+      "Step %d / %d | Current %s: %.2f | Best: %.2f (Δ %+.2f)",
+      step + 1, st$max_steps, st$criterion,
+      curr_score_step, best_curr, best_curr - st$base_score
+    )
+
+    session$sendCustomMessage("update_optimization_live_chart", list(
+      step = step + 1,
+      maxIter = st$max_steps,
+      scores = st$scores_hist,
+      best_scores = st$best_scores_hist,
+      baseScore = st$base_score,
+      detail = detail_msg
+    ))
+
+    invalidateLater(15, session)
+    opt_step(step + 1)
   })
 
   # Render Candidate Ranking Table
