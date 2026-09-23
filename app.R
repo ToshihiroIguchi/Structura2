@@ -2013,9 +2013,7 @@ server <- function(input, output, session) {
                  selectInput("prune_strategy", "Search Algorithm Strategy:",
                              choices = c("Adaptive Auto-Switch (Recommended)" = "adaptive",
                                          "Stepwise Search (Fast & Deterministic)" = "stepwise",
-                                         "Exhaustive Search (100% Exact All-Subset)" = "exhaustive",
-                                         "Simulated Annealing (SA - Specialized Option)" = "sa",
-                                         "Genetic Algorithm (GA - Evolutionary Search)" = "ga"),
+                                         "Exhaustive Search (100% Exact All-Subset)" = "exhaustive"),
                              selected = "adaptive")
           )
         ),
@@ -2031,36 +2029,6 @@ server <- function(input, output, session) {
               condition = "input.prune_strategy == 'adaptive' || input.prune_strategy == 'exhaustive'",
               numericInput("max_exhaustive_comb", "Exhaustive Search Max Combinations Threshold:",
                            value = 1024, min = 64, max = 8192, step = 64)
-            ),
-            conditionalPanel(
-              condition = "input.prune_strategy == 'adaptive'",
-              numericInput("sa_ga_threshold", "SA / GA Switching Threshold (Max paths for SA):",
-                           value = 20, min = 5, max = 100, step = 1)
-            ),
-            conditionalPanel(
-              condition = "input.prune_strategy == 'sa' || (input.prune_strategy == 'adaptive')",
-              fluidRow(
-                column(width = 6,
-                       numericInput("sa_max_iter", "SA Max Iterations:", value = 80, min = 20, max = 500)
-                ),
-                column(width = 6,
-                       numericInput("sa_alpha", "SA Cooling Rate (Alpha):", value = 0.90, min = 0.50, max = 0.99, step = 0.01)
-                )
-              )
-            ),
-            conditionalPanel(
-              condition = "input.prune_strategy == 'ga' || (input.prune_strategy == 'adaptive')",
-              fluidRow(
-                column(width = 4,
-                       numericInput("ga_pop_size", "GA Population Size:", value = 12, min = 6, max = 50)
-                ),
-                column(width = 4,
-                       numericInput("ga_max_gen", "GA Generations:", value = 10, min = 5, max = 30)
-                ),
-                column(width = 4,
-                       numericInput("ga_pmut", "GA Mutation Rate:", value = 0.10, min = 0.01, max = 0.50, step = 0.01)
-                )
-              )
             )
           )
         )
