@@ -2013,7 +2013,8 @@ server <- function(input, output, session) {
                  selectInput("prune_strategy", "Search Algorithm Strategy:",
                              choices = c("Adaptive Auto-Switch (Recommended)" = "adaptive",
                                          "Stepwise Search (Fast & Deterministic)" = "stepwise",
-                                         "Exhaustive Search (100% Exact All-Subset)" = "exhaustive"),
+                                         "Exhaustive Search (100% Exact All-Subset)" = "exhaustive",
+                                         "Simulated Annealing (SA - Fast Trajectory Search)" = "sa"),
                              selected = "adaptive")
           )
         ),
@@ -2029,6 +2030,14 @@ server <- function(input, output, session) {
               condition = "input.prune_strategy == 'adaptive' || input.prune_strategy == 'exhaustive'",
               numericInput("max_exhaustive_comb", "Exhaustive Search Max Combinations Threshold:",
                            value = 1024, min = 64, max = 8192, step = 64)
+            ),
+            conditionalPanel(
+              condition = "input.prune_strategy == 'sa'",
+              fluidRow(
+                column(4, numericInput("sa_max_iter", "SA Max Iterations:", value = 100, min = 20, max = 500, step = 10)),
+                column(4, numericInput("sa_temp_init", "SA Initial Temp:", value = 10.0, min = 1.0, max = 100.0, step = 1.0)),
+                column(4, numericInput("sa_cooling_rate", "SA Cooling Rate (Alpha):", value = 0.90, min = 0.50, max = 0.99, step = 0.01))
+              )
             )
           )
         )
