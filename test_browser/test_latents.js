@@ -12,11 +12,11 @@ const puppeteer = require('puppeteer-core');
   page.on('console', msg => console.log('BROWSER LOG:', msg.text()));
   page.on('pageerror', err => console.error('BROWSER ERROR:', err.message));
 
-  console.log('Navigating to http://localhost:8080 ...');
+  console.log('Navigating to http://localhost:8100 ...');
   try {
-    await page.goto('http://localhost:8080', { waitUntil: 'networkidle2', timeout: 30000 });
+    await page.goto('http://localhost:8100', { waitUntil: 'networkidle2', timeout: 30000 });
   } catch (err) {
-    console.error('Failed to navigate to app. Make sure the local server is running on 8080.', err);
+    console.error('Failed to navigate to app. Make sure the local server is running on 8100.', err);
     await browser.close();
     process.exit(1);
   }

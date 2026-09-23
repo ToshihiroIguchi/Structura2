@@ -11,8 +11,8 @@ const puppeteer = require('puppeteer-core');
   const page = await browser.newPage();
   page.on('console', msg => console.log('BROWSER LOG:', msg.text()));
 
-  console.log('Navigating to http://localhost:8080 ...');
-  await page.goto('http://localhost:8080', { waitUntil: 'networkidle2', timeout: 45000 });
+  console.log('Navigating to http://localhost:8100 ...');
+  await page.goto('http://localhost:8100', { waitUntil: 'networkidle2', timeout: 45000 });
   
   console.log('Waiting 8 seconds for app startup...');
   await new Promise(resolve => setTimeout(resolve, 8000));

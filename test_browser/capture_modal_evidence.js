@@ -13,8 +13,8 @@ const puppeteer = require('puppeteer-core');
   page.on('console', msg => console.log('BROWSER LOG:', msg.text()));
   page.on('pageerror', err => console.error('BROWSER ERROR:', err.message));
   
-  console.log('Navigating to http://localhost:8080 ...');
-  await page.goto('http://localhost:8080', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  console.log('Navigating to http://localhost:8100 ...');
+  await page.goto('http://localhost:8100', { waitUntil: 'domcontentloaded', timeout: 60000 });
   
   console.log('Waiting for Load Data modal / sample_ds radio (up to 90s for WebR preload)...');
   await page.waitForSelector('input[name="sample_ds"][value="HolzingerSwineford1939"]', { timeout: 90000 });

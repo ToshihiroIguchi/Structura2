@@ -8,7 +8,7 @@ const puppeteer = require('puppeteer-core');
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   });
   const page = await browser.newPage();
-  await page.goto('http://localhost:8080', { waitUntil: 'networkidle2', timeout: 30000 });
+  await page.goto('http://localhost:8100', { waitUntil: 'networkidle2', timeout: 30000 });
   await new Promise(resolve => setTimeout(resolve, 5000));
   await page.screenshot({ path: 'test_browser/debug_screen.png' });
   const html = await page.content();

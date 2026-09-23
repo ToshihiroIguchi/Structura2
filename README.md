@@ -52,7 +52,7 @@ There are several ways to launch and run **Structura2**, depending on whether yo
 ### Option 1: Live Demo (No Setup Required)
 
 Simply access the application online via GitHub Pages:
-👉 **[Structura2 Live Demo](https://toshihiroiguchi.github.io/Structura2/)**
+**[Structura2 Live Demo](https://toshihiroiguchi.github.io/Structura2/)**
 
 * **How it works**: This version is compiled into WebAssembly using **ShinyLive** and runs entirely inside your web browser.
 * **Requirements**: A modern web browser (Google Chrome, Microsoft Edge, Mozilla Firefox, or Apple Safari). No R installation or setup is needed.

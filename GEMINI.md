@@ -7,6 +7,10 @@
 - **All direct communication with the USER must be in Japanese.**
 - **All code, comments, commit messages, documentation, and file contents must be written in English.**
 
+## Port Configuration
+
+- Always use port **8100** as the default port for local Shiny application running, testing, and browser automation scripts (do not use 8080).
+
 ## Code Style
 
 - Use consistent R coding style: `snake_case` for variable and function names.

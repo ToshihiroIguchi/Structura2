@@ -11,7 +11,7 @@ const puppeteer = require('puppeteer-core');
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 900 });
 
-  await page.goto('http://localhost:8080', { waitUntil: 'networkidle2', timeout: 60000 });
+  await page.goto('http://localhost:8100', { waitUntil: 'networkidle2', timeout: 60000 });
 
   let targetFrame = null;
   for (let i = 0; i < 40; i++) {

@@ -13,7 +13,7 @@ const puppeteer = require('puppeteer-core');
 
   page.on('console', msg => console.log('BROWSER:', msg.text()));
 
-  await page.goto('http://localhost:8080', { waitUntil: 'networkidle2', timeout: 60000 });
+  await page.goto('http://localhost:8100', { waitUntil: 'networkidle2', timeout: 60000 });
 
   let targetFrame = null;
   for (let i = 0; i < 40; i++) {

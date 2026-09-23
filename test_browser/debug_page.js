@@ -1,7 +1,7 @@
 const puppeteer = require('puppeteer-core');
 
 (async () => {
-  console.log('Debugging Shinylive iframe and frames on http://localhost:8080 ...');
+  console.log('Debugging Shinylive iframe and frames on http://localhost:8100 ...');
   const browser = await puppeteer.launch({
     executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
     headless: true,
@@ -14,7 +14,7 @@ const puppeteer = require('puppeteer-core');
   page.on('console', msg => console.log('BROWSER LOG:', msg.text()));
   page.on('pageerror', err => console.error('BROWSER ERROR:', err.message));
 
-  await page.goto('http://localhost:8080', { waitUntil: 'networkidle2', timeout: 60000 });
+  await page.goto('http://localhost:8100', { waitUntil: 'networkidle2', timeout: 60000 });
 
   console.log('Waiting 30s for Shinylive iframe to mount...');
   await new Promise(r => setTimeout(r, 30000));
