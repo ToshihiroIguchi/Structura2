@@ -325,7 +325,7 @@ lavaan_to_equations <- function(fit, digits = 3) {
 # Genetic Algorithm (GA), or Adaptive Auto-Switch without artificial p-value pre-filtering.
 sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, extra_lines = character(0),
                                 criterion = c("AIC", "BIC"), missing_method = "listwise",
-                                needs_meanstructure = FALSE, strategy = c("adaptive", "exhaustive", "sa", "ga"),
+                                needs_meanstructure = FALSE, strategy = c("adaptive", "stepwise", "exhaustive", "sa", "ga"),
                                 max_exhaustive_comb = 1024, sa_ga_threshold = 20,
                                 sa_max_iter = 200, sa_alpha = 0.90,
                                 ga_pop_size = 20, ga_max_gen = 15, ga_pmut = 0.10,
@@ -441,10 +441,8 @@ sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, 
   if (strategy == "adaptive") {
     if (total_comb <= max_exhaustive_comb) {
       eff_strategy <- "exhaustive"
-    } else if (M <= sa_ga_threshold) {
-      eff_strategy <- "sa"
     } else {
-      eff_strategy <- "ga"
+      eff_strategy <- "stepwise"
     }
   }
 
@@ -477,7 +475,56 @@ sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, 
     status = "[Baseline]"
   )
 
-  if (eff_strategy == "exhaustive") {
+  if (eff_strategy == "stepwise") {
+    curr_s_df <- struct_df
+    improved <- TRUE
+    
+    while (improved) {
+      improved <- FALSE
+      best_step_s_df <- curr_s_df
+      curr_k <- make_key(curr_s_df)
+      best_step_rec <- candidates_map[[curr_k]]
+      best_score <- if (!is.null(best_step_rec) && isTRUE(best_step_rec$converged)) {
+        if (criterion == "AIC") best_step_rec$aic else best_step_rec$bic
+      } else Inf
+      
+      for (idx in seq_along(removable_paths)) {
+        rp <- removable_paths[[idx]]
+        if (isTRUE(as.logical(curr_s_df[curr_s_df$Dependent == rp$dep, rp$pred]))) {
+          test_s_df <- curr_s_df
+          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+          
+          rem_vec <- c()
+          for (j in seq_along(removable_paths)) {
+            jp <- removable_paths[[j]]
+            if (!isTRUE(as.logical(test_s_df[test_s_df$Dependent == jp$dep, jp$pred]))) {
+              rem_vec <- c(rem_vec, paste0(jp$dep, " ~ ", jp$pred))
+            }
+          }
+          
+          k_str <- make_key(test_s_df)
+          if (!k_str %in% names(candidates_map)) {
+            rem_label <- paste(rem_vec, collapse = "; ")
+            candidates_map[[k_str]] <- build_candidate_record(test_s_df, rem_label)
+          }
+          
+          rec <- candidates_map[[k_str]]
+          if (!is.null(rec) && isTRUE(rec$converged)) {
+            cand_score <- if (criterion == "AIC") rec$aic else rec$bic
+            if (!is.na(cand_score) && cand_score < best_score - 0.01) {
+              best_score <- cand_score
+              best_step_s_df <- test_s_df
+              improved <- TRUE
+            }
+          }
+        }
+      }
+      
+      if (improved) {
+        curr_s_df <- best_step_s_df
+      }
+    }
+  } else if (eff_strategy == "exhaustive") {
     grid <- expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE))
     total_grid_rows <- nrow(grid)
     for (row_i in seq_len(total_grid_rows)) {
@@ -1076,7 +1123,7 @@ ui <- fluidPage(
                            actionButton("run_model", "Run / Update Model",
                                         class = "btn btn-success"),
                            shinyjs::hidden(
-                             actionButton("prune_model_btn", "Auto-Optimize Model", icon = icon("sliders-h"),
+                             actionButton("prune_model_btn", "Auto-Optimize Model",
                                           class = "btn btn-info")
                            )
                        ),
@@ -1190,7 +1237,7 @@ server <- function(input, output, session) {
       # Show the initial load data modal dialog after dependencies are loaded
       showModal(
         modalDialog(
-          title = span(icon("upload"), "Load Data"),
+          title = "Load Data",
           fileInput("datafile", NULL,
                     buttonLabel = "Browse…",
                     placeholder  = "Upload CSV",
@@ -1946,7 +1993,7 @@ server <- function(input, output, session) {
     prune_lock_table_data(lock_df)
 
     showModal(modalDialog(
-      title = span(icon("sliders-h"), "Auto-Optimize Model: Step 1 - Strategy, Parameters & Path Locking"),
+      title = "Auto-Optimize Model: Step 1 - Strategy, Parameters & Path Locking",
       size = "l",
       div(
         style = "padding: 10px;",
@@ -1965,8 +2012,9 @@ server <- function(input, output, session) {
           column(width = 6,
                  selectInput("prune_strategy", "Search Algorithm Strategy:",
                              choices = c("Adaptive Auto-Switch (Recommended)" = "adaptive",
+                                         "Stepwise Search (Fast & Deterministic)" = "stepwise",
                                          "Exhaustive Search (100% Exact All-Subset)" = "exhaustive",
-                                         "Simulated Annealing (SA - Fast Trajectory Search)" = "sa",
+                                         "Simulated Annealing (SA - Specialized Option)" = "sa",
                                          "Genetic Algorithm (GA - Evolutionary Search)" = "ga"),
                              selected = "adaptive")
           )
@@ -1975,7 +2023,7 @@ server <- function(input, output, session) {
           style = "margin-top: 15px; border: 1px solid #ddd; padding: 10px; border-radius: 4px; background-color: #fafafa;",
           tags$summary(
             style = "font-weight: bold; cursor: pointer; color: #333;",
-            icon("sliders-h"), " Advanced Algorithm Hyper-Parameters"
+            "Advanced Algorithm Hyper-Parameters"
           ),
           div(
             style = "margin-top: 10px;",
@@ -2019,7 +2067,7 @@ server <- function(input, output, session) {
       ),
       footer = tagList(
         modalButton("Cancel"),
-        actionButton("run_prune_explore", "Run Optimization", icon = icon("play"), class = "btn btn-primary")
+        actionButton("run_prune_explore", "Run Optimization", class = "btn btn-primary")
       )
     ))
   })
@@ -2133,10 +2181,8 @@ server <- function(input, output, session) {
     if (strategy == "adaptive") {
       if (total_comb <= max_comb) {
         eff_strategy <- "exhaustive"
-      } else if (M <= sa_ga_thresh) {
-        eff_strategy <- "sa"
       } else {
-        eff_strategy <- "ga"
+        eff_strategy <- "stepwise"
       }
     }
 
@@ -2185,7 +2231,7 @@ server <- function(input, output, session) {
     ga_pop_size <- input$ga_pop_size %||% 12
     ga_max_gen  <- input$ga_max_gen %||% 10
 
-    max_steps <- if (eff_strategy == "exhaustive") total_comb else if (eff_strategy == "sa") sa_max_iter else ga_max_gen
+    max_steps <- if (eff_strategy == "exhaustive") total_comb else if (eff_strategy == "stepwise") M else if (eff_strategy == "sa") sa_max_iter else ga_max_gen
     grid_matrix <- if (eff_strategy == "exhaustive") expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE)) else NULL
 
     state_obj <- list(
@@ -2285,23 +2331,32 @@ server <- function(input, output, session) {
       selected_prune_cand(res$candidates[[1]])
       
       showModal(modalDialog(
-        title = span(icon("list"), "Auto-Optimize Model: Step 2 - Candidate Ranking Catalog"),
+        title = div(
+          style = "display: flex; justify-content: space-between; align-items: center; width: calc(100% - 30px); margin-right: 15px;",
+          span("Auto-Optimize Model: Step 2 - Candidate Ranking Catalog", style = "font-weight: bold;"),
+          div(
+            style = "display: flex; gap: 8px; align-items: center;",
+            modalButton("Close / Cancel"),
+            actionButton("apply_pruned_model", "Apply Selected Model to UI", class = "btn btn-success", style = "font-weight: 600; white-space: nowrap;")
+          )
+        ),
         size = "l",
         div(
           style = "padding: 10px;",
-          p(sprintf("Strategy Used: %s. Click any candidate row in the table below to preview its path diagram. Models with degraded fit indices are flagged.", toupper(res$strategy_used))),
+          div(
+            style = "background-color: #f8fafc; padding: 10px 14px; border-radius: 6px; border: 1px solid #e2e8f0; margin-bottom: 15px;",
+            p(sprintf("Strategy Used: %s. Click any candidate row in the table below to preview its path diagram. Models with degraded fit indices are flagged.", toupper(res$strategy_used)),
+              style = "margin: 0; font-size: 13px; color: #334155;")
+          ),
           DTOutput("prune_candidates_table"),
-          tags$hr(),
-          h5("Path Diagram Preview for Selected Candidate:"),
+          tags$hr(style = "margin: 15px 0;"),
+          h5("Path Diagram Preview for Selected Candidate:", style = "margin-top: 0; margin-bottom: 10px;"),
           div(style = "height: 320px; border: 1px solid #ccc; position: relative; border-radius: 4px; overflow: hidden;",
               tags$div(id = "prune_preview_container", 
                        style = "width:100%; height:100%; display: flex; align-items: center; justify-content: center; color: #666;",
                        "Select a candidate row above to view preview."))
         ),
-        footer = tagList(
-          modalButton("Close / Cancel"),
-          actionButton("apply_pruned_model", "Apply Selected Model to UI", icon = icon("check"), class = "btn btn-success")
-        )
+        footer = NULL
       ))
       return()
     }
@@ -2371,7 +2426,53 @@ server <- function(input, output, session) {
 
     curr_score_step <- st$base_score
 
-    if (st$eff_strategy == "exhaustive") {
+    if (st$eff_strategy == "stepwise") {
+      curr_k <- make_key_local(st$curr_df)
+      curr_rec <- st$candidates_map[[curr_k]]
+      best_score <- if (!is.null(curr_rec) && isTRUE(curr_rec$converged)) {
+        if (st$criterion == "AIC") curr_rec$aic else curr_rec$bic
+      } else Inf
+      
+      best_step_s_df <- st$curr_df
+      improved <- FALSE
+      
+      for (idx in seq_along(st$removable_paths)) {
+        rp <- st$removable_paths[[idx]]
+        if (isTRUE(as.logical(st$curr_df[st$curr_df$Dependent == rp$dep, rp$pred]))) {
+          test_s_df <- st$curr_df
+          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+          
+          rem_vec <- c()
+          for (j in seq_along(st$removable_paths)) {
+            jp <- st$removable_paths[[j]]
+            if (!isTRUE(as.logical(test_s_df[test_s_df$Dependent == jp$dep, jp$pred]))) {
+              rem_vec <- c(rem_vec, paste0(jp$dep, " ~ ", jp$pred))
+            }
+          }
+          k_str <- make_key_local(test_s_df)
+          if (!k_str %in% names(st$candidates_map)) {
+            rem_label <- paste(rem_vec, collapse = "; ")
+            st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
+          }
+          rec <- st$candidates_map[[k_str]]
+          if (!is.null(rec) && isTRUE(rec$converged)) {
+            cand_score <- if (st$criterion == "AIC") rec$aic else rec$bic
+            if (!is.na(cand_score) && cand_score < best_score - 0.01) {
+              best_score <- cand_score
+              best_step_s_df <- test_s_df
+              improved <- TRUE
+            }
+          }
+        }
+      }
+      
+      if (improved) {
+        st$curr_df <- best_step_s_df
+        curr_score_step <- best_score
+      } else {
+        opt_step(st$max_steps + 1)
+      }
+    } else if (st$eff_strategy == "exhaustive") {
       row_i <- step + 1
       state_vec <- as.logical(st$grid_matrix[row_i, ])
       test_s_df <- st$struct_df
