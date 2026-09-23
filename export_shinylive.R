@@ -87,9 +87,16 @@ if (file.exists(index_html)) {
   # Update title (using case-insensitive regex for title tag to be robust)
   html_content <- gsub("<title>.*?</title>", "<title>Structura2</title>", html_content, ignore.case = TRUE)
   
-  # Inject favicon.ico and custom CSS overrides before </head>
+  # Inject favicon.ico, SW cache buster, and custom CSS overrides before </head>
   custom_css <- paste0(
     '    <link rel="icon" type="image/x-icon" href="./favicon.ico" />\n',
+    '    <script>\n',
+    '      if ("serviceWorker" in navigator) {\n',
+    '        navigator.serviceWorker.getRegistrations().then(function(regs) {\n',
+    '          for (let reg of regs) { reg.update(); }\n',
+    '        });\n',
+    '      }\n',
+    '    </script>\n',
     '    <style>\n',
     '      body, html {\n',
     '        background-color: #0f172a !important;\n',
