@@ -2092,14 +2092,14 @@ server <- function(input, output, session) {
           style = "background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 12px; margin-bottom: 15px;",
           div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;",
               tags$b(icon("shield-alt"), " Variable Isolation Prevention (Keep in Model)", style = "color: #1e293b; font-size: 14px;"),
-              span(style = "font-size: 11px; color: #64748b;", "Ensures >= 1 structural path is preserved")
+              span(style = "font-size: 11px; color: #64748b;", "At least one connecting path will be retained")
           ),
-          p("Select variables that must NOT be dropped completely from the model during optimization (at least one connecting path will always be retained).",
-            style = "font-size: 12px; color: #475569; margin-bottom: 10px;"),
+          p("Select variables to keep in the model (at least one connecting path will always be retained).",
+            style = "font-size: 12px; color: #64748b; margin-bottom: 10px;"),
           fluidRow(
             column(width = 6,
                    div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;",
-                       tags$label("Dependent Variables (In-degree >= 1):", style = "font-size: 12px; font-weight: 600; margin: 0; color: #334155;"),
+                       tags$label("Dependent Variables:", style = "font-size: 12px; font-weight: 600; margin: 0; color: #334155;"),
                        div(actionLink("retain_deps_all", "All", style = "font-size: 11px; margin-right: 6px; cursor: pointer;"),
                            actionLink("retain_deps_none", "None", style = "font-size: 11px; cursor: pointer;"))
                    ),
@@ -2109,7 +2109,7 @@ server <- function(input, output, session) {
             ),
             column(width = 6,
                    div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;",
-                       tags$label("Predictor Variables (Out-degree >= 1):", style = "font-size: 12px; font-weight: 600; margin: 0; color: #334155;"),
+                       tags$label("Predictor Variables:", style = "font-size: 12px; font-weight: 600; margin: 0; color: #334155;"),
                        div(actionLink("retain_preds_all", "All", style = "font-size: 11px; margin-right: 6px; cursor: pointer;"),
                            actionLink("retain_preds_none", "None", style = "font-size: 11px; cursor: pointer;"))
                    ),
@@ -2119,9 +2119,9 @@ server <- function(input, output, session) {
             )
           )
         ),
-        p("Select structural paths to ", tags$b("LOCK [x] (protect from pruning)"), "."),
+        p("Select structural paths to lock (protect from pruning).", style = "font-size: 13px; color: #334155; margin-bottom: 4px;"),
         p("Highlighted cells represent active paths in your current model. Unchecked active paths will be evaluated for optimization.",
-          style = "font-size: 13px; color: #555;"),
+          style = "font-size: 12px; color: #64748b;"),
         rHandsontableOutput("prune_lock_table"),
         tags$hr(),
         fluidRow(
