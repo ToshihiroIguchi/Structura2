@@ -58,9 +58,9 @@ const puppeteer = require('puppeteer-core');
     addLog(`Network FAILED: ${url}`);
   });
 
-  addLog('Navigating to http://localhost:8000 ...');
+  addLog('Navigating to http://localhost:8100 ...');
   try {
-    await page.goto('http://localhost:8000', { waitUntil: 'load', timeout: 120000 });
+    await page.goto('http://localhost:8100', { waitUntil: 'load', timeout: 120000 });
     addLog('Main page loaded.');
   } catch (err) {
     addLog(`Navigation error: ${err.message}`);

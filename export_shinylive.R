@@ -143,5 +143,5 @@ if (dir.exists(src_dir)) {
 
 cat("\nShinyLive export complete. The static site has been generated in the 'site/' directory.\n")
 cat("To preview the app locally, run:\n")
-cat("  python -m http.server 8000 --directory site\n")
-cat("And navigate to: http://localhost:8000\n")
+cat("  python -m http.server 8100 --directory site\n")
+cat("And navigate to: http://localhost:8100\n")

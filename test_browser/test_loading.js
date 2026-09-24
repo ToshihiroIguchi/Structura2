@@ -25,9 +25,9 @@ const path = require('path');
     console.error('BROWSER ERROR:', err.message);
   });
 
-  console.log('Navigating to http://localhost:8000 ...');
+  console.log('Navigating to http://localhost:8100 ...');
   try {
-    await page.goto('http://localhost:8000', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://localhost:8100', { waitUntil: 'domcontentloaded' });
     await new Promise(resolve => setTimeout(resolve, 800)); // Delay for page/sw redirect stability
   } catch (err) {
     console.error('Navigation failed.', err);

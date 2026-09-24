@@ -16,8 +16,8 @@ const fs = require('fs');
 
   const runTestForFile = async (fileName, outputName) => {
     console.log(`\n--- Testing file: ${fileName} ---`);
-    console.log('Navigating to http://localhost:8000 ...');
-    await page.goto('http://localhost:8000', { waitUntil: 'networkidle2', timeout: 90000 });
+    console.log('Navigating to http://localhost:8100 ...');
+    await page.goto('http://localhost:8100', { waitUntil: 'networkidle2', timeout: 90000 });
     
     console.log('Waiting for shinylive iframe to load...');
     await page.waitForSelector('iframe', { timeout: 30000 });

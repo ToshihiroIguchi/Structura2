@@ -43,8 +43,8 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(8000, async () => {
-  console.log('Server started on http://localhost:8000');
+server.listen(8100, async () => {
+  console.log('Server started on http://localhost:8100');
   
   try {
     await capture();
@@ -73,8 +73,8 @@ async function capture() {
   page.on('console', msg => console.log('BROWSER LOG:', msg.text()));
   page.on('pageerror', err => console.error('BROWSER ERROR:', err.message));
 
-  console.log('Navigating to http://localhost:8000 ...');
-  await page.goto('http://localhost:8000', { waitUntil: 'networkidle2', timeout: 90000 });
+  console.log('Navigating to http://localhost:8100 ...');
+  await page.goto('http://localhost:8100', { waitUntil: 'networkidle2', timeout: 90000 });
 
   console.log('Waiting for shinylive iframe...');
   await page.waitForSelector('iframe', { timeout: 30000 });

@@ -123,19 +123,19 @@ You can compile the app into a static WebAssembly site and serve it locally. Thi
      In R, install the `servr` package and serve the directory:
      ```r
      install.packages("servr")
-     servr::httwd("site", port = 8000)
+     servr::httwd("site", port = 8100)
      ```
    * **Method B: Using Python 3**
      In your terminal, run:
      ```bash
-     python -m http.server 8000 --directory site
+     python -m http.server 8100 --directory site
      ```
    * **Method C: Using Node.js (http-server)**
      In your terminal, run:
      ```bash
-     npx http-server site -p 8000
+     npx http-server site -p 8100
      ```
-4. **Access the App**: Open your web browser and navigate to `http://localhost:8000`.
+4. **Access the App**: Open your web browser and navigate to `http://localhost:8100`.
 
 ---
 

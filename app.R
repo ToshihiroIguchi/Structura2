@@ -320,6 +320,22 @@ lavaan_to_equations <- function(fit, digits = 3) {
   eq_lines
 }
 
+# ---------- Helper: Retained Path String Generator -----------------
+build_retained_str <- function(struct_df) {
+  if (is.null(struct_df) || ncol(struct_df) < 3) return("None (Empty Model)")
+  pred_cols <- names(struct_df)[3:ncol(struct_df)]
+  lines <- c()
+  for (i in seq_len(nrow(struct_df))) {
+    dp <- struct_df$Dependent[i]
+    if (!nzchar(dp)) next
+    ps <- pred_cols[as.logical(struct_df[i, pred_cols])]
+    if (length(ps) > 0) {
+      lines <- c(lines, paste0(dp, " ~ ", paste(ps, collapse = " + ")))
+    }
+  }
+  if (length(lines) > 0) paste(lines, collapse = " ; ") else "None (Empty Model)"
+}
+
 
 
 # ---- Helper: Multi-Algorithm Model Optimization Engine ---------------------------
@@ -396,9 +412,11 @@ sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, 
 
   build_candidate_record <- function(curr_s_df, removed_str) {
     fm <- fit_candidate(curr_s_df)
+    ret_str <- build_retained_str(curr_s_df)
     if (is.null(fm) || !lavaan::lavInspect(fm, "converged")) {
       return(list(
         removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
+        retained_str = ret_str,
         struct_df = curr_s_df,
         fit = NULL,
         aic = NA_real_, bic = NA_real_, delta_aic = NA_real_, delta_bic = NA_real_,
@@ -427,6 +445,7 @@ sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, 
     
     list(
       removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
+      retained_str = ret_str,
       struct_df = curr_s_df,
       fit = fm,
       aic = c_aic, bic = c_bic,
@@ -464,6 +483,7 @@ sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, 
   base_key <- make_key(struct_df)
   candidates_map[[base_key]] <- list(
     removed_str = "None (Baseline Model)",
+    retained_str = build_retained_str(struct_df),
     struct_df = struct_df,
     fit = base_fit,
     aic = as.numeric(base_ms["aic"]),
@@ -2259,6 +2279,7 @@ server <- function(input, output, session) {
     base_key <- make_key(struct_df)
     state_obj$candidates_map[[base_key]] <- list(
       removed_str = "None (Baseline Model)",
+      retained_str = build_retained_str(struct_df),
       struct_df = struct_df,
       fit = base_model$fit,
       aic = as.numeric(base_ms["aic"]),
@@ -2376,9 +2397,11 @@ server <- function(input, output, session) {
 
     build_candidate_record_local <- function(curr_s_df, removed_str) {
       fm <- fit_candidate_local(curr_s_df)
+      ret_str <- build_retained_str(curr_s_df)
       if (is.null(fm) || !lavaan::lavInspect(fm, "converged")) {
         return(list(
           removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
+          retained_str = ret_str,
           struct_df = curr_s_df, fit = NULL,
           aic = NA_real_, bic = NA_real_, delta_aic = NA_real_, delta_bic = NA_real_,
           cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
@@ -2397,6 +2420,7 @@ server <- function(input, output, session) {
       
       list(
         removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
+        retained_str = ret_str,
         struct_df = curr_s_df, fit = fm,
         aic = c_aic, bic = c_bic, delta_aic = d_aic, delta_bic = d_bic,
         cfi = c_cfi, rmsea = c_rmsea, srmr = c_srmr, converged = TRUE, status = stat
@@ -2593,10 +2617,11 @@ server <- function(input, output, session) {
     crit <- res$criterion
     df_list <- lapply(seq_along(cands), function(i) {
       c_item <- cands[[i]]
+      ret_str <- if (is.null(c_item$retained_str)) build_retained_str(c_item$struct_df) else c_item$retained_str
       data.frame(
         Rank = i,
         Status = c_item$status,
-        `Removed Paths` = c_item$removed_str,
+        `Retained Paths` = ret_str,
         AIC = if (is.na(c_item$aic)) "—" else sprintf("%.2f", c_item$aic),
         BIC = if (is.na(c_item$bic)) "—" else sprintf("%.2f", c_item$bic),
         `ΔAIC` = if (is.na(c_item$delta_aic)) "—" else sprintf("%+.2f", c_item$delta_aic),

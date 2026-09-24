@@ -86,5 +86,5 @@ This generates a `site/` directory with static HTML/JS/WASM assets.
 
 ### Serving the Static Site Locally
 ```bash
-python -m http.server 8000 --directory site
+python -m http.server 8100 --directory site
 ```
