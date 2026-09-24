@@ -1952,6 +1952,7 @@ server <- function(input, output, session) {
   prune_lock_table_data <- reactiveVal(NULL)
   prune_results <- reactiveVal(NULL)
   selected_prune_cand <- reactiveVal(NULL)
+  selected_prune_idx <- reactiveVal(1)
 
   # Dynamic visibility toggle for Auto-Optimize button based on structural path selection, model convergence, and syntax synchronization
   observe({
@@ -2329,6 +2330,7 @@ server <- function(input, output, session) {
       
       prune_results(res)
       selected_prune_cand(res$candidates[[1]])
+      selected_prune_idx(1)
       
       showModal(modalDialog(
         title = div(
@@ -2345,13 +2347,23 @@ server <- function(input, output, session) {
           style = "padding: 10px;",
           div(
             style = "background-color: #f8fafc; padding: 10px 14px; border-radius: 6px; border: 1px solid #e2e8f0; margin-bottom: 15px;",
-            p(sprintf("Strategy Used: %s. Click any candidate row in the table below to preview its path diagram. Models with degraded fit indices are flagged.", toupper(res$strategy_used)),
+            p(sprintf("Strategy Used: %s. Click any candidate row in the table below or use navigation arrows to preview path diagrams. Models with degraded fit indices are flagged.", toupper(res$strategy_used)),
               style = "margin: 0; font-size: 13px; color: #334155;")
           ),
           DTOutput("prune_candidates_table"),
           tags$hr(style = "margin: 15px 0;"),
-          h5("Path Diagram Preview for Selected Candidate:", style = "margin-top: 0; margin-bottom: 10px;"),
-          div(style = "height: 320px; border: 1px solid #ccc; position: relative; border-radius: 4px; overflow: hidden;",
+          div(
+            style = "display: flex; justify-content: space-between; align-items: center; margin-top: 0; margin-bottom: 10px;",
+            h5("Path Diagram Preview for Selected Candidate:", style = "margin: 0; font-weight: 600;"),
+            uiOutput("prune_cand_indicator_ui", inline = TRUE)
+          ),
+          div(style = "height: 320px; border: 1px solid #ccc; position: relative; border-radius: 4px; overflow: hidden; background-color: #ffffff;",
+              actionButton("prune_prev_cand", label = icon("chevron-left"), class = "btn btn-default btn-sm",
+                           style = "position: absolute; left: 12px; top: 50%; transform: translateY(-50%); z-index: 10; width: 38px; height: 38px; padding: 0; border-radius: 50%; background: rgba(255, 255, 255, 0.9); border: 1px solid #cbd5e1; box-shadow: 0 2px 5px rgba(0,0,0,0.15); display: flex; align-items: center; justify-content: center;",
+                           title = "Previous Candidate"),
+              actionButton("prune_next_cand", label = icon("chevron-right"), class = "btn btn-default btn-sm",
+                           style = "position: absolute; right: 12px; top: 50%; transform: translateY(-50%); z-index: 10; width: 38px; height: 38px; padding: 0; border-radius: 50%; background: rgba(255, 255, 255, 0.9); border: 1px solid #cbd5e1; box-shadow: 0 2px 5px rgba(0,0,0,0.15); display: flex; align-items: center; justify-content: center;",
+                           title = "Next Candidate"),
               tags$div(id = "prune_preview_container", 
                        style = "width:100%; height:100%; display: flex; align-items: center; justify-content: center; color: #666;",
                        "Select a candidate row above to view preview."))
@@ -2638,11 +2650,52 @@ server <- function(input, output, session) {
     
     datatable(
       tbl,
-      selection = "single",
+      selection = list(mode = "single", selected = selected_prune_idx()),
       rownames = FALSE,
       options = list(pageLength = 6, dom = 'tp', scrollX = TRUE)
     )
   }, server = FALSE)
+
+  # Candidate Indicator Badge
+  output$prune_cand_indicator_ui <- renderUI({
+    res <- prune_results()
+    if (is.null(res) || !length(res$candidates)) return(NULL)
+    idx <- selected_prune_idx()
+    if (is.null(idx) || idx < 1) idx <- 1
+    total <- length(res$candidates)
+    span(sprintf("Candidate %d of %d (Rank %d)", idx, total, idx),
+         style = "font-size: 13px; font-weight: 600; color: #475569; background-color: #f1f5f9; padding: 3px 10px; border-radius: 12px; border: 1px solid #cbd5e1;")
+  })
+
+  # Previous Candidate Button Click
+  observeEvent(input$prune_prev_cand, {
+    res <- prune_results(); req(res)
+    curr_idx <- selected_prune_idx()
+    if (is.null(curr_idx)) curr_idx <- 1
+    if (curr_idx > 1) {
+      new_idx <- curr_idx - 1
+      selected_prune_idx(new_idx)
+      target_page <- ceiling(new_idx / 6)
+      dataTableProxy("prune_candidates_table") %>% 
+        selectRows(new_idx) %>% 
+        selectPage(target_page)
+    }
+  })
+
+  # Next Candidate Button Click
+  observeEvent(input$prune_next_cand, {
+    res <- prune_results(); req(res)
+    curr_idx <- selected_prune_idx()
+    if (is.null(curr_idx)) curr_idx <- 1
+    if (curr_idx < length(res$candidates)) {
+      new_idx <- curr_idx + 1
+      selected_prune_idx(new_idx)
+      target_page <- ceiling(new_idx / 6)
+      dataTableProxy("prune_candidates_table") %>% 
+        selectRows(new_idx) %>% 
+        selectPage(target_page)
+    }
+  })
 
   # Candidate Row Selection Observer -> Redraw Preview Path Diagram
   observeEvent(input$prune_candidates_table_rows_selected, {
@@ -2650,6 +2703,7 @@ server <- function(input, output, session) {
     sel_idx <- input$prune_candidates_table_rows_selected
     if (is.null(sel_idx) || sel_idx > length(res$candidates)) return()
     
+    selected_prune_idx(sel_idx)
     cand <- res$candidates[[sel_idx]]
     selected_prune_cand(cand)
     
