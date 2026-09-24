@@ -336,6 +336,37 @@ build_retained_str <- function(struct_df) {
   if (length(lines) > 0) paste(lines, collapse = " ; ") else "None (Empty Model)"
 }
 
+# ---------- Helper: Variable Isolation Constraint Validator ----------
+# Verifies that specified dependent variables retain at least one incoming path (in-degree >= 1)
+# and specified predictor variables retain at least one outgoing path (out-degree >= 1).
+check_variable_isolation <- function(s_df, retain_deps, retain_preds, pred_cols) {
+  if (is.null(s_df) || nrow(s_df) == 0) return(FALSE)
+  
+  if (length(retain_deps) > 0) {
+    for (dep in retain_deps) {
+      dep_r <- which(s_df$Dependent == dep)
+      if (length(dep_r) == 0) return(FALSE)
+      has_in_path <- any(vapply(pred_cols, function(p) {
+        if (!p %in% names(s_df)) return(FALSE)
+        isTRUE(as.logical(s_df[dep_r[1], p]))
+      }, logical(1)))
+      if (!has_in_path) return(FALSE)
+    }
+  }
+  
+  if (length(retain_preds) > 0) {
+    for (pred in retain_preds) {
+      if (!pred %in% names(s_df)) return(FALSE)
+      has_out_path <- any(vapply(seq_len(nrow(s_df)), function(r) {
+        isTRUE(as.logical(s_df[r, pred]))
+      }, logical(1)))
+      if (!has_out_path) return(FALSE)
+    }
+  }
+  
+  TRUE
+}
+
 
 
 # ---- Helper: Multi-Algorithm Model Optimization Engine ---------------------------
@@ -2048,11 +2079,46 @@ server <- function(input, output, session) {
     }
     prune_lock_table_data(lock_df)
 
+    active_deps <- if (length(active_row_indices) > 0) struct_df$Dependent[active_row_indices] else character(0)
+    active_deps <- unique(active_deps[nzchar(active_deps)])
+    active_preds <- active_pred_cols
+
     showModal(modalDialog(
       title = "Auto-Optimize Model: Step 1 - Strategy, Parameters & Path Locking",
       size = "l",
       div(
         style = "padding: 10px;",
+        div(
+          style = "background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 12px; margin-bottom: 15px;",
+          div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;",
+              tags$b(icon("shield-alt"), " Variable Isolation Prevention (Keep in Model)", style = "color: #1e293b; font-size: 14px;"),
+              span(style = "font-size: 11px; color: #64748b;", "Ensures >= 1 structural path is preserved")
+          ),
+          p("Select variables that must NOT be dropped completely from the model during optimization (at least one connecting path will always be retained).",
+            style = "font-size: 12px; color: #475569; margin-bottom: 10px;"),
+          fluidRow(
+            column(width = 6,
+                   div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;",
+                       tags$label("Dependent Variables (In-degree >= 1):", style = "font-size: 12px; font-weight: 600; margin: 0; color: #334155;"),
+                       div(actionLink("retain_deps_all", "All", style = "font-size: 11px; margin-right: 6px; cursor: pointer;"),
+                           actionLink("retain_deps_none", "None", style = "font-size: 11px; cursor: pointer;"))
+                   ),
+                   div(style = "max-height: 110px; overflow-y: auto; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 4px; padding: 6px 10px;",
+                       checkboxGroupInput("prune_retain_deps", label = NULL, choices = active_deps, selected = character(0))
+                   )
+            ),
+            column(width = 6,
+                   div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;",
+                       tags$label("Predictor Variables (Out-degree >= 1):", style = "font-size: 12px; font-weight: 600; margin: 0; color: #334155;"),
+                       div(actionLink("retain_preds_all", "All", style = "font-size: 11px; margin-right: 6px; cursor: pointer;"),
+                           actionLink("retain_preds_none", "None", style = "font-size: 11px; cursor: pointer;"))
+                   ),
+                   div(style = "max-height: 110px; overflow-y: auto; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 4px; padding: 6px 10px;",
+                       checkboxGroupInput("prune_retain_preds", label = NULL, choices = active_preds, selected = character(0))
+                   )
+            )
+          )
+        ),
         p("Select structural paths to ", tags$b("LOCK [x] (protect from pruning)"), "."),
         p("Highlighted cells represent active paths in your current model. Unchecked active paths will be evaluated for optimization.",
           style = "font-size: 13px; color: #555;"),
@@ -2166,6 +2232,24 @@ server <- function(input, output, session) {
     prune_lock_table_data(tbl)
   })
 
+  # Observers for Variable Isolation All / None quick select links
+  observeEvent(input$retain_deps_all, {
+    lock_df <- prune_lock_table_data(); req(lock_df)
+    active_deps <- unique(lock_df$Dependent[nzchar(lock_df$Dependent)])
+    updateCheckboxGroupInput(session, "prune_retain_deps", selected = active_deps)
+  })
+  observeEvent(input$retain_deps_none, {
+    updateCheckboxGroupInput(session, "prune_retain_deps", selected = character(0))
+  })
+  observeEvent(input$retain_preds_all, {
+    lock_df <- prune_lock_table_data(); req(lock_df)
+    active_preds <- setdiff(names(lock_df), c("Dependent", "Operator"))
+    updateCheckboxGroupInput(session, "prune_retain_preds", selected = active_preds)
+  })
+  observeEvent(input$retain_preds_none, {
+    updateCheckboxGroupInput(session, "prune_retain_preds", selected = character(0))
+  })
+
   # Reactive state variables for stepwise optimization stepper engine
   opt_running <- reactiveVal(FALSE)
   opt_step <- reactiveVal(0)
@@ -2216,6 +2300,20 @@ server <- function(input, output, session) {
       showModal(modalDialog(
         title = span(icon("info-circle"), "Auto-Optimize Warning"),
         div(class = "alert alert-warning", "No unlocked structural paths available for optimization. All active paths are locked."),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+      return()
+    }
+
+    retain_deps <- input$prune_retain_deps %||% character(0)
+    retain_preds <- input$prune_retain_preds %||% character(0)
+
+    if (!check_variable_isolation(struct_df, retain_deps, retain_preds, pred_cols)) {
+      showModal(modalDialog(
+        title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
+        div(class = "alert alert-warning",
+            "The current baseline model does not satisfy the specified variable isolation constraints."),
         easyClose = TRUE,
         footer = modalButton("Dismiss")
       ))
@@ -2312,7 +2410,9 @@ server <- function(input, output, session) {
       pop = if (eff_strategy == "ga") matrix(sample(c(TRUE, FALSE), ga_pop_size * M, replace = TRUE), nrow = ga_pop_size, ncol = M) else NULL,
       ga_pop_size = ga_pop_size,
       ga_max_gen = ga_max_gen,
-      ga_pmut = input$ga_pmut %||% 0.10
+      ga_pmut = input$ga_pmut %||% 0.10,
+      retain_deps = retain_deps,
+      retain_preds = retain_preds
     )
 
     if (eff_strategy == "ga") state_obj$pop[1, ] <- TRUE
@@ -2372,10 +2472,16 @@ server <- function(input, output, session) {
         sorted_candidates[[1]]$status <- "[Optimal]"
       }
       
+      iso_parts <- c()
+      if (length(st$retain_deps) > 0) iso_parts <- c(iso_parts, paste0("Dep: ", paste(st$retain_deps, collapse = ", ")))
+      if (length(st$retain_preds) > 0) iso_parts <- c(iso_parts, paste0("Pred: ", paste(st$retain_preds, collapse = ", ")))
+      isolation_summary <- if (length(iso_parts) > 0) paste(iso_parts, collapse = " | ") else ""
+
       res <- list(
         candidates = sorted_candidates,
         criterion = st$criterion,
         strategy_used = st$eff_strategy,
+        isolation_summary = isolation_summary,
         message = "Success"
       )
       
@@ -2398,7 +2504,9 @@ server <- function(input, output, session) {
           style = "padding: 10px;",
           div(
             style = "background-color: #f8fafc; padding: 10px 14px; border-radius: 6px; border: 1px solid #e2e8f0; margin-bottom: 15px;",
-            p(sprintf("Strategy Used: %s. Click any candidate row in the table below or use navigation arrows to preview path diagrams. Models with degraded fit indices are flagged.", toupper(res$strategy_used)),
+            p(sprintf("Strategy Used: %s%s. Click any candidate row in the table below or use navigation arrows to preview path diagrams. Models with degraded fit indices are flagged.",
+                      toupper(res$strategy_used),
+                      if (nzchar(res$isolation_summary %||% "")) paste0(" [Protected: ", res$isolation_summary, "]") else ""),
               style = "margin: 0; font-size: 13px; color: #334155;")
           ),
           DTOutput("prune_candidates_table"),
@@ -2508,6 +2616,11 @@ server <- function(input, output, session) {
           test_s_df <- st$curr_df
           test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
           
+          # Check variable isolation constraints
+          if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) {
+            next
+          }
+          
           rem_vec <- c()
           for (j in seq_along(st$removable_paths)) {
             jp <- st$removable_paths[[j]]
@@ -2550,14 +2663,19 @@ server <- function(input, output, session) {
           removed_paths_vec <- c(removed_paths_vec, paste0(rp$dep, " ~ ", rp$pred))
         }
       }
-      k_str <- make_key_local(test_s_df)
-      if (!k_str %in% names(st$candidates_map)) {
-        rem_label <- paste(removed_paths_vec, collapse = "; ")
-        st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
-      }
-      rec <- st$candidates_map[[k_str]]
-      if (!is.null(rec) && isTRUE(rec$converged)) {
-        curr_score_step <- if (st$criterion == "AIC") rec$aic else rec$bic
+      # Check variable isolation constraints
+      if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) {
+        curr_score_step <- Inf
+      } else {
+        k_str <- make_key_local(test_s_df)
+        if (!k_str %in% names(st$candidates_map)) {
+          rem_label <- paste(removed_paths_vec, collapse = "; ")
+          st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
+        }
+        rec <- st$candidates_map[[k_str]]
+        if (!is.null(rec) && isTRUE(rec$converged)) {
+          curr_score_step <- if (st$criterion == "AIC") rec$aic else rec$bic
+        }
       }
     } else if (st$eff_strategy == "sa") {
       flip_pos <- sample.int(st$M, 1)
@@ -2573,16 +2691,22 @@ server <- function(input, output, session) {
           rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
         }
       }
-      k_str <- make_key_local(test_s_df)
-      if (!k_str %in% names(st$candidates_map)) {
-        rem_label <- paste(rem_vec, collapse = "; ")
-        st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
+      if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) {
+        c_score <- Inf
+      } else {
+        k_str <- make_key_local(test_s_df)
+        if (!k_str %in% names(st$candidates_map)) {
+          rem_label <- paste(rem_vec, collapse = "; ")
+          st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
+        }
+        c_rec <- st$candidates_map[[k_str]]
+        c_score <- if (!is.null(c_rec) && isTRUE(c_rec$converged)) {
+          if (st$criterion == "AIC") c_rec$aic else c_rec$bic
+        } else Inf
       }
-      c_rec <- st$candidates_map[[k_str]]
-      curr_rec <- st$candidates_map[[make_key_local(st$curr_df)]]
       
-      if (!is.null(c_rec) && isTRUE(c_rec$converged)) {
-        c_score <- if (st$criterion == "AIC") c_rec$aic else c_rec$bic
+      curr_rec <- st$candidates_map[[make_key_local(st$curr_df)]]
+      if (is.finite(c_score)) {
         curr_score_step <- c_score
         curr_score <- if (!is.null(curr_rec) && isTRUE(curr_rec$converged)) {
           if (st$criterion == "AIC") curr_rec$aic else curr_rec$bic
@@ -2609,6 +2733,9 @@ server <- function(input, output, session) {
             test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
             rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
           }
+        }
+        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) {
+          return(Inf)
         }
         k_str <- make_key_local(test_s_df)
         if (!k_str %in% names(st$candidates_map)) {

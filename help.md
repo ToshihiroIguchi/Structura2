@@ -29,8 +29,11 @@ Structura2 is an interactive application built in **R** using **lavaan** for Str
 * **Analysis Options**  
   * Raw vs. Standardized estimation mode.  
   * **Missing Data Handling**: `listwise`, `ml`, `ml.x`, `two.stage`, or `robust.two.stage`.  
-* **Measurement Model / Structural Model** – Build your SEM via interactive tables with check-boxes.  
 * **lavaan Syntax** – Generated automatically from the tables for transparency.  
+* **Auto-Optimize Model (Model Pruning)**  
+  * Automatically evaluates model subsets using Stepwise, Exhaustive, or Simulated Annealing search to minimize AIC or BIC.  
+  * **Variable Isolation Prevention**: Protect critical dependent (in-degree &ge; 1) or predictor (out-degree &ge; 1) variables from being completely severed from the model during optimization.  
+  * **Path Locking**: Pin specific structural paths to unconditionally protect them from pruning.  
 * **Path Diagram Options**  
   * **Layout & Engine** selector:  
     `Hierarchical Left → Right (dot)`,  
