@@ -234,16 +234,18 @@ semDiagram <- function(
   }, character(1)), collapse = "\n")
 
   radial_opts <- if (engine == "circo") {
-    c("splines=true", "nodesep=0.4", "sep=\"+4\"", "mindist=1")
+    c("splines=true", "nodesep=0.4", "mindist=1")
   } else if (engine == "twopi" && twopi_compact) {
-    c("splines=true", "nodesep=0.2", "sep=\"+2\"", "ranksep=0.5", "normalize=true")
+    c("splines=true", "ranksep=1.0", "normalize=true")
   } else character(0)
-  radial_opts <- paste(radial_opts, collapse = ", ")
+  radial_opts_str <- paste(radial_opts, collapse = ", ")
+
+  eff_ratio <- if (engine %in% c("twopi", "circo", "neato", "fdp")) "auto" else ratio
 
   graph_code <- sprintf(
     "digraph {\n  rankdir=%s;\n  graph [layout=%s%s%s, overlap=false,\n         labelloc=\"t\", labeljust=\"c\", label=%s, ratio=%s];\n  node  [fontname=\"%s\", margin=0.05];\n  edge  [fontname=\"%s\", fontcolor=\"#333333\"];\n\n%s\n\n%s\n}",
-    layout, engine, if (nchar(radial_opts)) ", " else "", radial_opts,
-    top_label, ratio, fontname, fontname, node_defs, edge_defs)
+    layout, engine, if (nchar(radial_opts_str)) ", " else "", radial_opts_str,
+    top_label, eff_ratio, fontname, fontname, node_defs, edge_defs)
 
   # Return raw DOT graph code. Layout and rendering will be done on the client side via @hpcc-js/wasm
   return(graph_code)
