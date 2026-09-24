@@ -367,8 +367,11 @@ sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, 
     for (p in pred_cols) {
       if (isTRUE(as.logical(struct_df[i, p]))) {
         is_locked <- FALSE
-        if (!is.null(lock_df) && p %in% names(lock_df) && i <= nrow(lock_df)) {
-          is_locked <- isTRUE(as.logical(lock_df[i, p]))
+        if (!is.null(lock_df) && dep %in% lock_df$Dependent && p %in% names(lock_df)) {
+          lock_r_idx <- which(lock_df$Dependent == dep)
+          if (length(lock_r_idx) > 0) {
+            is_locked <- isTRUE(as.logical(lock_df[lock_r_idx[1], p]))
+          }
         }
         active_paths[[length(active_paths) + 1]] <- list(
           dep = dep, pred = p, locked = is_locked
@@ -2007,11 +2010,41 @@ server <- function(input, output, session) {
       return()
     }
 
-    # Initialize lock table data (FALSE = unlocked by default)
-    lock_df <- struct_df
+    # Initialize lock table data (filtered to active rows and active predictor columns)
     pred_cols <- names(struct_df)[3:ncol(struct_df)]
+    
+    active_row_indices <- c()
+    for (i in seq_len(nrow(struct_df))) {
+      has_active <- FALSE
+      for (col in pred_cols) {
+        if (isTRUE(as.logical(struct_df[i, col]))) {
+          has_active <- TRUE
+          break
+        }
+      }
+      if (has_active) active_row_indices <- c(active_row_indices, i)
+    }
+    
+    active_pred_cols <- c()
     for (col in pred_cols) {
-      lock_df[[col]] <- FALSE
+      has_active <- FALSE
+      for (i in seq_len(nrow(struct_df))) {
+        if (isTRUE(as.logical(struct_df[i, col]))) {
+          has_active <- TRUE
+          break
+        }
+      }
+      if (has_active) active_pred_cols <- c(active_pred_cols, col)
+    }
+    
+    if (length(active_row_indices) == 0 || length(active_pred_cols) == 0) {
+      lock_df <- struct_df
+      for (col in pred_cols) lock_df[[col]] <- FALSE
+    } else {
+      lock_df <- struct_df[active_row_indices, c("Dependent", "Operator", active_pred_cols), drop = FALSE]
+      for (col in active_pred_cols) {
+        lock_df[[col]] <- FALSE
+      }
     }
     prune_lock_table_data(lock_df)
 
@@ -2077,13 +2110,28 @@ server <- function(input, output, session) {
     lock_df <- prune_lock_table_data(); req(lock_df)
     struct_df <- struct_table_data(); req(struct_df)
     
+    lock_pred_cols <- setdiff(names(lock_df), c("Dependent", "Operator"))
+    
+    struct_submatrix <- matrix(FALSE, nrow = nrow(lock_df), ncol = length(lock_pred_cols))
+    for (r in seq_len(nrow(lock_df))) {
+      dep <- lock_df$Dependent[r]
+      struct_r_idx <- which(struct_df$Dependent == dep)
+      if (length(struct_r_idx) > 0) {
+        for (c_idx in seq_along(lock_pred_cols)) {
+          col_name <- lock_pred_cols[c_idx]
+          if (col_name %in% names(struct_df)) {
+            struct_submatrix[r, c_idx] <- isTRUE(as.logical(struct_df[struct_r_idx[1], col_name]))
+          }
+        }
+      }
+    }
+    
     rh <- rhandsontable(lock_df, rowHeaders = FALSE) %>%
       hot_table(highlightReadOnly = TRUE, fixedColumnsLeft = 2)
     rh <- hot_col(rh, "Dependent", readOnly = TRUE)
     rh <- hot_col(rh, "Operator",  readOnly = TRUE)
     
-    pred_cols <- names(struct_df)[3:ncol(struct_df)]
-    rh$x$struct_matrix <- as.matrix(struct_df[, pred_cols, drop = FALSE])
+    rh$x$struct_matrix <- struct_submatrix
     
     renderer_js <- "
       function(instance, td, row, col, prop, value, cellProperties) {
@@ -2092,7 +2140,7 @@ server <- function(input, output, session) {
         var struct_matrix = params.struct_matrix;
         var col_var_idx = col - 2;
         
-        if (struct_matrix && col_var_idx >= 0 && col_var_idx < struct_matrix[0].length) {
+        if (struct_matrix && row >= 0 && row < struct_matrix.length && col_var_idx >= 0 && col_var_idx < struct_matrix[0].length) {
           var is_active = struct_matrix[row][col_var_idx];
           if (is_active === true || is_active === 'TRUE' || is_active === 'true') {
             td.style.backgroundColor = '#e0f2fe';
@@ -2107,7 +2155,7 @@ server <- function(input, output, session) {
         }
       }"
     
-    for (col_name in pred_cols) {
+    for (col_name in lock_pred_cols) {
       rh <- hot_col(rh, col_name, type = "checkbox", renderer = renderer_js)
     }
     rh
@@ -2148,8 +2196,11 @@ server <- function(input, output, session) {
       for (p in pred_cols) {
         if (isTRUE(as.logical(struct_df[i, p]))) {
           is_locked <- FALSE
-          if (!is.null(lock_df) && p %in% names(lock_df) && i <= nrow(lock_df)) {
-            is_locked <- isTRUE(as.logical(lock_df[i, p]))
+          if (!is.null(lock_df) && dep %in% lock_df$Dependent && p %in% names(lock_df)) {
+            lock_r_idx <- which(lock_df$Dependent == dep)
+            if (length(lock_r_idx) > 0) {
+              is_locked <- isTRUE(as.logical(lock_df[lock_r_idx[1], p]))
+            }
           }
           active_paths[[length(active_paths) + 1]] <- list(
             dep = dep, pred = p, locked = is_locked
