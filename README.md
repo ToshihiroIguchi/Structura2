@@ -139,13 +139,15 @@ You can compile the app into a static WebAssembly site and serve it locally. Thi
 
 ---
 
-### Option 5: Hosting the Shiny App for Local Network (Sharing Across LAN)
+### Option 5: Hosting Directly from GitHub for Local Network (Sharing Across LAN)
 
-You can host the application on a local machine and allow other devices (PCs, tablets, smartphones) on the same local area network (LAN) to access it. This uses a script that automatically detects your machine's local IP address and runs the app on that address.
+You can launch **Structura2** directly from its GitHub repository as a traditional Shiny application (without manually cloning) and make it accessible across your local area network (LAN) to other devices (PCs, tablets, smartphones).
+
+This script automatically detects your host's local IPv4 address and configures Shiny's host and port settings (`8100`) so devices on your local network can connect.
 
 1. **Prerequisites**: Make sure the hosting machine and the client devices are connected to the same Wi-Fi or local network.
-2. **Firewall Settings**: If client devices cannot connect, check your hosting machine's firewall settings. Ensure that incoming TCP traffic is allowed on the port you choose (default is `8100`).
-3. **Run the Script**: Copy the script below, save it as an R script (e.g., `run_lan.R`), and run it in R/RStudio.
+2. **Firewall Settings**: If client devices cannot connect, check your hosting machine's firewall settings. Ensure that incoming TCP traffic is allowed on port `8100`.
+3. **Run the Script**: Copy the script below, save it as an R script (e.g., `run_lan.R`), or run it directly in your R/RStudio console.
 
 <details>
 <summary>Click to expand the complete LAN-hosting script</summary>
