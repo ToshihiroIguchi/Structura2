@@ -2156,7 +2156,7 @@ server <- function(input, output, session) {
             conditionalPanel(
               condition = "input.prune_strategy == 'sa'",
               fluidRow(
-                column(4, numericInput("sa_max_iter", "SA Max Iterations:", value = 100, min = 20, max = 500, step = 10)),
+                column(4, numericInput("sa_max_iter", "SA Max Iterations:", value = 150, min = 20, max = 500, step = 10)),
                 column(4, numericInput("sa_temp_init", "SA Initial Temp:", value = 10.0, min = 1.0, max = 100.0, step = 1.0)),
                 column(4, numericInput("sa_cooling_rate", "SA Cooling Rate (Alpha):", value = 0.90, min = 0.50, max = 0.99, step = 0.01))
               )
@@ -2376,7 +2376,7 @@ server <- function(input, output, session) {
     ))
 
     # Initialize stepper state
-    sa_max_iter <- input$sa_max_iter %||% 80
+    sa_max_iter <- input$sa_max_iter %||% 150
     ga_pop_size <- input$ga_pop_size %||% 12
     ga_max_gen  <- input$ga_max_gen %||% 10
 
@@ -2405,8 +2405,8 @@ server <- function(input, output, session) {
       best_scores_hist = numeric(0),
       curr_vec = rep(TRUE, M),
       curr_df = struct_df,
-      T_val = 10.0,
-      sa_alpha = input$sa_alpha %||% 0.90,
+      T_val = input$sa_temp_init %||% 10.0,
+      sa_alpha = input$sa_cooling_rate %||% (input$sa_alpha %||% 0.90),
       pop = if (eff_strategy == "ga") matrix(sample(c(TRUE, FALSE), ga_pop_size * M, replace = TRUE), nrow = ga_pop_size, ncol = M) else NULL,
       ga_pop_size = ga_pop_size,
       ga_max_gen = ga_max_gen,
