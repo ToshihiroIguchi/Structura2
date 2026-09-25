@@ -2255,6 +2255,107 @@ server <- function(input, output, session) {
   opt_step <- reactiveVal(0)
   opt_state <- reactiveVal(NULL)
 
+  finalize_prune_results <- function(st, current_step = 0, stopped_early = FALSE) {
+    opt_running(FALSE)
+    
+    candidates_list <- unname(st$candidates_map)
+    scores <- vapply(candidates_list, function(x) {
+      if (!x$converged) return(Inf)
+      if (st$criterion == "AIC") x$aic else x$bic
+    }, numeric(1))
+    
+    ord <- order(scores, decreasing = FALSE)
+    sorted_candidates <- candidates_list[ord]
+    if (length(sorted_candidates) > 0 && sorted_candidates[[1]]$converged && sorted_candidates[[1]]$status != "[Baseline]") {
+      sorted_candidates[[1]]$status <- "[Optimal]"
+    }
+    
+    iso_parts <- c()
+    if (length(st$retain_deps) > 0) iso_parts <- c(iso_parts, paste0("Dep: ", paste(st$retain_deps, collapse = ", ")))
+    if (length(st$retain_preds) > 0) iso_parts <- c(iso_parts, paste0("Pred: ", paste(st$retain_preds, collapse = ", ")))
+    isolation_summary <- if (length(iso_parts) > 0) paste(iso_parts, collapse = " | ") else ""
+
+    res <- list(
+      candidates = sorted_candidates,
+      criterion = st$criterion,
+      strategy_used = st$eff_strategy,
+      isolation_summary = isolation_summary,
+      stopped_early = stopped_early,
+      stopped_at_step = current_step,
+      max_steps = st$max_steps,
+      message = "Success"
+    )
+    
+    prune_results(res)
+    selected_prune_cand(res$candidates[[1]])
+    selected_prune_idx(1)
+    
+    stopped_badge <- if (stopped_early) {
+      sprintf(" [Stopped Early at Step %d / %d]", current_step, st$max_steps)
+    } else ""
+    
+    showModal(modalDialog(
+      title = div(
+        style = "display: flex; justify-content: space-between; align-items: center; width: calc(100% - 30px); margin-right: 15px;",
+        span(paste0("Auto-Optimize Model: Step 2 - Candidate Ranking Catalog", stopped_badge), style = "font-weight: bold;"),
+        div(
+          style = "display: flex; gap: 8px; align-items: center;",
+          modalButton("Close / Cancel"),
+          actionButton("apply_pruned_model", "Apply Selected Model to UI", class = "btn btn-success", style = "font-weight: 600; white-space: nowrap;")
+        )
+      ),
+      size = "l",
+      div(
+        style = "padding: 10px;",
+        div(
+          style = if (stopped_early) {
+            "background-color: #fffbeb; padding: 10px 14px; border-radius: 6px; border: 1px solid #fef3c7; margin-bottom: 15px;"
+          } else {
+            "background-color: #f8fafc; padding: 10px 14px; border-radius: 6px; border: 1px solid #e2e8f0; margin-bottom: 15px;"
+          },
+          p(sprintf("Strategy Used: %s%s%s. Click any candidate row in the table below or use navigation arrows to preview path diagrams. Models with degraded fit indices are flagged.",
+                    toupper(res$strategy_used),
+                    if (nzchar(res$isolation_summary %||% "")) paste0(" [Protected: ", res$isolation_summary, "]") else "",
+                    if (stopped_early) sprintf(" (Exploration halted early at step %d of %d; best candidates evaluated so far are shown)", current_step, st$max_steps) else ""),
+            style = if (stopped_early) "margin: 0; font-size: 13px; color: #92400e;" else "margin: 0; font-size: 13px; color: #334155;")
+        ),
+        DTOutput("prune_candidates_table"),
+        tags$hr(style = "margin: 15px 0;"),
+        div(
+          style = "display: flex; justify-content: space-between; align-items: center; margin-top: 0; margin-bottom: 10px;",
+          h5("Path Diagram Preview for Selected Candidate:", style = "margin: 0; font-weight: 600;"),
+          uiOutput("prune_cand_indicator_ui", inline = TRUE)
+        ),
+        div(style = "height: 320px; border: 1px solid #ccc; position: relative; border-radius: 4px; overflow: hidden; background-color: #ffffff;",
+            actionButton("prune_prev_cand", label = icon("chevron-left"), class = "btn btn-default btn-sm",
+                         style = "position: absolute; left: 12px; top: 50%; transform: translateY(-50%); z-index: 10; width: 38px; height: 38px; padding: 0; border-radius: 50%; background: rgba(255, 255, 255, 0.9); border: 1px solid #cbd5e1; box-shadow: 0 2px 5px rgba(0,0,0,0.15); display: flex; align-items: center; justify-content: center;",
+                         title = "Previous Candidate"),
+            actionButton("prune_next_cand", label = icon("chevron-right"), class = "btn btn-default btn-sm",
+                         style = "position: absolute; right: 12px; top: 50%; transform: translateY(-50%); z-index: 10; width: 38px; height: 38px; padding: 0; border-radius: 50%; background: rgba(255, 255, 255, 0.9); border: 1px solid #cbd5e1; box-shadow: 0 2px 5px rgba(0,0,0,0.15); display: flex; align-items: center; justify-content: center;",
+                         title = "Next Candidate"),
+            tags$div(id = "prune_preview_container", 
+                     style = "width:100%; height:100%; display: flex; align-items: center; justify-content: center; color: #666;",
+                     "Select a candidate row above to view preview."))
+      ),
+      footer = NULL
+    ))
+  }
+
+  observeEvent(input$stop_prune_explore, {
+    if (!isTRUE(opt_running())) return()
+    st <- opt_state()
+    if (is.null(st)) return()
+    curr_s <- opt_step()
+    finalize_prune_results(st, current_step = curr_s, stopped_early = TRUE)
+  })
+
+  observeEvent(input$cancel_prune_explore, {
+    opt_running(FALSE)
+    opt_state(NULL)
+    removeModal()
+    showNotification("Model optimization cancelled.", type = "message", duration = 3)
+  })
+
   # 2. Run Candidate Search & Display Step 2 Modal via Stepwise Stepper Engine
   observeEvent(input$run_prune_explore, {
     base_model <- fit_model_safe()
@@ -2355,9 +2456,11 @@ server <- function(input, output, session) {
     # Display Progress Modal with live HTML5 Canvas Chart
     showModal(modalDialog(
       title = span(icon("sync", class = "fa-spin"), " Auto-Optimize Model: Optimizing Model Space..."),
-      size = "m",
-      footer = NULL,
-      easyClose = FALSE,
+      footer = div(
+        style = "display: flex; justify-content: space-between; align-items: center; width: 100%;",
+        actionButton("cancel_prune_explore", "Cancel", class = "btn btn-default", icon = icon("times")),
+        actionButton("stop_prune_explore", "Stop & View Results", class = "btn btn-warning", icon = icon("stop-circle"))
+      ),
       div(
         style = "text-align: center; padding: 15px;",
         div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;",
@@ -2453,82 +2556,14 @@ server <- function(input, output, session) {
   # Stepwise optimization execution observer with real-time UI yielding
   observe({
     req(opt_running())
-    step <- opt_step()
-    st <- opt_state()
+    invalidateLater(30, session)
+    
+    step <- isolate(opt_step())
+    st <- isolate(opt_state())
     req(st)
 
     if (step >= st$max_steps) {
-      opt_running(FALSE)
-      
-      candidates_list <- unname(st$candidates_map)
-      scores <- vapply(candidates_list, function(x) {
-        if (!x$converged) return(Inf)
-        if (st$criterion == "AIC") x$aic else x$bic
-      }, numeric(1))
-      
-      ord <- order(scores, decreasing = FALSE)
-      sorted_candidates <- candidates_list[ord]
-      if (length(sorted_candidates) > 0 && sorted_candidates[[1]]$converged && sorted_candidates[[1]]$status != "[Baseline]") {
-        sorted_candidates[[1]]$status <- "[Optimal]"
-      }
-      
-      iso_parts <- c()
-      if (length(st$retain_deps) > 0) iso_parts <- c(iso_parts, paste0("Dep: ", paste(st$retain_deps, collapse = ", ")))
-      if (length(st$retain_preds) > 0) iso_parts <- c(iso_parts, paste0("Pred: ", paste(st$retain_preds, collapse = ", ")))
-      isolation_summary <- if (length(iso_parts) > 0) paste(iso_parts, collapse = " | ") else ""
-
-      res <- list(
-        candidates = sorted_candidates,
-        criterion = st$criterion,
-        strategy_used = st$eff_strategy,
-        isolation_summary = isolation_summary,
-        message = "Success"
-      )
-      
-      prune_results(res)
-      selected_prune_cand(res$candidates[[1]])
-      selected_prune_idx(1)
-      
-      showModal(modalDialog(
-        title = div(
-          style = "display: flex; justify-content: space-between; align-items: center; width: calc(100% - 30px); margin-right: 15px;",
-          span("Auto-Optimize Model: Step 2 - Candidate Ranking Catalog", style = "font-weight: bold;"),
-          div(
-            style = "display: flex; gap: 8px; align-items: center;",
-            modalButton("Close / Cancel"),
-            actionButton("apply_pruned_model", "Apply Selected Model to UI", class = "btn btn-success", style = "font-weight: 600; white-space: nowrap;")
-          )
-        ),
-        size = "l",
-        div(
-          style = "padding: 10px;",
-          div(
-            style = "background-color: #f8fafc; padding: 10px 14px; border-radius: 6px; border: 1px solid #e2e8f0; margin-bottom: 15px;",
-            p(sprintf("Strategy Used: %s%s. Click any candidate row in the table below or use navigation arrows to preview path diagrams. Models with degraded fit indices are flagged.",
-                      toupper(res$strategy_used),
-                      if (nzchar(res$isolation_summary %||% "")) paste0(" [Protected: ", res$isolation_summary, "]") else ""),
-              style = "margin: 0; font-size: 13px; color: #334155;")
-          ),
-          DTOutput("prune_candidates_table"),
-          tags$hr(style = "margin: 15px 0;"),
-          div(
-            style = "display: flex; justify-content: space-between; align-items: center; margin-top: 0; margin-bottom: 10px;",
-            h5("Path Diagram Preview for Selected Candidate:", style = "margin: 0; font-weight: 600;"),
-            uiOutput("prune_cand_indicator_ui", inline = TRUE)
-          ),
-          div(style = "height: 320px; border: 1px solid #ccc; position: relative; border-radius: 4px; overflow: hidden; background-color: #ffffff;",
-              actionButton("prune_prev_cand", label = icon("chevron-left"), class = "btn btn-default btn-sm",
-                           style = "position: absolute; left: 12px; top: 50%; transform: translateY(-50%); z-index: 10; width: 38px; height: 38px; padding: 0; border-radius: 50%; background: rgba(255, 255, 255, 0.9); border: 1px solid #cbd5e1; box-shadow: 0 2px 5px rgba(0,0,0,0.15); display: flex; align-items: center; justify-content: center;",
-                           title = "Previous Candidate"),
-              actionButton("prune_next_cand", label = icon("chevron-right"), class = "btn btn-default btn-sm",
-                           style = "position: absolute; right: 12px; top: 50%; transform: translateY(-50%); z-index: 10; width: 38px; height: 38px; padding: 0; border-radius: 50%; background: rgba(255, 255, 255, 0.9); border: 1px solid #cbd5e1; box-shadow: 0 2px 5px rgba(0,0,0,0.15); display: flex; align-items: center; justify-content: center;",
-                           title = "Next Candidate"),
-              tags$div(id = "prune_preview_container", 
-                       style = "width:100%; height:100%; display: flex; align-items: center; justify-content: center; color: #666;",
-                       "Select a candidate row above to view preview."))
-        ),
-        footer = NULL
-      ))
+      finalize_prune_results(st, current_step = step, stopped_early = FALSE)
       return()
     }
 
@@ -2794,7 +2829,6 @@ server <- function(input, output, session) {
       detail = detail_msg
     ))
 
-    invalidateLater(15, session)
     opt_step(step + 1)
   })
 
