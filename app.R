@@ -806,6 +806,106 @@ ui <- fluidPage(
   width: 0%;
   transition: width 0.3s ease;
 }
+
+/* Print Report Styling */
+#structura-print-report {
+  display: none;
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #structura-print-report, #structura-print-report * {
+    visibility: visible;
+  }
+  #structura-print-report {
+    display: block !important;
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    color: #1e293b;
+    background: #ffffff;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  }
+  @page {
+    size: A4 portrait;
+    margin: 15mm 12mm 15mm 12mm;
+  }
+  .print-page-break {
+    page-break-before: always;
+  }
+  .print-avoid-break {
+    page-break-inside: avoid;
+  }
+  .print-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 16px;
+    font-size: 11px;
+  }
+  .print-table th, .print-table td {
+    border: 1px solid #cbd5e1;
+    padding: 5px 8px;
+    text-align: left;
+  }
+  .print-table th {
+    background-color: #f1f5f9 !important;
+    font-weight: 600;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .print-header {
+    border-bottom: 2px solid #2563eb;
+    padding-bottom: 8px;
+    margin-bottom: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+  }
+  .print-header h1 {
+    font-size: 20px;
+    font-weight: bold;
+    color: #0f172a;
+    margin: 0;
+  }
+  .print-header .meta {
+    font-size: 11px;
+    color: #64748b;
+  }
+  .print-section-title {
+    font-size: 14px;
+    font-weight: bold;
+    color: #1e293b;
+    border-bottom: 1px solid #e2e8f0;
+    padding-bottom: 4px;
+    margin-top: 14px;
+    margin-bottom: 8px;
+  }
+  .print-diagram-box {
+    text-align: center;
+    max-height: 480px;
+    overflow: hidden;
+    margin: 10px 0;
+  }
+  .print-diagram-box svg {
+    max-width: 100%;
+    max-height: 460px;
+    height: auto;
+  }
+  .print-syntax-box {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    padding: 8px 12px;
+    font-family: monospace;
+    font-size: 10px;
+    white-space: pre-wrap;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+}
 ")),
     tags$script(src = if (file.exists("www/hpcc-js/graphviz.umd.js")) "hpcc-js/graphviz.umd.js" else "https://cdn.jsdelivr.net/npm/@hpcc-js/wasm/dist/graphviz.umd.js"),
     tags$script(HTML("
@@ -878,7 +978,107 @@ ui <- fluidPage(
 
       window.__hpcc_wasmFolder = 'hpcc-js';
 
+      // Standalone client-side diagram export helpers
+      window.downloadSemDiagramSvg = function() {
+        var container = document.getElementById('sem_plot_container');
+        if (!container) return;
+        var svg = container.querySelector('svg');
+        if (!svg) {
+          alert('No path diagram available to export. Please run and fit a model first.');
+          return;
+        }
+        var svgData = new XMLSerializer().serializeToString(svg);
+        var blob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'structura2_path_diagram.svg';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      };
+
+      window.downloadSemDiagramPng = function(scale) {
+        scale = scale || 2;
+        var container = document.getElementById('sem_plot_container');
+        if (!container) return;
+        var svg = container.querySelector('svg');
+        if (!svg) {
+          alert('No path diagram available to export. Please run and fit a model first.');
+          return;
+        }
+        var svgData = new XMLSerializer().serializeToString(svg);
+        var svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+        var url = URL.createObjectURL(svgBlob);
+        var img = new Image();
+        img.onload = function() {
+          var bbox = svg.viewBox.baseVal;
+          var width = (bbox && bbox.width > 0) ? bbox.width : (svg.clientWidth || 800);
+          var height = (bbox && bbox.height > 0) ? bbox.height : (svg.clientHeight || 600);
+          var canvas = document.createElement('canvas');
+          canvas.width = width * scale;
+          canvas.height = height * scale;
+          var ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          URL.revokeObjectURL(url);
+          var a = document.createElement('a');
+          a.href = canvas.toDataURL('image/png');
+          a.download = 'structura2_path_diagram.png';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        };
+        img.src = url;
+      };
+
       $(document).on('shiny:connected', function() {
+
+        // Printable PDF Report Assembly & Trigger
+        Shiny.addCustomMessageHandler('prepare_and_print_pdf_report', function(msg) {
+          var reportDiv = document.getElementById('structura-print-report');
+          if (!reportDiv) return;
+          
+          var plotContainer = document.getElementById('sem_plot_container');
+          var svgElem = plotContainer ? plotContainer.querySelector('svg') : null;
+          var svgHtml = svgElem ? svgElem.outerHTML : '<p style=\"color:#666; font-style:italic;\">No diagram available</p>';
+
+          reportDiv.innerHTML = '<div class=\"print-header\">' +
+            '<div>' +
+              '<h1>Structura2 Analysis Report</h1>' +
+              '<div class=\"meta\" style=\"margin-top: 3px;\">Structural Insights, Simplified</div>' +
+            '</div>' +
+            '<div class=\"meta\" style=\"text-align: right;\">' +
+              '<div><b>Generated:</b> ' + msg.timestamp + '</div>' +
+              '<div><b>Mode:</b> ' + msg.analysis_mode + ' | <b>Missing:</b> ' + msg.missing_method + '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class=\"print-avoid-break\">' +
+            '<div class=\"print-section-title\">1. Model Fit Summary</div>' +
+            msg.fit_table_html +
+          '</div>' +
+          '<div class=\"print-avoid-break\">' +
+            '<div class=\"print-section-title\">2. Path Diagram</div>' +
+            '<div class=\"print-diagram-box\">' +
+              svgHtml +
+            '</div>' +
+          '</div>' +
+          '<div class=\"print-page-break\"></div>' +
+          '<div class=\"print-avoid-break\">' +
+            '<div class=\"print-section-title\">3. Parameter Estimates</div>' +
+            msg.param_table_html +
+          '</div>' +
+          '<div class=\"print-avoid-break\" style=\"margin-top: 16px;\">' +
+            '<div class=\"print-section-title\">4. Model Syntax (lavaan)</div>' +
+            '<pre class=\"print-syntax-box\">' + msg.syntax_text + '</pre>' +
+          '</div>';
+
+          setTimeout(function() {
+            window.print();
+          }, 150);
+        });
 
         Shiny.addCustomMessageHandler('update_sem_plot', function(message) {
           var container = document.getElementById('sem_plot_container');
@@ -1175,13 +1375,15 @@ ui <- fluidPage(
                                       "Show standardized coefficients in diagram",
                                       value = TRUE)),
                        # -------------- Run & Auto-Optimize buttons -------------------
-                       div(style = "display: flex; gap: 10px; align-items: center; margin-bottom: 10px;",
+                       div(style = "display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;",
                            actionButton("run_model", "Run / Update Model",
                                         class = "btn btn-success"),
                            shinyjs::hidden(
                              actionButton("prune_model_btn", "Auto-Optimize Model",
                                           class = "btn btn-info")
-                           )
+                           ),
+                           actionButton("export_pdf_btn", "Export PDF Report",
+                                        class = "btn btn-default", icon = icon("file-pdf"))
                        ),
                       shinyjs::hidden(
                         div(id = "latent_error_box",
@@ -1251,7 +1453,15 @@ ui <- fluidPage(
                                                        selected = "dot_LR"))
                       ),
                       # ---------- Path diagram --------------------
-                      h4("Path Diagram"),
+                      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; margin-top: 10px;",
+                          h4("Path Diagram", style = "margin: 0; font-weight: 600;"),
+                          div(style = "display: flex; gap: 6px;",
+                              actionButton("save_diagram_svg", "Save SVG", class = "btn btn-default btn-xs",
+                                           icon = icon("file-code"), onclick = "downloadSemDiagramSvg()"),
+                              actionButton("save_diagram_png", "Save PNG", class = "btn btn-default btn-xs",
+                                           icon = icon("file-image"), onclick = "downloadSemDiagramPng(2)")
+                          )
+                      ),
                       div(style = "height:60vh; overflow-y:auto; overflow-x:hidden; border:1px solid #ccc; position: relative;",
                           tags$div(id = "sem_plot_container", 
                                    style = "width:100%; height:100%; display: flex; align-items: center; justify-content: center; color: #666;",
@@ -1261,7 +1471,22 @@ ui <- fluidPage(
 
     # ---------------- Details tab --------------------------------
     tabPanel("Details",
-             h4("Parameter Estimates"),
+             div(style = "display: flex; justify-content: space-between; align-items: center; margin-top: 10px; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;",
+                 h4("Parameter Estimates", style = "margin: 0; font-weight: 600;"),
+                 div(style = "display: flex; gap: 20px; align-items: center;",
+                     div(style = "margin-bottom: 0;",
+                         checkboxInput("param_show_std", "Include Standardized (std.all)", value = FALSE)
+                     ),
+                     div(style = "display: flex; align-items: center; gap: 8px;",
+                         tags$label("Decimals:", `for` = "param_digits", style = "margin: 0; font-size: 13px; color: #475569; font-weight: 500;"),
+                         div(style = "width: 130px; margin-bottom: 0;",
+                             selectInput("param_digits", NULL,
+                                         choices = c("2" = "2", "3 (Default)" = "3", "4" = "4", "All (Raw)" = "all"),
+                                         selected = "3", width = "100%")
+                         )
+                     )
+                 )
+             ),
              DTOutput("param_tbl"),
              tags$hr(),
              h4("Model Summary"),
@@ -1269,7 +1494,8 @@ ui <- fluidPage(
 
     # ---------------- Help tab -----------------------------------
     tabPanel("Help", includeMarkdown("help.md"))
-  ) # end tabsetPanel
+  ), # end tabsetPanel
+  div(id = "structura-print-report")
   ) # end div (structura-main-app)
   ) # end hidden
 ) # end fluidPage
@@ -1357,9 +1583,19 @@ server <- function(input, output, session) {
 
   output$datatable <- renderDT({
     req(data())
-    datatable(data(), filter = "top", editable = FALSE,
-              options = list(pageLength = 30, autoWidth = TRUE),
-              rownames = FALSE)
+    df <- data()
+    dt <- datatable(df, filter = "top", editable = FALSE,
+                    options = list(pageLength = 30, autoWidth = TRUE, scrollX = TRUE),
+                    rownames = FALSE)
+    
+    # Format floating-point numeric columns to 3 decimal places while preserving integers (e.g., ID, grade)
+    is_float_col <- function(x) is.numeric(x) && any(!is.na(x) & (x %% 1 != 0))
+    float_cols <- names(df)[sapply(df, is_float_col)]
+    
+    if (length(float_cols) > 0) {
+      dt <- dt %>% formatRound(columns = float_cols, digits = 3)
+    }
+    dt
   }, server = FALSE)
 
   # ---------- Filtering & preprocessing --------------------------
@@ -1465,13 +1701,18 @@ server <- function(input, output, session) {
     if (!is.null(input$display_columns))
       df <- df[, intersect(input$display_columns, names(df)), drop = FALSE]
     
-    # Round numeric columns to 3 decimal places for better display
-    numeric_cols <- sapply(df, is.numeric)
-    df[numeric_cols] <- lapply(df[numeric_cols], function(x) round(x, 3))
+    dt <- datatable(df, filter = "top", editable = FALSE,
+                    options = list(pageLength = 30, autoWidth = TRUE, scrollX = TRUE),
+                    rownames = FALSE)
     
-    datatable(df, filter = "top", editable = FALSE,
-              options = list(pageLength = 30, autoWidth = TRUE, scrollX = TRUE),
-              rownames = FALSE)
+    # Format floating-point numeric columns to 3 decimal places with aligned trailing zeros
+    is_float_col <- function(x) is.numeric(x) && any(!is.na(x) & (x %% 1 != 0))
+    float_cols <- names(df)[sapply(df, is_float_col)]
+    
+    if (length(float_cols) > 0) {
+      dt <- dt %>% formatRound(columns = float_cols, digits = 3)
+    }
+    dt
   }, server = FALSE)
 
   output$corr_heatmap <- renderRHandsontable({
@@ -1933,9 +2174,73 @@ server <- function(input, output, session) {
   })
 
   output$param_tbl <- renderDT({
-    model <- fit_model_safe()
-    validate(need(model$ok, model$msg_friendly))
-    datatable(parameterEstimates(model$fit), options = list(pageLength = 15))
+    tryCatch({
+      model <- fit_model_safe()
+      validate(need(model$ok, model$msg_friendly))
+      
+      show_std <- isTRUE(input$param_show_std)
+      pe <- tryCatch({
+        parameterEstimates(model$fit, standardized = show_std)
+      }, error = function(e) {
+        parameterEstimates(model$fit)
+      })
+      
+      digits_input <- input$param_digits
+      if (is.null(digits_input) || digits_input == "") digits_input <- "3"
+      
+      num_cols <- names(pe)[sapply(pe, is.numeric)]
+      
+      # Raw precision mode
+      if (digits_input == "all") {
+        return(datatable(pe,
+                         extensions = 'Buttons',
+                         options = list(pageLength = 15, dom = 'Bfrtip', buttons = c('copy', 'csv')),
+                         rownames = FALSE))
+      }
+      
+      digits_val <- as.integer(digits_input)
+      if (is.na(digits_val) || digits_val < 1) digits_val <- 3
+      
+      std_num_cols <- setdiff(num_cols, "pvalue")
+      
+      # Custom JS renderer for p-value: formats < .001 (or according to digits) while keeping raw number for sorting
+      p_threshold <- 10^(-digits_val)
+      p_format_js <- JS(sprintf("
+        function(data, type, row, meta) {
+          if (type !== 'display') return data;
+          if (data === null || data === undefined) return '';
+          var num = parseFloat(data);
+          if (isNaN(num)) return 'NA';
+          if (num < %f) {
+            return '< %s';
+          }
+          return num.toFixed(%d);
+        }
+      ", p_threshold, sprintf(paste0("%.", digits_val, "f"), p_threshold), digits_val))
+      
+      col_defs <- list()
+      if ("pvalue" %in% names(pe)) {
+        p_idx <- which(names(pe) == "pvalue") - 1  # 0-indexed column target for DataTables
+        col_defs[[length(col_defs) + 1]] <- list(targets = p_idx, render = p_format_js)
+      }
+      
+      dt <- datatable(pe,
+                      extensions = 'Buttons',
+                      options = list(
+                        pageLength = 15,
+                        dom = 'Bfrtip',
+                        buttons = c('copy', 'csv'),
+                        columnDefs = col_defs
+                      ),
+                      rownames = FALSE)
+      
+      if (length(std_num_cols) > 0) {
+        dt <- dt %>% formatRound(columns = std_num_cols, digits = digits_val)
+      }
+      dt
+    }, error = function(e) {
+      validate(need(FALSE, paste("Error rendering parameter estimates table:", e$message)))
+    })
   })
 
   # ----------------- Path diagram server observer ---------------
@@ -1980,6 +2285,90 @@ server <- function(input, output, session) {
       dot = dot_code,
       engine = eng
     ))
+  })
+
+  # ----------------- Export PDF Analysis Report ------------------
+  observeEvent(input$export_pdf_btn, {
+    model_res <- fit_model_safe()
+    if (!isTRUE(model_res$ok) || is.null(model_res$fit)) {
+      showModal(modalDialog(
+        title = span(icon("exclamation-triangle"), "Export Warning"),
+        div(class = "alert alert-warning",
+            "Please run and successfully fit a model before exporting the PDF report."),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+      return()
+    }
+
+    tryCatch({
+      fit <- model_res$fit
+      ms <- lavaan::fitMeasures(fit, c("nobs", "chisq", "df", "pvalue", "cfi", "tli", "rmsea", "srmr", "aic", "bic"))
+      
+      # Build Fit HTML Table
+      n_obs_val <- if (!is.na(ms["nobs"])) as.integer(ms["nobs"]) else 0L
+      chisq_val <- if (!is.na(ms["chisq"])) ms["chisq"] else 0
+      df_val    <- if (!is.na(ms["df"])) as.integer(ms["df"]) else 0L
+      pval_val  <- if (!is.na(ms["pvalue"])) ms["pvalue"] else 0
+      cfi_val   <- if (!is.na(ms["cfi"])) ms["cfi"] else 0
+      tli_val   <- if (!is.na(ms["tli"])) ms["tli"] else 0
+      rmsea_val <- if (!is.na(ms["rmsea"])) ms["rmsea"] else 0
+      srmr_val  <- if (!is.na(ms["srmr"])) ms["srmr"] else 0
+      aic_val   <- if (!is.na(ms["aic"])) ms["aic"] else 0
+      bic_val   <- if (!is.na(ms["bic"])) ms["bic"] else 0
+
+      fit_html <- paste0(
+        "<table class='print-table'>",
+        "<thead><tr><th>N</th><th>Chi-square</th><th>df</th><th>p-value</th><th>CFI</th><th>TLI</th><th>RMSEA</th><th>SRMR</th><th>AIC</th><th>BIC</th></tr></thead>",
+        "<tbody><tr>",
+        sprintf("<td>%d</td><td>%.2f</td><td>%d</td><td>%.3f</td><td>%.3f</td><td>%.3f</td><td>%.3f</td><td>%.3f</td><td>%.1f</td><td>%.1f</td>",
+                n_obs_val, chisq_val, df_val, pval_val, cfi_val, tli_val, rmsea_val, srmr_val, aic_val, bic_val),
+        "</tr></tbody></table>"
+      )
+
+      # Build Parameter Estimates Table
+      pe <- tryCatch({
+        lavaan::parameterEstimates(fit, standardized = TRUE)
+      }, error = function(e) lavaan::parameterEstimates(fit))
+      
+      param_rows <- vapply(seq_len(nrow(pe)), function(i) {
+        r <- pe[i, ]
+        p_val_str <- if (is.na(r$pvalue)) "-" else if (r$pvalue < 0.001) "< .001" else sprintf("%.3f", r$pvalue)
+        std_val_str <- if ("std.all" %in% names(r) && !is.na(r$std.all)) sprintf("%.3f", r$std.all) else "-"
+        se_str <- if (is.na(r$se)) "-" else sprintf("%.3f", r$se)
+        z_str <- if (is.na(r$z)) "-" else sprintf("%.3f", r$z)
+        sprintf("<tr><td>%s</td><td style='text-align:center;'>%s</td><td>%s</td><td style='text-align:right;'>%.3f</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td></tr>",
+                htmltools::htmlEscape(as.character(r$lhs)),
+                htmltools::htmlEscape(as.character(r$op)),
+                htmltools::htmlEscape(as.character(r$rhs)),
+                r$est, se_str, z_str, p_val_str, std_val_str)
+      }, character(1))
+      
+      param_html <- paste0(
+        "<table class='print-table'>",
+        "<thead><tr><th>LHS</th><th style='text-align:center;'>Op</th><th>RHS</th><th style='text-align:right;'>Estimate</th><th style='text-align:right;'>Std.Err</th><th style='text-align:right;'>z-value</th><th style='text-align:right;'>p-value</th><th style='text-align:right;'>Std.all</th></tr></thead>",
+        "<tbody>", paste(param_rows, collapse = ""), "</tbody></table>"
+      )
+
+      payload <- list(
+        timestamp        = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+        analysis_mode    = if (input$analysis_mode == "std") "Standardized" else "Raw",
+        missing_method   = input$missing_method,
+        fit_table_html   = fit_html,
+        param_table_html = param_html,
+        syntax_text      = paste(model_res$syntax, collapse = "\n")
+      )
+
+      session$sendCustomMessage("prepare_and_print_pdf_report", payload)
+    }, error = function(e) {
+      showModal(modalDialog(
+        title = span(icon("exclamation-triangle"), "Export Error"),
+        div(class = "alert alert-danger",
+            paste("Failed to generate PDF report:", e$message)),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+    })
   })
 
   # ----------------- Auto-Optimize Model Server Observers ---------------

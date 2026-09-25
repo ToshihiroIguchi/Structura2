@@ -43,6 +43,9 @@ Structura2 is an interactive application built in **R** using **lavaan** for Str
     `Circular (circo)`,  
     `Radial (twopi)`.  
   * Diagram pane supports **vertical scrolling** if the graph exceeds the viewport.  
+* **Export Options**  
+  * **Save SVG / Save PNG** – Download publication-ready vector SVG or 300 DPI PNG images of the active path diagram.  
+  * **Export PDF Report** – Generate a complete, formatted A4 PDF report containing model fit indices, vector path diagram, parameter estimates table, and lavaan syntax directly in your browser.  
 
 ## Fit Indices
 

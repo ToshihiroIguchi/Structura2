@@ -30,6 +30,7 @@ Structura2 is an interactive Shiny application for Structural Equation Modeling 
 * **SEM Fitting**: Fit models using **lavaan** with support for mean structures and detailed fit measures.
 * **Visualization**: Render path diagrams via browser-side **@hpcc-js/wasm**/**semDiagram**, and inspect correlation heatmaps using **rhandsontable**.
 * **Comprehensive Reporting**: View fit indices (p-value, SRMR, RMSEA, AIC, BIC, GFI, AGFI, NFI, CFI), parameter tables, and formatted equations in real time.
+* **Export & Reporting**: Export publication-grade vector SVG and high-resolution PNG path diagrams, and generate comprehensive A4 PDF analysis reports directly from the browser.
 
 ## Prerequisites & Installation (For Local Runs)
 
