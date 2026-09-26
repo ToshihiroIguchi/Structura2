@@ -1443,7 +1443,7 @@ ui <- fluidPage(
                                           class = "btn btn-info")
                            ),
                            actionButton("export_pdf_btn", "Export PDF Report",
-                                        class = "btn btn-default", icon = icon("file-pdf"))
+                                         class = "btn btn-default")
                        ),
                       shinyjs::hidden(
                         div(id = "latent_error_box",
@@ -1524,9 +1524,9 @@ ui <- fluidPage(
                           h4("Path Diagram", style = "margin: 0; font-weight: 600;"),
                           div(style = "display: flex; gap: 6px;",
                               actionButton("save_diagram_svg", "Save SVG", class = "btn btn-default btn-xs",
-                                           icon = icon("file-code"), onclick = "downloadSemDiagramSvg()"),
+                                           onclick = "downloadSemDiagramSvg()"),
                               actionButton("save_diagram_png", "Save PNG", class = "btn btn-default btn-xs",
-                                           icon = icon("file-image"), onclick = "downloadSemDiagramPng(2)")
+                                           onclick = "downloadSemDiagramPng(2)")
                           )
                       ),
                       div(style = "height:60vh; overflow-y:auto; overflow-x:hidden; border:1px solid #ccc; position: relative;",
@@ -2389,7 +2389,7 @@ server <- function(input, output, session) {
     model_res <- fit_model_safe()
     if (!isTRUE(model_res$ok) || is.null(model_res$fit)) {
       showModal(modalDialog(
-        title = span(icon("exclamation-triangle"), "Export Warning"),
+        title = "Export Warning",
         div(class = "alert alert-warning",
             "Please run and successfully fit a model before exporting the PDF report."),
         easyClose = TRUE,
@@ -2459,7 +2459,7 @@ server <- function(input, output, session) {
       session$sendCustomMessage("prepare_and_print_pdf_report", payload)
     }, error = function(e) {
       showModal(modalDialog(
-        title = span(icon("exclamation-triangle"), "Export Error"),
+        title = "Export Error",
         div(class = "alert alert-danger",
             paste("Failed to generate PDF report:", e$message)),
         easyClose = TRUE,
@@ -2505,7 +2505,7 @@ server <- function(input, output, session) {
     struct_df <- isolate(struct_table_data())
     if (is.null(struct_df) || nrow(struct_df) == 0) {
       showModal(modalDialog(
-        title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
+        title = "Auto-Optimize Warning",
         div(class = "alert alert-warning",
             "No structural model defined. Please set up structural paths first."),
         easyClose = TRUE,
@@ -2518,7 +2518,7 @@ server <- function(input, output, session) {
 
     if (!isTRUE(base_model$ok)) {
       showModal(modalDialog(
-        title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
+        title = "Auto-Optimize Warning",
         div(class = "alert alert-warning",
             paste0("Could not fit baseline model for optimization: ", base_model$msg_friendly)),
         easyClose = TRUE,
@@ -2577,7 +2577,7 @@ server <- function(input, output, session) {
         div(
           style = "background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 12px; margin-bottom: 15px;",
           div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;",
-              tags$b(icon("shield-alt"), " Variable Isolation Prevention (Keep in Model)", style = "color: #1e293b; font-size: 14px;"),
+              tags$b("Variable Isolation Prevention (Keep in Model)", style = "color: #1e293b; font-size: 14px;"),
               span(style = "font-size: 11px; color: #64748b;", "At least one connecting path will be retained")
           ),
           p("Select variables to keep in the model (at least one connecting path will always be retained).",
@@ -2813,10 +2813,10 @@ server <- function(input, output, session) {
           uiOutput("prune_cand_indicator_ui", inline = TRUE)
         ),
         div(style = "height: 320px; border: 1px solid #ccc; position: relative; border-radius: 4px; overflow: hidden; background-color: #ffffff;",
-            actionButton("prune_prev_cand", label = icon("chevron-left"), class = "btn btn-default btn-sm",
+            actionButton("prune_prev_cand", label = "<", class = "btn btn-default btn-sm",
                          style = "position: absolute; left: 12px; top: 50%; transform: translateY(-50%); z-index: 10; width: 38px; height: 38px; padding: 0; border-radius: 50%; background: rgba(255, 255, 255, 0.9); border: 1px solid #cbd5e1; box-shadow: 0 2px 5px rgba(0,0,0,0.15); display: flex; align-items: center; justify-content: center;",
                          title = "Previous Candidate"),
-            actionButton("prune_next_cand", label = icon("chevron-right"), class = "btn btn-default btn-sm",
+            actionButton("prune_next_cand", label = ">", class = "btn btn-default btn-sm",
                          style = "position: absolute; right: 12px; top: 50%; transform: translateY(-50%); z-index: 10; width: 38px; height: 38px; padding: 0; border-radius: 50%; background: rgba(255, 255, 255, 0.9); border: 1px solid #cbd5e1; box-shadow: 0 2px 5px rgba(0,0,0,0.15); display: flex; align-items: center; justify-content: center;",
                          title = "Next Candidate"),
             tags$div(id = "prune_preview_container", 
@@ -2847,7 +2847,7 @@ server <- function(input, output, session) {
     base_model <- fit_model_safe()
     if (!isTRUE(base_model$ok)) {
       showModal(modalDialog(
-        title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
+        title = "Auto-Optimize Warning",
         div(class = "alert alert-warning",
             paste0("Could not fit baseline model for optimization: ", base_model$msg_friendly)),
         easyClose = TRUE,
@@ -2885,7 +2885,7 @@ server <- function(input, output, session) {
 
     if (M == 0) {
       showModal(modalDialog(
-        title = span(icon("info-circle"), "Auto-Optimize Warning"),
+        title = "Auto-Optimize Warning",
         div(class = "alert alert-warning", "No unlocked structural paths available for optimization. All active paths are locked."),
         easyClose = TRUE,
         footer = modalButton("Dismiss")
@@ -2898,7 +2898,7 @@ server <- function(input, output, session) {
 
     if (!check_variable_isolation(struct_df, retain_deps, retain_preds, pred_cols)) {
       showModal(modalDialog(
-        title = span(icon("exclamation-triangle"), "Auto-Optimize Warning"),
+        title = "Auto-Optimize Warning",
         div(class = "alert alert-warning",
             "The current baseline model does not satisfy the specified variable isolation constraints."),
         easyClose = TRUE,
@@ -2941,11 +2941,11 @@ server <- function(input, output, session) {
 
     # Display Progress Modal with live HTML5 Canvas Chart
     showModal(modalDialog(
-      title = span(icon("sync", class = "fa-spin"), " Auto-Optimize Model: Optimizing Model Space..."),
+      title = "Auto-Optimize Model: Optimizing Model Space...",
       footer = div(
         style = "display: flex; justify-content: space-between; align-items: center; width: 100%;",
-        actionButton("cancel_prune_explore", "Cancel", class = "btn btn-default", icon = icon("times")),
-        actionButton("stop_prune_explore", "Stop & View Results", class = "btn btn-warning", icon = icon("stop-circle"))
+        actionButton("cancel_prune_explore", "Cancel", class = "btn btn-default"),
+        actionButton("stop_prune_explore", "Stop & View Results", class = "btn btn-warning")
       ),
       div(
         style = "text-align: center; padding: 15px;",

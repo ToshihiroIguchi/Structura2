@@ -75,6 +75,7 @@ const puppeteer = require('puppeteer-core');
     const hot = hotInstance ? hotInstance.hot : null;
     if (hot) {
       hot.setDataAtCell(1, 0, 'dem60');
+      hot.setDataAtCell(1, 1, 'dem60');
       const cols = hot.getColHeader();
       for (let c = 3; c < cols.length; c++) {
         const colName = cols[c];
@@ -93,6 +94,7 @@ const puppeteer = require('puppeteer-core');
     const hot = hotInstance ? hotInstance.hot : null;
     if (hot) {
       hot.setDataAtCell(2, 0, 'dem65');
+      hot.setDataAtCell(2, 1, 'dem65');
       const cols = hot.getColHeader();
       for (let c = 3; c < cols.length; c++) {
         const colName = cols[c];
