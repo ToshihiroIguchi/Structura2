@@ -822,6 +822,7 @@ ui <- fluidPage(
 .modal-header { background: #f8f9fa; }
 .modal-title  { font-weight: bold; }
 .htDimmed { background-color: #d9d9d9 !important; color: #777 !important; }
+#corr_heatmap .htDimmed { background-color: inherit !important; color: inherit !important; }
 .shiny-modal .modal-content { border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
 .shiny-modal .modal-body    { padding: 20px !important; }
 .shiny-modal .modal-footer  { padding: 10px !important; }
@@ -1321,11 +1322,7 @@ ui <- fluidPage(
         });
       });
 
-      $(document).on('shiny:visualchange', function(event) {
-        setTimeout(function() {
-          window.dispatchEvent(new Event('resize'));
-        }, 150);
-      });
+      // Ensure handsontable/DT recalculates layout when switching tabs
       $(document).on('shown.bs.tab', 'a[data-toggle=\"tab\"]', function(e) {
         setTimeout(function() {
           window.dispatchEvent(new Event('resize'));
@@ -1797,7 +1794,8 @@ server <- function(input, output, session) {
       color_renderer <- "
         function (instance, td, row, col, prop, value, cellProperties) {
           Handsontable.renderers.TextRenderer.apply(this, arguments);
-          if (value !== null) {
+          td.classList.remove('htDimmed');
+          if (value !== null && value !== undefined && value !== '') {
             var val = parseFloat(value);
             if (!isNaN(val)) {
               var r = 255, g = 255, b = 255;
@@ -1810,21 +1808,19 @@ server <- function(input, output, session) {
                 r = intensity;
                 g = intensity;
               }
-              td.style.background = 'rgb(' + r + ',' + g + ',' + b + ')';
-              if (absVal > 0.5) {
-                td.style.color = '#ffffff';
-              } else {
-                td.style.color = '#000000';
-              }
+              var bgColor = 'rgb(' + r + ',' + g + ',' + b + ')';
+              var textColor = (absVal > 0.5) ? '#ffffff' : '#000000';
+              td.style.setProperty('background-color', bgColor, 'important');
+              td.style.setProperty('color', textColor, 'important');
               td.style.textAlign = 'center';
             } else {
-              td.style.background = '#eeeeee';
-              td.style.color = '#999999';
+              td.style.setProperty('background-color', '#eeeeee', 'important');
+              td.style.setProperty('color', '#999999', 'important');
               td.style.textAlign = 'center';
             }
           } else {
-            td.style.background = '#eeeeee';
-            td.style.color = '#999999';
+            td.style.setProperty('background-color', '#eeeeee', 'important');
+            td.style.setProperty('color', '#999999', 'important');
             td.style.textAlign = 'center';
           }
         }
