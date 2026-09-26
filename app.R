@@ -256,7 +256,6 @@ semDiagram <- function(
 # ------------------------------------------------------------------
 
 `%||%` <- function(x, y) if (!is.null(x)) x else y
-tryCatch(Sys.setlocale("LC_CTYPE", "ja_JP.UTF-8"), error = function(e) NULL)
 
 # ---- Helper: Approximate Equations -----------------------------
 #   * Indicator  =  intercept + loading * Latent
@@ -428,386 +427,6 @@ get_suggested_structural_paths <- function(fit, struct_df, mi_threshold = 3.84) 
   
   suggested_matrix
 }
-
-# ---- Helper: Multi-Algorithm Model Optimization Engine ---------------------------
-# Evaluates candidate path-pruned models using Exhaustive Search, Simulated Annealing (SA),
-# Genetic Algorithm (GA), or Adaptive Auto-Switch without artificial p-value pre-filtering.
-sem_optimize_hybrid <- function(base_fit, data, meas_lines, struct_df, lock_df, extra_lines = character(0),
-                                criterion = c("AIC", "BIC"), missing_method = "listwise",
-                                needs_meanstructure = FALSE, strategy = c("adaptive", "stepwise", "exhaustive", "sa", "ga"),
-                                max_exhaustive_comb = 1024, sa_ga_threshold = 20,
-                                sa_max_iter = 200, sa_alpha = 0.90,
-                                ga_pop_size = 20, ga_max_gen = 15, ga_pmut = 0.10,
-                                progress_cb = NULL) {
-  criterion <- match.arg(criterion)
-  strategy  <- match.arg(strategy)
-  
-  if (is.null(base_fit) || !isTRUE(lavaan::lavInspect(base_fit, "converged"))) {
-    stop("The baseline model must be successfully fitted before optimization.")
-  }
-  
-  base_ms <- lavaan::fitMeasures(base_fit, c("aic", "bic", "cfi", "rmsea", "srmr", "pvalue"))
-  base_score <- if (criterion == "AIC") base_ms["aic"] else base_ms["bic"]
-  
-  pred_cols <- names(struct_df)[3:ncol(struct_df)]
-  active_paths <- list()
-  
-  for (i in seq_len(nrow(struct_df))) {
-    dep <- struct_df$Dependent[i]
-    if (!nzchar(dep)) next
-    for (p in pred_cols) {
-      if (isTRUE(as.logical(struct_df[i, p]))) {
-        is_locked <- FALSE
-        if (!is.null(lock_df) && dep %in% lock_df$Dependent && p %in% names(lock_df)) {
-          lock_r_idx <- which(lock_df$Dependent == dep)
-          if (length(lock_r_idx) > 0) {
-            is_locked <- isTRUE(as.logical(lock_df[lock_r_idx[1], p]))
-          }
-        }
-        active_paths[[length(active_paths) + 1]] <- list(
-          dep = dep, pred = p, locked = is_locked
-        )
-      }
-    }
-  }
-  
-  removable_paths <- Filter(function(x) !x$locked, active_paths)
-  M <- length(removable_paths)
-  
-  if (M == 0) {
-    return(list(
-      candidates = list(),
-      message = "No unlocked structural paths available for optimization. All active paths are locked."
-    ))
-  }
-
-  fit_candidate <- function(curr_struct_df) {
-    slines <- lapply(seq_len(nrow(curr_struct_df)), function(i) {
-      dp <- curr_struct_df$Dependent[i]
-      if (!nzchar(dp)) return(NULL)
-      preds <- names(curr_struct_df)[3:ncol(curr_struct_df)]
-      ps <- preds[as.logical(curr_struct_df[i, preds])]
-      if (!length(ps)) return(NULL)
-      paste0(dp, " ~ ", paste(ps, collapse = " + "))
-    })
-    all_syntax <- unlist(c(meas_lines, slines, extra_lines))
-    if (!length(all_syntax)) return(NULL)
-    
-    tryCatch({
-      lavaan::sem(paste(all_syntax, collapse = "\n"),
-                  data          = data,
-                  missing       = missing_method,
-                  fixed.x       = FALSE,
-                  parser        = "old",
-                  meanstructure = needs_meanstructure,
-                  ncpus         = 1L)
-    }, error = function(e) NULL)
-  }
-
-  build_candidate_record <- function(curr_s_df, removed_str) {
-    fm <- fit_candidate(curr_s_df)
-    ret_str <- build_retained_str(curr_s_df)
-    if (is.null(fm) || !lavaan::lavInspect(fm, "converged")) {
-      return(list(
-        removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
-        retained_str = ret_str,
-        struct_df = curr_s_df,
-        fit = NULL,
-        aic = NA_real_, bic = NA_real_, delta_aic = NA_real_, delta_bic = NA_real_,
-        cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
-        converged = FALSE,
-        status = "[Non-converged]"
-      ))
-    }
-    
-    ms <- lavaan::fitMeasures(fm, c("aic", "bic", "cfi", "rmsea", "srmr"))
-    c_aic <- as.numeric(ms["aic"])
-    c_bic <- as.numeric(ms["bic"])
-    d_aic <- c_aic - base_ms["aic"]
-    d_bic <- c_bic - base_ms["bic"]
-    c_cfi <- as.numeric(ms["cfi"])
-    c_rmsea <- as.numeric(ms["rmsea"])
-    c_srmr <- as.numeric(ms["srmr"])
-    
-    stat <- "[Good]"
-    if ((criterion == "AIC" && d_aic < -0.01) || (criterion == "BIC" && d_bic < -0.01)) {
-      stat <- "[Improved]"
-    }
-    if ((!is.na(c_cfi) && c_cfi < 0.90) || (!is.na(c_rmsea) && c_rmsea > 0.08) || (!is.na(c_srmr) && c_srmr > 0.08)) {
-      stat <- "[Degraded Fit]"
-    }
-    
-    list(
-      removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
-      retained_str = ret_str,
-      struct_df = curr_s_df,
-      fit = fm,
-      aic = c_aic, bic = c_bic,
-      delta_aic = d_aic, delta_bic = d_bic,
-      cfi = c_cfi, rmsea = c_rmsea, srmr = c_srmr,
-      converged = TRUE,
-      status = stat
-    )
-  }
-
-  total_comb <- 2^M
-  
-  eff_strategy <- strategy
-  if (strategy == "adaptive") {
-    if (total_comb <= max_exhaustive_comb) {
-      eff_strategy <- "exhaustive"
-    } else {
-      eff_strategy <- "stepwise"
-    }
-  }
-
-  candidates_map <- list()
-  
-  make_key <- function(s_df) {
-    lines <- c()
-    for (i in seq_len(nrow(s_df))) {
-      dp <- s_df$Dependent[i]
-      ps <- pred_cols[as.logical(s_df[i, pred_cols])]
-      if (length(ps)) lines <- c(lines, paste0(dp, "~", paste(sort(ps), collapse = ",")))
-    }
-    res <- paste(sort(lines), collapse = ";")
-    if (!nzchar(res)) "EMPTY_PATH" else res
-  }
-
-  base_key <- make_key(struct_df)
-  candidates_map[[base_key]] <- list(
-    removed_str = "None (Baseline Model)",
-    retained_str = build_retained_str(struct_df),
-    struct_df = struct_df,
-    fit = base_fit,
-    aic = as.numeric(base_ms["aic"]),
-    bic = as.numeric(base_ms["bic"]),
-    delta_aic = 0.0,
-    delta_bic = 0.0,
-    cfi = as.numeric(base_ms["cfi"]),
-    rmsea = as.numeric(base_ms["rmsea"]),
-    srmr = as.numeric(base_ms["srmr"]),
-    converged = TRUE,
-    status = "[Baseline]"
-  )
-
-  if (eff_strategy == "stepwise") {
-    curr_s_df <- struct_df
-    improved <- TRUE
-    
-    while (improved) {
-      improved <- FALSE
-      best_step_s_df <- curr_s_df
-      curr_k <- make_key(curr_s_df)
-      best_step_rec <- candidates_map[[curr_k]]
-      best_score <- if (!is.null(best_step_rec) && isTRUE(best_step_rec$converged)) {
-        if (criterion == "AIC") best_step_rec$aic else best_step_rec$bic
-      } else Inf
-      
-      for (idx in seq_along(removable_paths)) {
-        rp <- removable_paths[[idx]]
-        if (isTRUE(as.logical(curr_s_df[curr_s_df$Dependent == rp$dep, rp$pred]))) {
-          test_s_df <- curr_s_df
-          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-          
-          rem_vec <- c()
-          for (j in seq_along(removable_paths)) {
-            jp <- removable_paths[[j]]
-            if (!isTRUE(as.logical(test_s_df[test_s_df$Dependent == jp$dep, jp$pred]))) {
-              rem_vec <- c(rem_vec, paste0(jp$dep, " ~ ", jp$pred))
-            }
-          }
-          
-          k_str <- make_key(test_s_df)
-          if (!k_str %in% names(candidates_map)) {
-            rem_label <- paste(rem_vec, collapse = "; ")
-            candidates_map[[k_str]] <- build_candidate_record(test_s_df, rem_label)
-          }
-          
-          rec <- candidates_map[[k_str]]
-          if (!is.null(rec) && isTRUE(rec$converged)) {
-            cand_score <- if (criterion == "AIC") rec$aic else rec$bic
-            if (!is.na(cand_score) && cand_score < best_score - 0.01) {
-              best_score <- cand_score
-              best_step_s_df <- test_s_df
-              improved <- TRUE
-            }
-          }
-        }
-      }
-      
-      if (improved) {
-        curr_s_df <- best_step_s_df
-      }
-    }
-  } else if (eff_strategy == "exhaustive") {
-    grid <- expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE))
-    total_grid_rows <- nrow(grid)
-    for (row_i in seq_len(total_grid_rows)) {
-      if (!is.null(progress_cb)) {
-        progress_cb(
-          val = row_i / total_grid_rows,
-          detail = sprintf("Exhaustive: %d / %d candidates evaluated (%.0f%%)", row_i, total_grid_rows, (row_i / total_grid_rows) * 100)
-        )
-      }
-      state <- as.logical(grid[row_i, ])
-      test_s_df <- struct_df
-      removed_paths_vec <- c()
-      for (idx in seq_along(removable_paths)) {
-        rp <- removable_paths[[idx]]
-        keep <- state[idx]
-        if (!keep) {
-          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-          removed_paths_vec <- c(removed_paths_vec, paste0(rp$dep, " ~ ", rp$pred))
-        }
-      }
-      k_str <- make_key(test_s_df)
-      if (!k_str %in% names(candidates_map)) {
-        rem_label <- paste(removed_paths_vec, collapse = "; ")
-        candidates_map[[k_str]] <- build_candidate_record(test_s_df, rem_label)
-      }
-    }
-  } else if (eff_strategy == "sa") {
-    curr_vec <- rep(TRUE, M)
-    curr_df <- struct_df
-    
-    T_val <- 10.0
-    for (iter in seq_len(sa_max_iter)) {
-      if (!is.null(progress_cb)) {
-        progress_cb(
-          val = iter / sa_max_iter,
-          detail = sprintf("Simulated Annealing: Iteration %d / %d (Temp: %.2f)", iter, sa_max_iter, T_val)
-        )
-      }
-      flip_pos <- sample.int(M, 1)
-      cand_vec <- curr_vec
-      cand_vec[flip_pos] <- !cand_vec[flip_pos]
-      
-      test_s_df <- struct_df
-      rem_vec <- c()
-      for (idx in seq_along(removable_paths)) {
-        rp <- removable_paths[[idx]]
-        if (!cand_vec[idx]) {
-          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-          rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
-        }
-      }
-      
-      k_str <- make_key(test_s_df)
-      if (!k_str %in% names(candidates_map)) {
-        rem_label <- paste(rem_vec, collapse = "; ")
-        candidates_map[[k_str]] <- build_candidate_record(test_s_df, rem_label)
-      }
-      
-      c_rec <- candidates_map[[k_str]]
-      curr_rec <- candidates_map[[make_key(curr_df)]]
-      
-      if (!is.null(c_rec) && isTRUE(c_rec$converged)) {
-        c_score <- if (criterion == "AIC") c_rec$aic else c_rec$bic
-        curr_score <- if (!is.null(curr_rec) && isTRUE(curr_rec$converged)) {
-          if (criterion == "AIC") curr_rec$aic else curr_rec$bic
-        } else Inf
-        
-        dE <- as.numeric(c_score - curr_score)
-        if (!is.na(dE) && !is.nan(dE)) {
-          eff_T <- max(T_val, 1e-6)
-          prob <- if (dE < 0) 1.0 else exp(-dE / eff_T)
-          if (!is.na(prob) && !is.nan(prob) && runif(1) < prob) {
-            curr_vec <- cand_vec
-            curr_df <- test_s_df
-          }
-        }
-      }
-      T_val <- max(T_val * sa_alpha, 1e-6)
-    }
-  } else if (eff_strategy == "ga") {
-    pop <- matrix(sample(c(TRUE, FALSE), ga_pop_size * M, replace = TRUE),
-                  nrow = ga_pop_size, ncol = M)
-    pop[1, ] <- TRUE
-    
-    evaluate_chrom <- function(chrom_vec) {
-      test_s_df <- struct_df
-      rem_vec <- c()
-      for (idx in seq_along(removable_paths)) {
-        rp <- removable_paths[[idx]]
-        if (!chrom_vec[idx]) {
-          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-          rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
-        }
-      }
-      k_str <- make_key(test_s_df)
-      if (!k_str %in% names(candidates_map)) {
-        rem_label <- paste(rem_vec, collapse = "; ")
-        candidates_map[[k_str]] <<- build_candidate_record(test_s_df, rem_label)
-      }
-      rec <- candidates_map[[k_str]]
-      if (is.null(rec) || !isTRUE(rec$converged)) return(Inf)
-      if (criterion == "AIC") rec$aic else rec$bic
-    }
-
-    for (gen in seq_len(ga_max_gen)) {
-      if (!is.null(progress_cb)) {
-        progress_cb(
-          val = gen / ga_max_gen,
-          detail = sprintf("Genetic Algorithm: Generation %d / %d", gen, ga_max_gen)
-        )
-      }
-      scores <- apply(pop, 1, evaluate_chrom)
-      
-      best_idx <- which.min(scores)
-      best_chrom <- pop[best_idx, ]
-      
-      new_pop <- pop
-      new_pop[1, ] <- best_chrom
-      
-      for (p in seq(2, ga_pop_size, by = 2)) {
-        i1 <- sample.int(ga_pop_size, 2); parent1 <- pop[i1[which.min(scores[i1])], ]
-        i2 <- sample.int(ga_pop_size, 2); parent2 <- pop[i2[which.min(scores[i2])], ]
-        
-        if (M > 1 && runif(1) < 0.80) {
-          x_pt <- sample.int(M - 1, 1)
-          child1 <- c(parent1[1:x_pt], parent2[(x_pt + 1):M])
-          child2 <- c(parent2[1:x_pt], parent1[(x_pt + 1):M])
-        } else {
-          child1 <- parent1
-          child2 <- parent2
-        }
-        
-        mut1 <- runif(M) < ga_pmut; child1[mut1] <- !child1[mut1]
-        mut2 <- runif(M) < ga_pmut; child2[mut2] <- !child2[mut2]
-        
-        new_pop[p, ] <- child1
-        if (p + 1 <= ga_pop_size) new_pop[p + 1, ] <- child2
-      }
-      pop <- new_pop
-    }
-  }
-
-  candidates_list <- unname(candidates_map)
-  
-  scores <- vapply(candidates_list, function(x) {
-    if (!x$converged) return(Inf)
-    if (criterion == "AIC") x$aic else x$bic
-  }, numeric(1))
-  
-  ord <- order(scores, decreasing = FALSE)
-  sorted_candidates <- candidates_list[ord]
-  
-  if (length(sorted_candidates) > 0 && sorted_candidates[[1]]$converged && sorted_candidates[[1]]$status != "[Baseline]") {
-    sorted_candidates[[1]]$status <- "[Optimal]"
-  }
-  
-  list(
-    candidates = sorted_candidates,
-    criterion = criterion,
-    strategy_used = eff_strategy,
-    message = "Success"
-  )
-}
-
-
-
-
 
 # ================================================================
 # UI
@@ -2907,7 +2526,6 @@ server <- function(input, output, session) {
     strategy <- input$prune_strategy
     total_comb <- 2^M
     max_comb <- input$max_exhaustive_comb %||% 1024
-    sa_ga_thresh <- input$sa_ga_threshold %||% 20
 
     eff_strategy <- strategy
     if (strategy == "adaptive") {
@@ -2991,7 +2609,7 @@ server <- function(input, output, session) {
       curr_vec = rep(TRUE, M),
       curr_df = struct_df,
       T_val = input$sa_temp_init %||% 10.0,
-      sa_alpha = input$sa_cooling_rate %||% (input$sa_alpha %||% 0.90),
+      sa_alpha = input$sa_cooling_rate %||% 0.90,
       pop = if (eff_strategy == "ga") matrix(sample(c(TRUE, FALSE), ga_pop_size * M, replace = TRUE), nrow = ga_pop_size, ncol = M) else NULL,
       ga_pop_size = ga_pop_size,
       ga_max_gen = ga_max_gen,
@@ -3320,7 +2938,6 @@ server <- function(input, output, session) {
     cands <- res$candidates
     if (!length(cands)) return(NULL)
     
-    crit <- res$criterion
     df_list <- lapply(seq_along(cands), function(i) {
       c_item <- cands[[i]]
       ret_str <- if (is.null(c_item$retained_str)) build_retained_str(c_item$struct_df) else c_item$retained_str
@@ -3391,7 +3008,7 @@ server <- function(input, output, session) {
     }
   })
 
-  # Candidate Row Selection Observer -> Redraw Preview Path Diagram
+  # Candidate Row Selection Observer -> Updates selected candidate (rendering handled by observe below)
   observeEvent(input$prune_candidates_table_rows_selected, {
     res <- prune_results(); req(res)
     sel_idx <- input$prune_candidates_table_rows_selected
@@ -3400,30 +3017,6 @@ server <- function(input, output, session) {
     selected_prune_idx(sel_idx)
     cand <- res$candidates[[sel_idx]]
     selected_prune_cand(cand)
-    
-    if (!cand$converged || is.null(cand$fit)) {
-      session$sendCustomMessage("update_prune_preview_plot", list(
-        error = TRUE,
-        message = "Candidate model did not converge."
-      ))
-      return()
-    }
-    
-    std_for_plot <- if (input$analysis_mode == "std") TRUE else input$diagram_std
-    parts <- strsplit(input$layout_style, "_", fixed = TRUE)[[1]]
-    eng   <- parts[1]
-    rank  <- ifelse(length(parts) == 2, parts[2], "LR")
-    
-    dot_code <- semDiagram(cand$fit,
-                           standardized = std_for_plot,
-                           layout       = rank,
-                           engine       = eng)
-    
-    session$sendCustomMessage("update_prune_preview_plot", list(
-      error = FALSE,
-      dot = dot_code,
-      engine = eng
-    ))
   })
 
   # Initial trigger for selected preview on Step 2 Modal open
