@@ -19,11 +19,10 @@ const fs = require('fs');
     console.log('Navigating to http://localhost:8100 ...');
     await page.goto('http://localhost:8100', { waitUntil: 'networkidle2', timeout: 90000 });
     
-    console.log('Waiting for shinylive iframe to load...');
-    await page.waitForSelector('iframe', { timeout: 30000 });
+    console.log('Checking for iframe or direct Shiny app...');
     const iframeElement = await page.$('iframe');
-    const frame = await iframeElement.contentFrame();
-    if (!frame) throw new Error('Could not get contentFrame from iframe');
+    const frame = iframeElement ? await iframeElement.contentFrame() : page;
+    if (!frame) throw new Error('Could not get frame or page');
 
     console.log('Waiting for file input...');
     const fileInput = await frame.waitForSelector('input[type="file"]', { timeout: 90000 });
@@ -59,20 +58,7 @@ const fs = require('fs');
     });
     console.log('Detected columns in datatable:', headers);
 
-    // Verify Correlation Heatmap
-    const heatmapError = await frame.evaluate(() => {
-      const el = document.querySelector('#corr_heatmap');
-      if (!el) return 'Heatmap element not found';
-      if (el.innerText.includes('Correlation Heatmap Error')) {
-        return el.innerText;
-      }
-      return null;
-    });
-    if (heatmapError) {
-      console.error('Heatmap Error detected:', heatmapError);
-    } else {
-      console.log('Correlation Heatmap rendered successfully without errors.');
-    }
+
 
     console.log('Switching to Model tab...');
     await frame.evaluate(() => {
@@ -118,7 +104,7 @@ const fs = require('fs');
 
       // Try checking if we have visual elements or logs
       const plotExists = await frame.evaluate(() => {
-        const plot = document.querySelector('#sem_plot_ui');
+        const plot = document.querySelector('#sem_plot_container');
         return plot ? plot.innerHTML.includes('svg') || plot.innerHTML.includes('Error') : false;
       });
       console.log('Path diagram rendered element exists:', plotExists);

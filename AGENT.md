@@ -43,7 +43,7 @@ Structura2/
 | `shiny` | CRAN | Core web framework |
 | `shinyjs` | CRAN | JavaScript interop (show/hide elements) |
 | `DT` | CRAN | Interactive data tables |
-| `rhandsontable` | CRAN | Editable spreadsheet-like tables (measurement/structural model, correlation heatmap) |
+| `rhandsontable` | CRAN | Editable spreadsheet-like tables (measurement/structural model) |
 | `lavaan` | CRAN | SEM engine |
 | `@hpcc-js/wasm` | CDN / Local | Browser-side WebAssembly Graphviz path diagram rendering |
 | `markdown` | CRAN | Render help.md |

@@ -44,18 +44,19 @@ const puppeteer = require('puppeteer-core');
   });
 
   await page.waitForSelector('#input_table', { timeout: 10000 });
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  await page.waitForFunction(() => {
+    const el = document.getElementById('input_table');
+    return window.HTMLWidgets && window.HTMLWidgets.getInstance(el) && window.HTMLWidgets.getInstance(el).hot;
+  }, { timeout: 10000 });
+  await new Promise(resolve => setTimeout(resolve, 500));
   
   console.log('Configuring measurement model for PoliticalDemocracy...');
   // Row 0: ind60 =~ x1, x2, x3
-  // Row 1: dem60 =~ y1, y2, y3, y4
-  // Row 2: dem65 =~ y5, y6, y7, y8
   await page.evaluate(() => {
     const hotTableEl = document.getElementById('input_table');
     const hotInstance = window.HTMLWidgets ? window.HTMLWidgets.getInstance(hotTableEl) : null;
     const hot = hotInstance ? hotInstance.hot : null;
     if (hot) {
-      // Row 0: Latent="ind60", check x1, x2, x3
       hot.setDataAtCell(0, 0, 'ind60');
       const cols = hot.getColHeader();
       for (let c = 3; c < cols.length; c++) {
@@ -64,10 +65,12 @@ const puppeteer = require('puppeteer-core');
       }
     }
   });
-  
+  await page.waitForFunction(() => document.getElementById('lavaan_model')?.innerText.includes('ind60 =~'), { timeout: 10000 });
+
   console.log('Adding Row 2 (dem60)...');
   await page.evaluate(() => document.getElementById('add_row').click());
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  await page.waitForFunction(() => document.querySelectorAll('#input_table tbody tr').length >= 2, { timeout: 10000 });
+  await new Promise(resolve => setTimeout(resolve, 500));
   
   await page.evaluate(() => {
     const hotTableEl = document.getElementById('input_table');
@@ -75,7 +78,6 @@ const puppeteer = require('puppeteer-core');
     const hot = hotInstance ? hotInstance.hot : null;
     if (hot) {
       hot.setDataAtCell(1, 0, 'dem60');
-      hot.setDataAtCell(1, 1, 'dem60');
       const cols = hot.getColHeader();
       for (let c = 3; c < cols.length; c++) {
         const colName = cols[c];
@@ -83,10 +85,12 @@ const puppeteer = require('puppeteer-core');
       }
     }
   });
+  await page.waitForFunction(() => document.getElementById('lavaan_model')?.innerText.includes('dem60 =~'), { timeout: 10000 });
 
   console.log('Adding Row 3 (dem65)...');
   await page.evaluate(() => document.getElementById('add_row').click());
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  await page.waitForFunction(() => document.querySelectorAll('#input_table tbody tr').length >= 3, { timeout: 10000 });
+  await new Promise(resolve => setTimeout(resolve, 500));
   
   await page.evaluate(() => {
     const hotTableEl = document.getElementById('input_table');
@@ -94,7 +98,6 @@ const puppeteer = require('puppeteer-core');
     const hot = hotInstance ? hotInstance.hot : null;
     if (hot) {
       hot.setDataAtCell(2, 0, 'dem65');
-      hot.setDataAtCell(2, 1, 'dem65');
       const cols = hot.getColHeader();
       for (let c = 3; c < cols.length; c++) {
         const colName = cols[c];
@@ -102,7 +105,12 @@ const puppeteer = require('puppeteer-core');
       }
     }
   });
-  await new Promise(resolve => setTimeout(resolve, 1500));
+
+  console.log('Waiting for measurement syntax synchronization in lavaan_model...');
+  await page.waitForFunction(() => {
+    const text = document.getElementById('lavaan_model')?.innerText || '';
+    return text.includes('ind60 =~') && text.includes('dem60 =~') && text.includes('dem65 =~');
+  }, { timeout: 20000 });
 
   console.log('Setting structural paths: dem60 ~ ind60 and dem65 ~ dem60 (omitting dem65 ~ ind60)...');
   await page.evaluate(() => {
@@ -125,7 +133,12 @@ const puppeteer = require('puppeteer-core');
       }
     }
   });
-  await new Promise(resolve => setTimeout(resolve, 1500));
+
+  console.log('Waiting for structural syntax synchronization in lavaan_model...');
+  await page.waitForFunction(() => {
+    const text = document.getElementById('lavaan_model')?.innerText || '';
+    return text.includes('dem60 ~ ind60') && text.includes('dem65 ~ dem60');
+  }, { timeout: 20000 });
 
   console.log('Clicking Run Model button...');
   await page.evaluate(() => {
@@ -187,7 +200,8 @@ const puppeteer = require('puppeteer-core');
     let count = 0;
     tds.forEach(td => {
       const bs = td.style.boxShadow || '';
-      if (bs.includes('2563eb')) count++;
+      const title = td.getAttribute('title') || '';
+      if (bs.includes('2563eb') || bs.includes('37, 99, 235') || title.includes('Suggested Path to Add')) count++;
     });
     return count;
   });
@@ -204,7 +218,7 @@ const puppeteer = require('puppeteer-core');
     const chk = document.getElementById('show_suggested_paths');
     if (chk) chk.click();
   });
-  await new Promise(resolve => setTimeout(resolve, 1500));
+  await new Promise(resolve => setTimeout(resolve, 2000));
 
   const countAfterToggleOn = await page.evaluate(() => {
     const structEl = document.getElementById('checkbox_matrix');
@@ -212,11 +226,17 @@ const puppeteer = require('puppeteer-core');
     let count = 0;
     tds.forEach(td => {
       const bs = td.style.boxShadow || '';
-      if (bs.includes('2563eb')) count++;
+      const title = td.getAttribute('title') || '';
+      if (bs.includes('2563eb') || bs.includes('37, 99, 235') || title.includes('Suggested Path to Add')) count++;
     });
     return count;
   });
-  console.log(`Highlighted cells after toggle ON: ${countAfterToggleOn}`);
+  console.log(`Highlighted cells after toggle ON: ${countAfterToggleOn} (Expected: > 0)`);
+  if (countAfterToggleOn === 0) {
+    console.error('FAIL: Highlights did not reappear after toggle ON!');
+    await browser.close();
+    process.exit(1);
+  }
 
   // Test clicking the suggested checkbox
   console.log('Clicking on the suggested cell to add it to the model...');

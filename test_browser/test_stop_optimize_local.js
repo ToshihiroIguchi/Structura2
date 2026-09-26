@@ -208,17 +208,11 @@ const fs = require('fs');
     document.getElementById('cancel_prune_explore').click();
   });
 
-  await new Promise(r => setTimeout(r, 1000));
-  const isModalOpen = await page.evaluate(() => {
+  await page.waitForFunction(() => {
     const modal = document.querySelector('.modal.in, .modal.show');
-    return modal !== null;
-  });
-  console.log('Modal closed after cancel:', !isModalOpen);
-
-  if (isModalOpen) {
-    console.error('FAIL: Modal remained open after Cancel.');
-    process.exit(1);
-  }
+    return modal === null;
+  }, { timeout: 10000 });
+  console.log('Modal closed after cancel: true');
 
   console.log('ALL VERIFICATION CHECKS PASSED SUCCESSFULLY!');
   await browser.close();

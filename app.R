@@ -88,7 +88,10 @@ semDiagram <- function(
     ratio             = "fill",
     curvature         = 0.3,
     engine            = "dot",
-    twopi_compact     = TRUE) {
+    twopi_compact     = TRUE,
+    cached_params     = NULL,
+    cached_fit_measures = NULL,
+    cached_n_obs      = NULL) {
 
   engine <- match.arg(engine, c("dot","neato","fdp","circo","twopi"))
 
@@ -105,13 +108,27 @@ semDiagram <- function(
     if (!requireNamespace(p, quietly = TRUE))
       stop(sprintf("Package '%s' is required but not installed.", p))))
 
-  params <- lavaan::parameterEstimates(fitted_model, standardized = TRUE)
+  params <- if (!is.null(cached_params)) {
+    cached_params
+  } else {
+    lavaan::parameterEstimates(fitted_model, standardized = TRUE)
+  }
   scale_col <- if (standardized) "std.all" else "est"
 
-  fit_measures <- lavaan::fitMeasures(
-    fitted_model,
-    c("pvalue","srmr","rmsea","gfi","agfi","nfi","cfi","aic","bic"))
-  n_obs <- lavaan::lavInspect(fitted_model, "nobs")
+  fit_measures <- if (!is.null(cached_fit_measures)) {
+    cached_fit_measures
+  } else {
+    lavaan::fitMeasures(
+      fitted_model,
+      c("pvalue","srmr","rmsea","gfi","agfi","nfi","cfi","aic","bic"))
+  }
+  n_obs <- if (!is.null(cached_n_obs)) {
+    cached_n_obs
+  } else if (!is.null(cached_fit_measures) && "nobs" %in% names(cached_fit_measures)) {
+    as.integer(cached_fit_measures["nobs"])
+  } else {
+    lavaan::lavInspect(fitted_model, "nobs")
+  }
 
   condition_number <- NA
   max_cond_index <- NA
@@ -262,10 +279,10 @@ semDiagram <- function(
 #   * Dependent  =  intercept + Σ( slope * Predictor )
 #   * All coefficients are generated in raw (non-standardized) form
 # ----------------------------------------------------------------
-lavaan_to_equations <- function(fit, digits = 3) {
+lavaan_to_equations <- function(fit, digits = 3, cached_pe = NULL) {
 
   # ---- Extract coefficients (non-standardized) ------------------------------
-  pe <- parameterEstimates(fit, standardized = FALSE, remove.def = TRUE)
+  pe <- if (!is.null(cached_pe)) cached_pe else lavaan::parameterEstimates(fit, standardized = FALSE, remove.def = TRUE)
 
   # ---- Number formatter --------------------------------------
   format_est <- function(x, digits = 3) {
@@ -327,7 +344,7 @@ build_retained_str <- function(struct_df) {
   for (i in seq_len(nrow(struct_df))) {
     dp <- struct_df$Dependent[i]
     if (!nzchar(dp)) next
-    ps <- pred_cols[as.logical(struct_df[i, pred_cols])]
+    ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
     if (length(ps) > 0) {
       lines <- c(lines, paste0(dp, " ~ ", paste(ps, collapse = " + ")))
     }
@@ -441,7 +458,6 @@ ui <- fluidPage(
 .modal-header { background: #f8f9fa; }
 .modal-title  { font-weight: bold; }
 .htDimmed { background-color: #d9d9d9 !important; color: #777 !important; }
-#corr_heatmap .htDimmed { background-color: inherit !important; color: inherit !important; }
 .shiny-modal .modal-content { border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
 .shiny-modal .modal-body    { padding: 20px !important; }
 .shiny-modal .modal-footer  { padding: 10px !important; }
@@ -894,7 +910,7 @@ ui <- fluidPage(
             ctx.fillStyle = '#64748b';
             for (var i = 0; i < scores.length; i++) {
               if (isNaN(scores[i]) || !isFinite(scores[i])) continue;
-              var sx = padLeft + (i / maxSteps) * graphW;
+              var sx = padLeft + ((i + 1) / maxSteps) * graphW;
               var sy = padTop + (1 - (scores[i] - minVal) / valRange) * graphH;
               ctx.beginPath();
               ctx.arc(sx, sy, 2, 0, 2 * Math.PI);
@@ -927,6 +943,11 @@ ui <- fluidPage(
           ctx.fillText('0', padLeft, h - 10);
           ctx.fillText('Step ' + msg.step + ' / ' + maxSteps, padLeft + graphW / 2 - 25, h - 10);
           ctx.fillText(maxSteps, w - padRight - 15, h - 10);
+
+          var badgeElem = document.getElementById('prune_iter_badge');
+          if (badgeElem && msg.step !== undefined) {
+            badgeElem.textContent = 'Step ' + msg.step + ' / ' + maxSteps;
+          }
           
           var statusElem = document.getElementById('prune_progress_status');
           if (statusElem && msg.detail) {
@@ -1035,10 +1056,7 @@ ui <- fluidPage(
              h4("Data Transformation & Selection"),
              uiOutput("log_transform_ui"),
              uiOutput("display_column_ui"),
-             DTOutput("filtered_table"),
-             tags$hr(),
-             h4("Correlation Heatmap"),
-             rHandsontableOutput("corr_heatmap")),
+             DTOutput("filtered_table")),
 
     # ---------------- Model tab ----------------------------------
     tabPanel("Model",
@@ -1332,14 +1350,18 @@ server <- function(input, output, session) {
       # --- standardize if requested --------------------------------
       if (input$analysis_mode == "std") {
         num_cols <- names(df)[vapply(df, is.numeric, logical(1))]
-        for (col in num_cols) {
-          col_sd <- sd(df[[col]], na.rm = TRUE)
-          if (is.na(col_sd) || col_sd < 1e-12) {
-            col_mean <- mean(df[[col]], na.rm = TRUE)
-            df[[col]] <- df[[col]] - col_mean
-          } else {
-            df[[col]] <- scale(df[[col]])[, 1]
+        if (length(num_cols) > 0) {
+          mat_vals <- as.matrix(df[, num_cols, drop = FALSE])
+          sds <- apply(mat_vals, 2, sd, na.rm = TRUE)
+          zero_var <- which(is.na(sds) | sds < 1e-12)
+          non_zero_var <- setdiff(seq_along(num_cols), zero_var)
+          if (length(non_zero_var) > 0) {
+            mat_vals[, non_zero_var] <- scale(mat_vals[, non_zero_var, drop = FALSE])
           }
+          if (length(zero_var) > 0) {
+            mat_vals[, zero_var] <- scale(mat_vals[, zero_var, drop = FALSE], scale = FALSE)
+          }
+          df[, num_cols] <- as.data.frame(mat_vals)
         }
       }
       df
@@ -1350,7 +1372,7 @@ server <- function(input, output, session) {
   })
 
   output$display_column_ui <- renderUI({
-    df <- processed_data(); req(df)
+    df <- data(); req(df)
     
     # Identify columns with zero variance (constant columns)
     numeric_cols <- sapply(df, is.numeric)
@@ -1398,62 +1420,6 @@ server <- function(input, output, session) {
     dt
   }, server = FALSE)
 
-  output$corr_heatmap <- renderRHandsontable({
-    req(!is.null(input$display_columns))
-    tryCatch({
-      df <- processed_data()
-      all_cols <- intersect(input$display_columns, names(df))
-      num_cols <- all_cols[sapply(df[, all_cols, drop = FALSE], is.numeric)]
-      if (length(num_cols) < 2) return(NULL)
-      cm <- cor(df[, num_cols, drop = FALSE], use = "pairwise.complete.obs")
-      cm[is.nan(cm)] <- NA
-      cm_rounded <- round(cm, 3)
-      cm_df <- as.data.frame(cm_rounded)
-      
-      color_renderer <- "
-        function (instance, td, row, col, prop, value, cellProperties) {
-          Handsontable.renderers.TextRenderer.apply(this, arguments);
-          td.classList.remove('htDimmed');
-          if (value !== null && value !== undefined && value !== '') {
-            var val = parseFloat(value);
-            if (!isNaN(val)) {
-              var r = 255, g = 255, b = 255;
-              var absVal = Math.min(Math.abs(val), 1);
-              var intensity = Math.round(255 * (1 - absVal));
-              if (val > 0) {
-                g = intensity;
-                b = intensity;
-              } else if (val < 0) {
-                r = intensity;
-                g = intensity;
-              }
-              var bgColor = 'rgb(' + r + ',' + g + ',' + b + ')';
-              var textColor = (absVal > 0.5) ? '#ffffff' : '#000000';
-              td.style.setProperty('background-color', bgColor, 'important');
-              td.style.setProperty('color', textColor, 'important');
-              td.style.textAlign = 'center';
-            } else {
-              td.style.setProperty('background-color', '#eeeeee', 'important');
-              td.style.setProperty('color', '#999999', 'important');
-              td.style.textAlign = 'center';
-            }
-          } else {
-            td.style.setProperty('background-color', '#eeeeee', 'important');
-            td.style.setProperty('color', '#999999', 'important');
-            td.style.textAlign = 'center';
-          }
-        }
-      "
-      
-      rhandsontable(cm_df, rowHeaders = rownames(cm_rounded), readOnly = TRUE,
-                    manualColumnResize = TRUE, manualRowResize = TRUE) %>%
-        hot_cols(renderer = color_renderer)
-    }, error = function(e) {
-      error_df <- data.frame(Error = paste("Correlation Heatmap Error:", e$message))
-      rhandsontable(error_df, rowHeaders = FALSE, readOnly = TRUE)
-    })
-  })
-
   # ---------- Measurement table ----------------------------------
 
   input_table_data <- reactiveVal(NULL)
@@ -1474,8 +1440,12 @@ server <- function(input, output, session) {
 
   observeEvent(input$display_columns, ignoreNULL = TRUE, {
     inds <- input$display_columns
-    df <- input_table_data()
+    df <- if (!is.null(input$input_table)) hot_to_r(input$input_table) else input_table_data()
     if (!is.null(df)) {
+      current_inds <- setdiff(colnames(df), c("Latent", "Indicator", "Operator"))
+      if (identical(sort(current_inds), sort(inds))) {
+        return()
+      }
       meta <- df[, c("Latent", "Indicator", "Operator"), drop = FALSE]
       new_checkboxes <- as.data.frame(matrix(FALSE, nrow = nrow(df), ncol = length(inds)))
       colnames(new_checkboxes) <- inds
@@ -1503,7 +1473,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$input_table, {
     tbl <- hot_to_r(input$input_table); req(tbl)
-    tbl$Latent    <- make.names(tbl$Latent, unique = FALSE)
+    tbl$Latent    <- ifelse(nzchar(trimws(tbl$Latent)), make.names(tbl$Latent, unique = FALSE), "")
     
     obs_names <- names(processed_data())
     latent_names <- tbl$Latent[nzchar(tbl$Latent)]
@@ -1537,18 +1507,26 @@ server <- function(input, output, session) {
       shinyjs::hide("latent_error_box")
     }
     
-    convs         <- make.unique(c(obs_names, tbl$Latent))
-    tbl$Indicator <- tail(convs, nrow(tbl))
+    valid_latents <- ifelse(nzchar(tbl$Latent), tbl$Latent, "latent")
+    convs         <- make.unique(c(obs_names, valid_latents))
+    tbl$Indicator <- ifelse(nzchar(tbl$Latent), tail(convs, nrow(tbl)), "")
     input_table_data(tbl)
   })
 
   observeEvent(input$add_row, {
-    df <- input_table_data(); req(df)
+    df <- if (!is.null(input$input_table)) hot_to_r(input$input_table) else input_table_data()
+    req(df)
     new_row            <- df[1, ]
     new_row[,]         <- FALSE
     new_row$Latent     <- ""
+    new_row$Indicator  <- ""
     new_row$Operator   <- "=~"
-    input_table_data(rbind(df, new_row))
+    combined           <- rbind(df, new_row)
+    obs_names          <- names(processed_data())
+    valid_latents      <- ifelse(nzchar(combined$Latent), combined$Latent, "latent")
+    convs              <- make.unique(c(obs_names, valid_latents))
+    combined$Indicator <- ifelse(nzchar(combined$Latent), tail(convs, nrow(combined)), "")
+    input_table_data(combined)
     input_table_trigger(input_table_trigger() + 1)
   })
 
@@ -1598,7 +1576,7 @@ server <- function(input, output, session) {
     deps <- as.character(input$display_columns %||% names(df))
     meas <- input_table_data(); req(meas)
     vars <- names(meas)[4:ncol(meas)]
-    row_has_indicator <- apply(meas[vars], 1, function(x) any(as.logical(x)))
+    row_has_indicator <- apply(meas[vars], 1, function(x) any(as.logical(x), na.rm = TRUE))
     convs <- setdiff(na.omit(unique(meas$Indicator[row_has_indicator])), "")
     unique(c(deps, convs))
   })
@@ -1611,7 +1589,7 @@ server <- function(input, output, session) {
       return()
     }
     
-    old_tbl <- struct_table_data()
+    old_tbl <- if (!is.null(input$checkbox_matrix)) hot_to_r(input$checkbox_matrix) else struct_table_data()
     
     # Create new matrix
     mat <- data.frame(Dependent = items, Operator = "~", stringsAsFactors = FALSE)
@@ -1647,6 +1625,25 @@ server <- function(input, output, session) {
     struct_table_data(tbl)
   })
 
+  # Reactive cache for modification indices suggestions to eliminate heavy recalculation in checkbox_matrix
+  cached_suggested_matrix <- reactiveVal(NULL)
+
+  observe({
+    show_sug <- isTRUE(input$show_suggested_paths)
+    if (!show_sug) {
+      cached_suggested_matrix(NULL)
+      return()
+    }
+    model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
+    mat <- isolate(struct_table_data())
+    if (!is.null(model_res) && isTRUE(model_res$ok) && !is.null(model_res$fit) && !is.null(mat)) {
+      sug <- tryCatch(get_suggested_structural_paths(model_res$fit, mat, mi_threshold = 3.84), error = function(e) NULL)
+      cached_suggested_matrix(sug)
+    } else {
+      cached_suggested_matrix(NULL)
+    }
+  })
+
   output$checkbox_matrix <- renderRHandsontable({
     struct_table_trigger()
     tryCatch({
@@ -1667,14 +1664,8 @@ server <- function(input, output, session) {
       # Store R2 matrix once in the widget payload
       rh$x$r2_matrix <- r2_matrix
       
-      # Calculate suggested paths matrix if enabled and model is fitted
-      show_sug <- isTRUE(input$show_suggested_paths)
-      model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
-      suggested_matrix <- if (show_sug && !is.null(model_res) && isTRUE(model_res$ok) && !is.null(model_res$fit)) {
-        get_suggested_structural_paths(model_res$fit, mat, mi_threshold = 3.84)
-      } else {
-        NULL
-      }
+      # Use cached suggested paths matrix if enabled
+      suggested_matrix <- if (isTRUE(input$show_suggested_paths)) cached_suggested_matrix() else NULL
       rh$x$suggested_matrix <- suggested_matrix
       
       # Define static JS renderer referencing the shared R2 matrix and suggested paths matrix
@@ -1686,6 +1677,20 @@ server <- function(input, output, session) {
           var r2_matrix = params.r2_matrix;
           var suggested_matrix = params.suggested_matrix;
           var col_var_idx = col - 2;
+          
+          td.style.boxShadow = '';
+          td.style.backgroundColor = '';
+          td.style.cursor = '';
+          td.classList.remove('htDimmed');
+          if (td.title && td.title.indexOf('Suggested Path') !== -1) {
+            td.title = '';
+          }
+          var chk = td.querySelector('input');
+          if (chk) {
+            chk.style.outline = '';
+            chk.style.outlineOffset = '';
+            chk.style.borderRadius = '';
+          }
           
           if (r2_matrix && col_var_idx >= 0 && col_var_idx < r2_matrix.length) {
             var r2_val = r2_matrix[row][col_var_idx];
@@ -1710,7 +1715,6 @@ server <- function(input, output, session) {
             var sug = suggested_matrix[row][col_var_idx];
             if (sug && !value) {
               td.style.boxShadow = 'inset 0 0 0 2.5px #2563eb';
-              var chk = td.querySelector('input');
               if (chk) {
                 chk.style.outline = '2px solid #2563eb';
                 chk.style.outlineOffset = '1px';
@@ -1785,7 +1789,11 @@ server <- function(input, output, session) {
       return(list(ok = FALSE,
                   msg_friendly = msg,
                   fit = NULL,
-                  syntax = NULL))
+                  syntax = NULL,
+                  pe_std = NULL,
+                  pe_raw = NULL,
+                  fit_measures = NULL,
+                  equations = NULL))
     }
     tryCatch({
       # Use meanstructure = TRUE if FIML is selected to prevent lavaan error
@@ -1799,12 +1807,32 @@ server <- function(input, output, session) {
                 parser        = "old",
                 meanstructure = needs_meanstructure,
                 ncpus         = 1L)
-      list(ok = lavInspect(fm, "converged"),
-           msg_friendly = if (lavInspect(fm, "converged"))
+
+      converged <- isTRUE(lavInspect(fm, "converged"))
+      pe_std <- NULL
+      pe_raw <- NULL
+      fit_meas <- NULL
+      eqs <- NULL
+      if (converged) {
+        pe_std <- tryCatch(parameterEstimates(fm, standardized = TRUE), error = function(e) NULL)
+        pe_raw <- tryCatch(parameterEstimates(fm, standardized = FALSE, remove.def = TRUE), error = function(e) NULL)
+        fit_meas <- tryCatch(
+          fitMeasures(fm, c("nobs", "chisq", "df", "pvalue", "srmr", "rmsea", "gfi", "agfi", "nfi", "cfi", "aic", "bic")),
+          error = function(e) NULL
+        )
+        eqs <- tryCatch(lavaan_to_equations(fm, cached_pe = pe_raw), error = function(e) character(0))
+      }
+
+      list(ok = converged,
+           msg_friendly = if (converged)
              "" else
                "Model did not converge. Check for variables with correlation = 1 and remove or combine them.",
            fit = fm,
-           syntax = ln)
+           syntax = ln,
+           pe_std = pe_std,
+           pe_raw = pe_raw,
+           fit_measures = fit_meas,
+           equations = eqs)
     }, error = function(e) {
       # Enhanced error message with specific diagnosis
       error_msg <- conditionMessage(e)
@@ -1825,7 +1853,11 @@ server <- function(input, output, session) {
       list(ok = FALSE,
            msg_friendly = paste0(friendly_msg, "\n\nTechnical details: ", error_msg),
            fit = NULL,
-           syntax = NULL)
+           syntax = NULL,
+           pe_std = NULL,
+           pe_raw = NULL,
+           fit_measures = NULL,
+           equations = NULL)
     })
   }, ignoreNULL = FALSE)  # Initial auto-execution
 
@@ -1843,11 +1875,14 @@ server <- function(input, output, session) {
   output$fit_indices <- renderDT({
     model <- fit_model_safe()
     validate(need(model$ok, model$msg_friendly))
-    fit <- model$fit
-    ms  <- fitMeasures(fit, c("pvalue","srmr","rmsea","aic","bic",
-                              "gfi","agfi","nfi","cfi"))
-    vals <- round(as.numeric(ms), 3)
-    names(vals) <- names(ms)
+    ms <- model$fit_measures
+    if (is.null(ms)) {
+      fit <- model$fit
+      ms  <- fitMeasures(fit, c("pvalue","srmr","rmsea","aic","bic",
+                                "gfi","agfi","nfi","cfi"))
+    }
+    vals <- round(as.numeric(ms[c("pvalue","srmr","rmsea","aic","bic","gfi","agfi","nfi","cfi")]), 3)
+    names(vals) <- c("pvalue","srmr","rmsea","aic","bic","gfi","agfi","nfi","cfi")
     thr <- c(pvalue = .05, srmr = .08, rmsea = .06,
              gfi = .90, agfi = .90, nfi = .90, cfi = .90)
     fmt <- function(idx, v) {
@@ -1876,7 +1911,11 @@ server <- function(input, output, session) {
       return("— Hidden in Standardized mode —")
     model <- fit_model_safe()
     validate(need(model$ok, model$msg_friendly))
-    paste(lavaan_to_equations(model$fit), collapse = "\n")
+    if (!is.null(model$equations)) {
+      paste(model$equations, collapse = "\n")
+    } else {
+      paste(lavaan_to_equations(model$fit), collapse = "\n")
+    }
   })
 
   output$fit_summary <- renderPrint({
@@ -1891,11 +1930,17 @@ server <- function(input, output, session) {
       validate(need(model$ok, model$msg_friendly))
       
       show_std <- isTRUE(input$param_show_std)
-      pe <- tryCatch({
-        parameterEstimates(model$fit, standardized = show_std)
-      }, error = function(e) {
-        parameterEstimates(model$fit)
-      })
+      pe <- if (show_std && !is.null(model$pe_std)) {
+        model$pe_std
+      } else if (!show_std && !is.null(model$pe_raw)) {
+        model$pe_raw
+      } else {
+        tryCatch({
+          parameterEstimates(model$fit, standardized = show_std)
+        }, error = function(e) {
+          parameterEstimates(model$fit)
+        })
+      }
       
       digits_input <- input$param_digits
       if (is.null(digits_input) || digits_input == "") digits_input <- "3"
@@ -1987,9 +2032,11 @@ server <- function(input, output, session) {
     
     # Generate DOT code
     dot_code <- semDiagram(model$fit,
-                           standardized = std_for_plot,
-                           layout       = rank,
-                           engine       = eng)
+                           standardized        = std_for_plot,
+                           layout              = rank,
+                           engine              = eng,
+                           cached_params       = if (std_for_plot) model$pe_std else model$pe_raw,
+                           cached_fit_measures = model$fit_measures)
     
     # Send DOT code to client JS
     session$sendCustomMessage("update_sem_plot", list(
@@ -2312,6 +2359,8 @@ server <- function(input, output, session) {
           if (is_active === true || is_active === 'TRUE' || is_active === 'true') {
             td.style.backgroundColor = '#e0f2fe';
             td.style.fontWeight = 'bold';
+            td.style.cursor = '';
+            td.classList.remove('htDimmed');
             cellProperties.readOnly = false;
           } else {
             cellProperties.readOnly = true;
@@ -2369,6 +2418,29 @@ server <- function(input, output, session) {
     sorted_candidates <- candidates_list[ord]
     if (length(sorted_candidates) > 0 && sorted_candidates[[1]]$converged && sorted_candidates[[1]]$status != "[Baseline]") {
       sorted_candidates[[1]]$status <- "[Optimal]"
+    }
+    
+    # Post-compute detailed fit measures (CFI, RMSEA, SRMR) only for top candidates displayed to the user
+    top_eval_n <- min(length(sorted_candidates), 30L)
+    if (top_eval_n > 0) {
+      for (k in seq_len(top_eval_n)) {
+        cand_k <- sorted_candidates[[k]]
+        if (cand_k$converged && !is.null(cand_k$fit) && is.na(cand_k$cfi)) {
+          ms_k <- tryCatch(lavaan::fitMeasures(cand_k$fit, c("cfi", "rmsea", "srmr")), error = function(e) NULL)
+          if (!is.null(ms_k)) {
+            sorted_candidates[[k]]$cfi <- as.numeric(ms_k["cfi"])
+            sorted_candidates[[k]]$rmsea <- as.numeric(ms_k["rmsea"])
+            sorted_candidates[[k]]$srmr <- as.numeric(ms_k["srmr"])
+            if ((!is.na(ms_k["cfi"]) && ms_k["cfi"] < 0.90) || 
+                (!is.na(ms_k["rmsea"]) && ms_k["rmsea"] > 0.08) || 
+                (!is.na(ms_k["srmr"]) && ms_k["srmr"] > 0.08)) {
+              if (sorted_candidates[[k]]$status != "[Baseline]" && sorted_candidates[[k]]$status != "[Optimal]") {
+                sorted_candidates[[k]]$status <- "[Degraded Fit]"
+              }
+            }
+          }
+        }
+      }
     }
     
     iso_parts <- c()
@@ -2543,7 +2615,7 @@ server <- function(input, output, session) {
     mlines <- unlist(lapply(seq_len(nrow(meas_syntax)), function(i) {
       lt   <- meas_syntax$Latent[i]; if (!nzchar(lt)) return(NULL)
       vars <- names(meas_syntax)[4:ncol(meas_syntax)]
-      inds <- vars[as.logical(meas_syntax[i, vars])]
+      inds <- vars[vapply(meas_syntax[i, vars], function(x) isTRUE(as.logical(x)), logical(1))]
       if (!length(inds)) return(NULL)
       paste0(lt, " =~ ", paste(inds, collapse = " + "))
     }))
@@ -2558,7 +2630,7 @@ server <- function(input, output, session) {
       title = "Auto-Optimize Model: Optimizing Model Space...",
       footer = div(
         style = "display: flex; justify-content: space-between; align-items: center; width: 100%;",
-        actionButton("cancel_prune_explore", "Cancel", class = "btn btn-default"),
+        actionButton("cancel_prune_explore", "Cancel", class = "btn btn-default", `data-dismiss` = "modal"),
         actionButton("stop_prune_explore", "Stop & View Results", class = "btn btn-warning")
       ),
       div(
@@ -2605,7 +2677,7 @@ server <- function(input, output, session) {
       grid_matrix = grid_matrix,
       candidates_map = list(),
       scores_hist = numeric(0),
-      best_scores_hist = numeric(0),
+      best_scores_hist = base_score,
       curr_vec = rep(TRUE, M),
       curr_df = struct_df,
       T_val = input$sa_temp_init %||% 10.0,
@@ -2624,7 +2696,7 @@ server <- function(input, output, session) {
       lines <- c()
       for (i in seq_len(nrow(s_df))) {
         dp <- s_df$Dependent[i]
-        ps <- pred_cols[as.logical(s_df[i, pred_cols])]
+        ps <- pred_cols[vapply(s_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
         if (length(ps)) lines <- c(lines, paste0(dp, "~", paste(sort(ps), collapse = ",")))
       }
       res <- paste(sort(lines), collapse = ";")
@@ -2672,29 +2744,50 @@ server <- function(input, output, session) {
         dp <- curr_struct_df$Dependent[i]
         if (!nzchar(dp)) return(NULL)
         preds <- names(curr_struct_df)[3:ncol(curr_struct_df)]
-        ps <- preds[as.logical(curr_struct_df[i, preds])]
+        ps <- preds[vapply(curr_struct_df[i, preds], function(x) isTRUE(as.logical(x)), logical(1))]
         if (!length(ps)) return(NULL)
         paste0(dp, " ~ ", paste(ps, collapse = " + "))
       })
       all_syntax <- unlist(c(st$meas_lines, slines, st$extra_lines))
       if (!length(all_syntax)) return(NULL)
       
-      tryCatch({
-        lavaan::sem(paste(all_syntax, collapse = "\n"),
-                    data          = st$data,
-                    missing       = st$missing_method,
-                    fixed.x       = FALSE,
-                    parser        = "old",
-                    meanstructure = st$needs_meanstructure,
-                    ncpus         = 1L)
-      }, error = function(e) NULL)
+      syntax_str <- paste(all_syntax, collapse = "\n")
+      
+      # Fast estimation with safe warm start from base fit
+      fm <- NULL
+      if (!is.null(st$base_fit)) {
+        fm <- tryCatch({
+          lavaan::sem(syntax_str,
+                      data          = st$data,
+                      missing       = st$missing_method,
+                      fixed.x       = FALSE,
+                      parser        = "old",
+                      meanstructure = st$needs_meanstructure,
+                      ncpus         = 1L,
+                      start         = st$base_fit)
+        }, error = function(e) NULL)
+      }
+      
+      # Safety fallback: cold start if warm start failed or did not converge
+      if (is.null(fm) || !lavaan::lavInspect(fm, "converged")) {
+        fm <- tryCatch({
+          lavaan::sem(syntax_str,
+                      data          = st$data,
+                      missing       = st$missing_method,
+                      fixed.x       = FALSE,
+                      parser        = "old",
+                      meanstructure = st$needs_meanstructure,
+                      ncpus         = 1L)
+        }, error = function(e) NULL)
+      }
+      fm
     }
 
     make_key_local <- function(s_df) {
       lines <- c()
       for (i in seq_len(nrow(s_df))) {
         dp <- s_df$Dependent[i]
-        ps <- st$pred_cols[as.logical(s_df[i, st$pred_cols])]
+        ps <- st$pred_cols[vapply(s_df[i, st$pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
         if (length(ps)) lines <- c(lines, paste0(dp, "~", paste(sort(ps), collapse = ",")))
       }
       res <- paste(sort(lines), collapse = ";")
@@ -2714,26 +2807,28 @@ server <- function(input, output, session) {
           converged = FALSE, status = "[Non-converged]"
         ))
       }
-      ms <- lavaan::fitMeasures(fm, c("aic", "bic", "cfi", "rmsea", "srmr"))
-      c_aic <- as.numeric(ms["aic"]); c_bic <- as.numeric(ms["bic"])
+      # Ultra-fast score extraction using stats::AIC and stats::BIC (skips baseline model fitting)
+      c_aic <- tryCatch(as.numeric(stats::AIC(fm)), error = function(e) NA_real_)
+      c_bic <- tryCatch(as.numeric(stats::BIC(fm)), error = function(e) NA_real_)
       d_aic <- c_aic - as.numeric(st$base_ms["aic"])
       d_bic <- c_bic - as.numeric(st$base_ms["bic"])
-      c_cfi <- as.numeric(ms["cfi"]); c_rmsea <- as.numeric(ms["rmsea"]); c_srmr <- as.numeric(ms["srmr"])
       
       stat <- "[Good]"
       if ((st$criterion == "AIC" && d_aic < -0.01) || (st$criterion == "BIC" && d_bic < -0.01)) stat <- "[Improved]"
-      if ((!is.na(c_cfi) && c_cfi < 0.90) || (!is.na(c_rmsea) && c_rmsea > 0.08) || (!is.na(c_srmr) && c_srmr > 0.08)) stat <- "[Degraded Fit]"
       
       list(
         removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
         retained_str = ret_str,
         struct_df = curr_s_df, fit = fm,
         aic = c_aic, bic = c_bic, delta_aic = d_aic, delta_bic = d_bic,
-        cfi = c_cfi, rmsea = c_rmsea, srmr = c_srmr, converged = TRUE, status = stat
+        cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_, converged = TRUE, status = stat
       )
     }
 
     curr_score_step <- st$base_score
+    best_curr <- if (length(st$best_scores_hist) > 0) tail(st$best_scores_hist, 1) else st$base_score
+
+    step_advance <- 1L
 
     if (st$eff_strategy == "stepwise") {
       curr_k <- make_key_local(st$curr_df)
@@ -2784,80 +2879,109 @@ server <- function(input, output, session) {
         st$curr_df <- best_step_s_df
         curr_score_step <- best_score
       } else {
-        opt_step(st$max_steps + 1)
+        curr_score_step <- best_score
+        step_advance <- st$max_steps + 1
       }
+      st$scores_hist <- c(st$scores_hist, curr_score_step)
+      if (is.finite(curr_score_step) && curr_score_step < best_curr) {
+        best_curr <- curr_score_step
+      }
+      st$best_scores_hist <- c(st$best_scores_hist, best_curr)
     } else if (st$eff_strategy == "exhaustive") {
-      row_i <- step + 1
-      state_vec <- as.logical(st$grid_matrix[row_i, ])
-      test_s_df <- st$struct_df
-      removed_paths_vec <- c()
-      for (idx in seq_along(st$removable_paths)) {
-        rp <- st$removable_paths[[idx]]
-        if (!state_vec[idx]) {
-          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-          removed_paths_vec <- c(removed_paths_vec, paste0(rp$dep, " ~ ", rp$pred))
-        }
-      }
-      # Check variable isolation constraints
-      if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) {
-        curr_score_step <- Inf
-      } else {
-        k_str <- make_key_local(test_s_df)
-        if (!k_str %in% names(st$candidates_map)) {
-          rem_label <- paste(removed_paths_vec, collapse = "; ")
-          st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
-        }
-        rec <- st$candidates_map[[k_str]]
-        if (!is.null(rec) && isTRUE(rec$converged)) {
-          curr_score_step <- if (st$criterion == "AIC") rec$aic else rec$bic
-        }
-      }
-    } else if (st$eff_strategy == "sa") {
-      flip_pos <- sample.int(st$M, 1)
-      cand_vec <- st$curr_vec
-      cand_vec[flip_pos] <- !cand_vec[flip_pos]
-      
-      test_s_df <- st$struct_df
-      rem_vec <- c()
-      for (idx in seq_along(st$removable_paths)) {
-        rp <- st$removable_paths[[idx]]
-        if (!cand_vec[idx]) {
-          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-          rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
-        }
-      }
-      if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) {
-        c_score <- Inf
-      } else {
-        k_str <- make_key_local(test_s_df)
-        if (!k_str %in% names(st$candidates_map)) {
-          rem_label <- paste(rem_vec, collapse = "; ")
-          st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
-        }
-        c_rec <- st$candidates_map[[k_str]]
-        c_score <- if (!is.null(c_rec) && isTRUE(c_rec$converged)) {
-          if (st$criterion == "AIC") c_rec$aic else c_rec$bic
-        } else Inf
-      }
-      
-      curr_rec <- st$candidates_map[[make_key_local(st$curr_df)]]
-      if (is.finite(c_score)) {
-        curr_score_step <- c_score
-        curr_score <- if (!is.null(curr_rec) && isTRUE(curr_rec$converged)) {
-          if (st$criterion == "AIC") curr_rec$aic else curr_rec$bic
-        } else Inf
-        
-        dE <- as.numeric(c_score - curr_score)
-        if (!is.na(dE) && !is.nan(dE)) {
-          eff_T <- max(st$T_val, 1e-6)
-          prob <- if (dE < 0) 1.0 else exp(-dE / eff_T)
-          if (!is.na(prob) && !is.nan(prob) && runif(1) < prob) {
-            st$curr_vec <- cand_vec
-            st$curr_df <- test_s_df
+      chunk_size <- min(4L, st$max_steps - step)
+      for (ci in seq_len(chunk_size)) {
+        row_i <- step + ci
+        if (row_i > st$max_steps) break
+        state_vec <- as.logical(st$grid_matrix[row_i, ])
+        test_s_df <- st$struct_df
+        removed_paths_vec <- c()
+        for (idx in seq_along(st$removable_paths)) {
+          rp <- st$removable_paths[[idx]]
+          if (!state_vec[idx]) {
+            test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+            removed_paths_vec <- c(removed_paths_vec, paste0(rp$dep, " ~ ", rp$pred))
           }
         }
+        # Check variable isolation constraints
+        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) {
+          curr_score_step <- Inf
+        } else {
+          k_str <- make_key_local(test_s_df)
+          if (!k_str %in% names(st$candidates_map)) {
+            rem_label <- paste(removed_paths_vec, collapse = "; ")
+            st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
+          }
+          rec <- st$candidates_map[[k_str]]
+          if (!is.null(rec) && isTRUE(rec$converged)) {
+            curr_score_step <- if (st$criterion == "AIC") rec$aic else rec$bic
+          } else {
+            curr_score_step <- Inf
+          }
+        }
+        st$scores_hist <- c(st$scores_hist, curr_score_step)
+        if (is.finite(curr_score_step) && curr_score_step < best_curr) {
+          best_curr <- curr_score_step
+        }
+        st$best_scores_hist <- c(st$best_scores_hist, best_curr)
       }
-      st$T_val <- max(st$T_val * st$sa_alpha, 1e-6)
+      step_advance <- chunk_size
+    } else if (st$eff_strategy == "sa") {
+      chunk_size <- min(4L, st$max_steps - step)
+      for (ci in seq_len(chunk_size)) {
+        flip_pos <- sample.int(st$M, 1)
+        cand_vec <- st$curr_vec
+        cand_vec[flip_pos] <- !cand_vec[flip_pos]
+        
+        test_s_df <- st$struct_df
+        rem_vec <- c()
+        for (idx in seq_along(st$removable_paths)) {
+          rp <- st$removable_paths[[idx]]
+          if (!cand_vec[idx]) {
+            test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+            rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
+          }
+        }
+        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) {
+          c_score <- Inf
+        } else {
+          k_str <- make_key_local(test_s_df)
+          if (!k_str %in% names(st$candidates_map)) {
+            rem_label <- paste(rem_vec, collapse = "; ")
+            st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
+          }
+          c_rec <- st$candidates_map[[k_str]]
+          c_score <- if (!is.null(c_rec) && isTRUE(c_rec$converged)) {
+            if (st$criterion == "AIC") c_rec$aic else c_rec$bic
+          } else Inf
+        }
+        
+        curr_rec <- st$candidates_map[[make_key_local(st$curr_df)]]
+        if (is.finite(c_score)) {
+          curr_score_step <- c_score
+          curr_score <- if (!is.null(curr_rec) && isTRUE(curr_rec$converged)) {
+            if (st$criterion == "AIC") curr_rec$aic else curr_rec$bic
+          } else Inf
+          
+          dE <- as.numeric(c_score - curr_score)
+          if (!is.na(dE) && !is.nan(dE)) {
+            eff_T <- max(st$T_val, 1e-6)
+            prob <- if (dE < 0) 1.0 else exp(-dE / eff_T)
+            if (!is.na(prob) && !is.nan(prob) && runif(1) < prob) {
+              st$curr_vec <- cand_vec
+              st$curr_df <- test_s_df
+            }
+          }
+        } else {
+          curr_score_step <- Inf
+        }
+        st$T_val <- max(st$T_val * st$sa_alpha, 1e-6)
+        st$scores_hist <- c(st$scores_hist, curr_score_step)
+        if (is.finite(curr_score_step) && curr_score_step < best_curr) {
+          best_curr <- curr_score_step
+        }
+        st$best_scores_hist <- c(st$best_scores_hist, best_curr)
+      }
+      step_advance <- chunk_size
     } else if (st$eff_strategy == "ga") {
       evaluate_chrom_local <- function(chrom_vec) {
         test_s_df <- st$struct_df
@@ -2883,7 +3007,9 @@ server <- function(input, output, session) {
       }
 
       scores_ga <- apply(st$pop, 1, evaluate_chrom_local)
+      scores_ga[is.na(scores_ga)] <- Inf
       best_idx <- which.min(scores_ga)
+      if (length(best_idx) == 0) best_idx <- 1L
       curr_score_step <- scores_ga[best_idx]
       
       new_pop <- st$pop
@@ -2905,23 +3031,28 @@ server <- function(input, output, session) {
         if (p + 1 <= st$ga_pop_size) new_pop[p + 1, ] <- child2
       }
       st$pop <- new_pop
+      st$scores_hist <- c(st$scores_hist, curr_score_step)
+      if (is.finite(curr_score_step) && curr_score_step < best_curr) {
+        best_curr <- curr_score_step
+      }
+      st$best_scores_hist <- c(st$best_scores_hist, best_curr)
     }
 
-    st$scores_hist <- c(st$scores_hist, curr_score_step)
-    valid_scores <- Filter(function(v) is.numeric(v) && !is.na(v) && is.finite(v), st$scores_hist)
-    best_curr <- if (length(valid_scores) > 0) min(min(valid_scores), st$base_score) else st$base_score
-    st$best_scores_hist <- c(st$best_scores_hist, best_curr)
+    if (!isTRUE(isolate(opt_running()))) {
+      return()
+    }
 
     opt_state(st)
 
+    cur_step_display <- min(step + step_advance, st$max_steps)
     detail_msg <- sprintf(
       "Step %d / %d | Current %s: %.2f | Best: %.2f (Δ %+.2f)",
-      step + 1, st$max_steps, st$criterion,
+      cur_step_display, st$max_steps, st$criterion,
       curr_score_step, best_curr, best_curr - st$base_score
     )
 
     session$sendCustomMessage("update_optimization_live_chart", list(
-      step = step + 1,
+      step = cur_step_display,
       maxIter = st$max_steps,
       scores = st$scores_hist,
       best_scores = st$best_scores_hist,
@@ -2929,7 +3060,7 @@ server <- function(input, output, session) {
       detail = detail_msg
     ))
 
-    opt_step(step + 1)
+    opt_step(step + step_advance)
   })
 
   # Render Candidate Ranking Table
@@ -2986,6 +3117,7 @@ server <- function(input, output, session) {
     if (curr_idx > 1) {
       new_idx <- curr_idx - 1
       selected_prune_idx(new_idx)
+      selected_prune_cand(res$candidates[[new_idx]])
       target_page <- ceiling(new_idx / 6)
       dataTableProxy("prune_candidates_table") %>% 
         selectRows(new_idx) %>% 
@@ -3001,6 +3133,7 @@ server <- function(input, output, session) {
     if (curr_idx < length(res$candidates)) {
       new_idx <- curr_idx + 1
       selected_prune_idx(new_idx)
+      selected_prune_cand(res$candidates[[new_idx]])
       target_page <- ceiling(new_idx / 6)
       dataTableProxy("prune_candidates_table") %>% 
         selectRows(new_idx) %>% 
