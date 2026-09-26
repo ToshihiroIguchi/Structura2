@@ -28,6 +28,7 @@ Structura2 is an interactive Shiny application for Structural Equation Modeling 
 * **One-hot Encoding**: Convert categorical variables to dummy indicators for SEM compatibility.
 * **Model Specification**: Define measurement (`Latent =~ Indicators`) and structural (`Dependent ~ Predictors`) models in interactive Handsontable grids powered by **rhandsontable** and **DT** ([cran.r-project.org](https://cran.r-project.org/package=shiny), [shiny.posit.co](https://shiny.posit.co/)).
 * **SEM Fitting**: Fit models using **lavaan** with support for mean structures and detailed fit measures.
+* **Model Optimization & Recommendations**: Automatically prune non-significant paths to minimize AIC/BIC, or discover promising paths to add with real-time Modification Indices (MI ≥ 3.84) highlighted directly in the structural matrix.
 * **Visualization**: Render path diagrams via browser-side **@hpcc-js/wasm**/**semDiagram**, and inspect correlation heatmaps using **rhandsontable**.
 * **Comprehensive Reporting**: View fit indices (p-value, SRMR, RMSEA, AIC, BIC, GFI, AGFI, NFI, CFI), parameter tables, and formatted equations in real time.
 * **Export & Reporting**: Export publication-grade vector SVG and high-resolution PNG path diagrams, and generate comprehensive A4 PDF analysis reports directly from the browser.

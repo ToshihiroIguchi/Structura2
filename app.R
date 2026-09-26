@@ -367,7 +367,67 @@ check_variable_isolation <- function(s_df, retain_deps, retain_preds, pred_cols)
   TRUE
 }
 
-
+# ---- Helper: Suggested Structural Paths based on Modification Indices ------------
+get_suggested_structural_paths <- function(fit, struct_df, mi_threshold = 3.84) {
+  if (is.null(fit) || !isTRUE(lavaan::lavInspect(fit, "converged"))) {
+    return(NULL)
+  }
+  
+  mi_res <- tryCatch({
+    lavaan::modificationindices(fit, standardized = TRUE, sort = TRUE, minimum.value = mi_threshold)
+  }, error = function(e) {
+    NULL
+  })
+  
+  if (is.null(mi_res) || nrow(mi_res) == 0) {
+    return(NULL)
+  }
+  
+  # Filter only regression / structural paths (op == "~")
+  reg_mi <- mi_res[mi_res$op == "~", , drop = FALSE]
+  if (nrow(reg_mi) == 0) {
+    return(NULL)
+  }
+  
+  deps <- struct_df$Dependent
+  preds <- names(struct_df)[3:ncol(struct_df)]
+  
+  suggested_matrix <- replicate(nrow(struct_df), vector("list", length(preds)), simplify = FALSE)
+  has_suggestions <- FALSE
+  
+  for (i in seq_len(nrow(reg_mi))) {
+    row_dep <- as.character(reg_mi$lhs[i])
+    col_pred <- as.character(reg_mi$rhs[i])
+    
+    r_idx <- which(deps == row_dep)
+    c_idx <- which(preds == col_pred)
+    
+    if (length(r_idx) > 0 && length(c_idx) > 0) {
+      r <- r_idx[1]
+      c <- c_idx[1]
+      
+      # Exclude self-loop or already active paths in struct_df
+      is_active <- isTRUE(as.logical(struct_df[r, preds[c]]))
+      if (!is_active && r != c) {
+        std_val <- if ("sepc.all" %in% names(reg_mi)) as.numeric(reg_mi$sepc.all[i]) else NULL
+        if (is.null(std_val) || is.na(std_val)) std_val <- NULL
+        
+        suggested_matrix[[r]][[c]] <- list(
+          mi = as.numeric(reg_mi$mi[i]),
+          epc = as.numeric(reg_mi$epc[i]),
+          std_epc = std_val
+        )
+        has_suggestions <- TRUE
+      }
+    }
+  }
+  
+  if (!has_suggestions) {
+    return(NULL)
+  }
+  
+  suggested_matrix
+}
 
 # ---- Helper: Multi-Algorithm Model Optimization Engine ---------------------------
 # Evaluates candidate path-pruned models using Exhaustive Search, Simulated Annealing (SA),
@@ -1398,8 +1458,15 @@ ui <- fluidPage(
                           actionButton("add_row", "Add Row", class = "btn btn-primary", style = "margin-top: 10px;")
                       ),
                       tags$hr(),
-                      h4("Structural Model"),
+                      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; flex-wrap: wrap; gap: 8px;",
+                          h4("Structural Model", style = "margin: 0; font-weight: 600;"),
+                          div(style = "margin-bottom: 0;",
+                              checkboxInput("show_suggested_paths", "Highlight suggested paths (MI ≥ 3.84)", value = TRUE)
+                          )
+                      ),
                       p("Color intensity indicates R² strength (white: low, red: high). ",
+                        tags$span(style = "color: #2563eb; font-weight: 600;", "Blue border"),
+                        " indicates recommended paths based on Modification Indices (MI ≥ 3.84). ",
                         "Use as exploratory reference alongside theoretical knowledge.",
                         style = "font-size: 12px; color: #666; margin-bottom: 10px;"),
                       rHandsontableOutput("checkbox_matrix"),
@@ -1985,13 +2052,24 @@ server <- function(input, output, session) {
       # Store R2 matrix once in the widget payload
       rh$x$r2_matrix <- r2_matrix
       
-      # Define static JS renderer referencing the shared R2 matrix
+      # Calculate suggested paths matrix if enabled and model is fitted
+      show_sug <- isTRUE(input$show_suggested_paths)
+      model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
+      suggested_matrix <- if (show_sug && !is.null(model_res) && isTRUE(model_res$ok) && !is.null(model_res$fit)) {
+        get_suggested_structural_paths(model_res$fit, mat, mi_threshold = 3.84)
+      } else {
+        NULL
+      }
+      rh$x$suggested_matrix <- suggested_matrix
+      
+      # Define static JS renderer referencing the shared R2 matrix and suggested paths matrix
       # (Note: Col index offset is -2 because 'Dependent' and 'Operator' columns are on the left)
       renderer_js <- "
         function(instance, td, row, col, prop, value, cellProperties) {
           Handsontable.renderers.CheckboxRenderer.apply(this, arguments);
           var params = instance.params || instance.getSettings();
           var r2_matrix = params.r2_matrix;
+          var suggested_matrix = params.suggested_matrix;
           var col_var_idx = col - 2;
           
           if (r2_matrix && col_var_idx >= 0 && col_var_idx < r2_matrix.length) {
@@ -2010,6 +2088,25 @@ server <- function(input, output, session) {
             td.style.backgroundColor = '#f0f0f0';
             td.style.cursor = 'not-allowed';
             td.classList.add('htDimmed');
+            return;
+          }
+          
+          if (suggested_matrix && row < suggested_matrix.length && col_var_idx >= 0 && col_var_idx < suggested_matrix[row].length) {
+            var sug = suggested_matrix[row][col_var_idx];
+            if (sug && !value) {
+              td.style.boxShadow = 'inset 0 0 0 2.5px #2563eb';
+              var chk = td.querySelector('input');
+              if (chk) {
+                chk.style.outline = '2px solid #2563eb';
+                chk.style.outlineOffset = '1px';
+                chk.style.borderRadius = '3px';
+              }
+              var tipText = 'Suggested Path to Add:\\nMI: ' + Number(sug.mi).toFixed(2) + ' (Chi-sq drop)';
+              if (sug.std_epc !== null && sug.std_epc !== undefined && !isNaN(sug.std_epc)) {
+                tipText += '\\nstd.EPC: ' + Number(sug.std_epc).toFixed(3);
+              }
+              td.title = tipText;
+            }
           }
         }"
       

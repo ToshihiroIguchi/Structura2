@@ -34,6 +34,11 @@ Structura2 is an interactive application built in **R** using **lavaan** for Str
   * Automatically evaluates model subsets using Stepwise, Exhaustive, or Simulated Annealing search to minimize AIC or BIC.  
   * **Variable Isolation Prevention**: Protect critical dependent (in-degree &ge; 1) or predictor (out-degree &ge; 1) variables from being completely severed from the model during optimization.  
   * **Path Locking**: Pin specific structural paths to unconditionally protect them from pruning.  
+* **Suggested Paths Highlighting (Modification Indices)**  
+  * Highlights promising unselected regression paths (`~`) with a distinct blue border directly in the Structural Model table based on Modification Indices ($MI \ge 3.84$).  
+  * Hover over highlighted cells to inspect the expected $\chi^2$ drop (MI) and standardized parameter change (std.EPC).  
+  * Click any suggested checkbox to add it immediately to your model specification.  
+  * Can be toggled on/off via the **Highlight suggested paths** checkbox above the table.  
 * **Path Diagram Options**  
   * **Layout & Engine** selector:  
     `Hierarchical Left → Right (dot)`,  
