@@ -1310,6 +1310,47 @@ server <- function(input, output, session) {
                        choices = valid, inline = TRUE)
   })
 
+  # Column-name shape (log10 renames / one-hot dummy names) computed from the full,
+  # unfiltered dataset. Kept independent of input$datatable_rows_all so UI elements that
+  # only need the resulting column set (e.g. display_column_ui) don't lose their selection
+  # or re-render every time the user filters/searches the preview table.
+  processed_columns_full <- reactive({
+    req(data())
+    tryCatch({
+      df <- data()
+      df[] <- lapply(df, function(x) if (is.factor(x)) as.character(x) else x)
+
+      # --- log10 transform (renames columns only) -------------------
+      if (!is.null(input$log_columns)) {
+        col_order <- names(df)
+        for (col in input$log_columns) {
+          log_col      <- paste0("log_", col)
+          df[[log_col]] <- log10(df[[col]])
+          pos           <- match(col, col_order)
+          col_order[pos] <- log_col
+          df[[col]]      <- NULL
+        }
+        df <- df[, col_order, drop = FALSE]
+      }
+
+      # --- one-hot encode --------------------------------------------
+      chars <- names(df)[vapply(df, is.character, logical(1))]
+      multi <- chars[vapply(df[chars], function(x) {
+        u <- unique(x); length(u) > 1 && length(u) < nrow(df)
+      }, logical(1))]
+      if (length(multi)) {
+        mm <- model.matrix(~ . - 1, data = df[multi], na.action = na.pass)
+        df <- cbind(df[setdiff(names(df), multi)],
+                    as.data.frame(mm, check.names = TRUE))
+      }
+      names(df) <- make.names(names(df), unique = TRUE)
+      df
+    }, error = function(e) {
+      warning(paste("Data preprocessing failed:", e$message))
+      data.frame()
+    })
+  })
+
   processed_data <- reactive({
     req(data())
     tryCatch({
@@ -1372,8 +1413,8 @@ server <- function(input, output, session) {
   })
 
   output$display_column_ui <- renderUI({
-    df <- data(); req(df)
-    
+    df <- processed_columns_full(); req(df)
+
     # Identify columns with zero variance (constant columns)
     numeric_cols <- sapply(df, is.numeric)
     zero_var_cols <- names(df)[numeric_cols][sapply(df[numeric_cols], function(x) {
@@ -1635,6 +1676,7 @@ server <- function(input, output, session) {
       return()
     }
     model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
+    model_items() # establish dependency so the cache is invalidated when structural items (rows/cols) change shape
     mat <- isolate(struct_table_data())
     if (!is.null(model_res) && isTRUE(model_res$ok) && !is.null(model_res$fit) && !is.null(mat)) {
       sug <- tryCatch(get_suggested_structural_paths(model_res$fit, mat, mi_threshold = 3.84), error = function(e) NULL)
@@ -2420,10 +2462,11 @@ server <- function(input, output, session) {
       sorted_candidates[[1]]$status <- "[Optimal]"
     }
     
-    # Post-compute detailed fit measures (CFI, RMSEA, SRMR) only for top candidates displayed to the user
-    top_eval_n <- min(length(sorted_candidates), 30L)
-    if (top_eval_n > 0) {
-      for (k in seq_len(top_eval_n)) {
+    # Post-compute detailed fit measures (CFI, RMSEA, SRMR) for every converged candidate so the
+    # "[Degraded Fit]" flag is consistent across the whole ranking table, not just the first page.
+    # fitMeasures() only reads off the already-fitted lavaan object, so this is cheap (no re-estimation).
+    if (length(sorted_candidates) > 0) {
+      for (k in seq_along(sorted_candidates)) {
         cand_k <- sorted_candidates[[k]]
         if (cand_k$converged && !is.null(cand_k$fit) && is.na(cand_k$cfi)) {
           ms_k <- tryCatch(lavaan::fitMeasures(cand_k$fit, c("cfi", "rmsea", "srmr")), error = function(e) NULL)
