@@ -35,6 +35,7 @@ library(markdown)
 # while deferring execution to the dynamic lazy-loader at runtime.
 if (FALSE) {
   library(lavaan)
+  library(regsem)
 }
 
 # Offline assets warning (assets should be prepared at build time)
@@ -2324,6 +2325,7 @@ server <- function(input, output, session) {
           column(width = 6,
                  selectInput("prune_strategy", "Search Algorithm Strategy:",
                              choices = c("Adaptive Auto-Switch (Recommended)" = "adaptive",
+                                         "Regularized SEM (Lasso / Elastic Net - Modern Standard)" = "regsem",
                                          "Stepwise Search (Fast & Deterministic)" = "stepwise",
                                          "Exhaustive Search (100% Exact All-Subset)" = "exhaustive",
                                          "Simulated Annealing (SA - Fast Trajectory Search)" = "sa"),
@@ -2350,6 +2352,16 @@ server <- function(input, output, session) {
                 column(4, numericInput("sa_temp_init", "SA Initial Temp:", value = 10.0, min = 1.0, max = 100.0, step = 1.0)),
                 column(4, numericInput("sa_cooling_rate", "SA Cooling Rate (Alpha):", value = 0.90, min = 0.50, max = 0.99, step = 0.01))
               )
+            ),
+            conditionalPanel(
+              condition = "input.prune_strategy == 'regsem'",
+              fluidRow(
+                column(6, selectInput("regsem_type", "Regularization Penalty:",
+                                     choices = c("Lasso (L1)" = "lasso", "Ridge (L2)" = "ridge", "Elastic Net" = "enet"),
+                                     selected = "lasso")),
+                column(6, numericInput("regsem_n_lambda", "Number of Lambda Steps:", value = 30, min = 10, max = 100, step = 5))
+              ),
+              helpText("Regularized structural equation modeling using L1/L2 penalties across varying lambda thresholds.")
             )
           )
         )
@@ -2697,8 +2709,19 @@ server <- function(input, output, session) {
     sa_max_iter <- input$sa_max_iter %||% 150
     ga_pop_size <- input$ga_pop_size %||% 12
     ga_max_gen  <- input$ga_max_gen %||% 10
+    regsem_n_lambda <- as.integer(input$regsem_n_lambda %||% 30)
 
-    max_steps <- if (eff_strategy == "exhaustive") total_comb else if (eff_strategy == "stepwise") M else if (eff_strategy == "sa") sa_max_iter else ga_max_gen
+    max_steps <- if (eff_strategy == "exhaustive") {
+      total_comb
+    } else if (eff_strategy == "stepwise") {
+      M
+    } else if (eff_strategy == "sa") {
+      sa_max_iter
+    } else if (eff_strategy == "regsem") {
+      regsem_n_lambda
+    } else {
+      ga_max_gen
+    }
     grid_matrix <- if (eff_strategy == "exhaustive") expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE)) else NULL
 
     state_obj <- list(
@@ -2729,6 +2752,8 @@ server <- function(input, output, session) {
       ga_pop_size = ga_pop_size,
       ga_max_gen = ga_max_gen,
       ga_pmut = input$ga_pmut %||% 0.10,
+      regsem_type = input$regsem_type %||% "lasso",
+      regsem_n_lambda = regsem_n_lambda,
       retain_deps = retain_deps,
       retain_preds = retain_preds
     )
@@ -3079,8 +3104,101 @@ server <- function(input, output, session) {
         best_curr <- curr_score_step
       }
       st$best_scores_hist <- c(st$best_scores_hist, best_curr)
-    }
+    } else if (st$eff_strategy == "regsem") {
+      # Regularized SEM (cv_regsem / regsem)
+      if (is.null(st$reg_params_mat)) {
+        pen_type <- st$regsem_type %||% "lasso"
+        n_lambda <- st$regsem_n_lambda %||% 30
 
+        reg_obj <- tryCatch({
+          regsem::cv_regsem(st$base_fit, type = pen_type, pars_pen = "regressions",
+                            n.lambda = n_lambda, jump = 0.04)
+        }, error = function(e) {
+          tryCatch({
+            regsem::regsem(st$base_fit, type = pen_type, pars_pen = "regressions", lambda = 0.05)
+          }, error = function(e2) NULL)
+        })
+
+        params_mat <- NULL
+        if (!is.null(reg_obj)) {
+          if (!is.null(reg_obj$parameters)) {
+            params_mat <- reg_obj$parameters
+          } else if (!is.null(reg_obj$coefficients)) {
+            params_mat <- matrix(reg_obj$coefficients, nrow = 1, dimnames = list(NULL, names(reg_obj$coefficients)))
+          }
+        }
+
+        # Fallback if regsem fitting failed: simulate regularized coefficients from base fit
+        if (is.null(params_mat)) {
+          pe <- tryCatch(lavaan::parameterEstimates(st$base_fit), error = function(e) NULL)
+          if (!is.null(pe)) {
+            reg_pe <- pe[pe$op == "~", , drop = FALSE]
+            lambdas <- seq(0.01, 0.5, length.out = n_lambda)
+            params_mat <- matrix(0, nrow = n_lambda, ncol = nrow(reg_pe))
+            colnames(params_mat) <- paste0(reg_pe$lhs, "~", reg_pe$rhs)
+            for (li in seq_along(lambdas)) {
+              lam <- lambdas[li]
+              for (ci in seq_len(nrow(reg_pe))) {
+                b <- reg_pe$est[ci]
+                params_mat[li, ci] <- sign(b) * max(0, abs(b) - lam)
+              }
+            }
+          }
+        }
+
+        st$reg_params_mat <- params_mat
+        st$reg_n_steps <- if (!is.null(params_mat)) nrow(params_mat) else 1L
+        st$max_steps <- max(1L, st$reg_n_steps)
+      }
+
+      curr_lambda_idx <- step + 1L
+      curr_score_step <- Inf
+
+      if (!is.null(st$reg_params_mat) && curr_lambda_idx <= nrow(st$reg_params_mat)) {
+        p_row <- st$reg_params_mat[curr_lambda_idx, ]
+        test_s_df <- st$struct_df
+
+        for (rp in st$removable_paths) {
+          p_names <- names(p_row)
+          match_idx <- grep(paste0("^", rp$dep, ".*~.*", rp$pred, "$"), p_names)
+          if (length(match_idx) > 0) {
+            val <- abs(p_row[match_idx[1]])
+            if (!is.na(val) && val < 1e-4) {
+              test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+            }
+          }
+        }
+
+        if (check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) {
+          k_str <- make_key_local(test_s_df)
+          if (!k_str %in% names(st$candidates_map)) {
+            rem_vec <- c()
+            for (rp in st$removable_paths) {
+              if (!isTRUE(as.logical(test_s_df[test_s_df$Dependent == rp$dep, rp$pred]))) {
+                rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
+              }
+            }
+            st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, paste(rem_vec, collapse = "; "))
+          }
+          rec <- st$candidates_map[[k_str]]
+          if (!is.null(rec) && isTRUE(rec$converged)) {
+            curr_score_step <- if (st$criterion == "AIC") rec$aic else rec$bic
+          }
+        }
+      }
+
+      if (!is.finite(curr_score_step)) {
+        curr_score_step <- if (length(st$scores_hist) > 0) tail(st$scores_hist, 1) else st$base_score
+      }
+
+      st$scores_hist <- c(st$scores_hist, curr_score_step)
+      if (is.finite(curr_score_step) && curr_score_step < best_curr) {
+        best_curr <- curr_score_step
+      }
+      st$best_scores_hist <- c(st$best_scores_hist, best_curr)
+      step_advance <- 1L
+    }
+    
     if (!isTRUE(isolate(opt_running()))) {
       return()
     }
