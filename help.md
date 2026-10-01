@@ -198,12 +198,15 @@ Clicking the cyan **Auto-Optimize Model** button (active whenever structural pat
   Applies a heavier penalty scaling with sample size ($\text{penalty} = k \ln N$). Strongly favors sparse, highly parsimonious specifications.
 
 #### Search Algorithm Strategy
-* **Adaptive Auto-Switch** *(Recommended)*:
+Structura2 provides a robust suite of optimization strategies spanning exact combinatorial search, modern regularized estimation, greedy pruning, and heuristic meta-heuristics:
+* **Adaptive Auto-Switch** *(Recommended for General Use)*:
   Calculates the total combinatorial search space $2^M$, where $M$ is the number of unlocked structural paths. If $2^M \le 1024$ (configurable threshold), it executes an **Exhaustive Search** guaranteeing global optimality. If $2^M > 1024$, it automatically switches to a **Stepwise Search** for instant convergence without browser freezing.
+* **Regularized SEM (Lasso / Elastic Net - Modern Industry Standard)**:
+  Penalized maximum likelihood estimation (`regsem::cv_regsem`) applying $L_1$ (Lasso), $L_2$ (Ridge), or Elastic Net regularization to structural regression coefficients across a grid of shrinkage parameters ($\lambda$). The modern gold standard for continuous shrinkage and sparse model selection in SEM.
 * **Stepwise Search (Fast & Deterministic)**:
-  Greedy backward elimination removing the single path at each iteration that yields the largest improvement in the chosen criterion, halting when no further reduction is possible.
+  Greedy backward elimination removing the single path at each iteration that yields the largest improvement in the chosen criterion (AIC or BIC), halting when no further reduction is possible.
 * **Exhaustive Search (100% Exact All-Subset)**:
-  Evaluates every possible permutation of present/absent paths. Recommended when $M \le 10$.
+  Evaluates every possible permutation ($2^M$) of present/absent paths. Recommended when $M \le 10$.
 * **Simulated Annealing (SA - Fast Trajectory Search)**:
   Stochastic meta-heuristic capable of escaping local minima by probabilistically accepting temporary score degradations at higher temperatures ($T$). Hyperparameters (Iterations, Initial Temp, Cooling Rate) can be fine-tuned under *Advanced Algorithm Hyper-Parameters*.
 
