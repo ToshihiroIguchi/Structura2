@@ -1215,6 +1215,7 @@ server <- function(input, output, session) {
       library(lavaan)
       
       # Complete the progress bar and transition out successfully
+      runjs("if (window.parent) { window.parent.postMessage({ type: 'structura-ready' }, '*'); }")
       runjs("if (window.finishStructuraPreload) { window.finishStructuraPreload(true); } else { $('#structura-preload-container').hide(); }")
       shinyjs::show("structura-main-app")
       
