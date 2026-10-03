@@ -150,7 +150,13 @@ const puppeteer = require('puppeteer-core');
   await page.waitForSelector('#sem_plot_container svg', { timeout: 25000 });
   console.log('Model fitted successfully!');
   
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  // This legacy expectation (dem65 ~ ind60, MI ~ 3.97) predates the stricter defaults (MI >= 6.63,
+  // |std.EPC| >= 0.1), so request the permissive thresholds explicitly.
+  await page.evaluate(() => {
+    window.Shiny.setInputValue('mi_threshold', 3.84);
+    window.Shiny.setInputValue('epc_threshold', 0);
+  });
+  await new Promise(resolve => setTimeout(resolve, 5000));
 
   console.log('Inspecting checkbox_matrix for suggested path highlights (Expecting dem65 ~ ind60 with MI >= 3.84)...');
   const suggestions = await page.evaluate(() => {
