@@ -535,10 +535,12 @@ build_anchor_lines <- function(struct_df, anchor_vars, baseline_dvs = character(
       if (a %in% cand_dvs && b %in% cand_dvs && !has_cand(a, b)) lines <- c(lines, paste0(a, " ~~ 0*", b))
     }
   }
+  # Once ANY explicit "~~" line is present lavaan stops freeing the remaining exogenous covariances
+  # automatically, so every pair of baseline-exogenous variables is declared explicitly.
   free_pool <- unique(c(base_exo_active, exo_lost))
-  for (a in exo_lost) {
-    for (e in free_pool) {
-      if (e != a && (!(e %in% exo_lost) || a < e)) lines <- c(lines, paste0(a, " ~~ ", e))
+  if (length(lines) && length(free_pool) > 1) {
+    for (i in seq_len(length(free_pool) - 1)) {
+      for (j in (i + 1):length(free_pool)) lines <- c(lines, paste0(free_pool[i], " ~~ ", free_pool[j]))
     }
   }
   lines

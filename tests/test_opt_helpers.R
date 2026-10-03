@@ -75,6 +75,12 @@ ok(abs(AIC(lat_fit_no_st) - AIC(lat_fit_base)) > 1e-3,
    "dropping speed ~ textual is no longer disguised as a residual covariance (AIC differs from the saturated baseline)")
 ok(fitMeasures(lat_fit_no_st, "df") == fitMeasures(lat_fit_base, "df") + 1, "dropping one latent path adds exactly 1 df")
 
+# --- explicit anchor lines must not switch off the automatic exogenous covariances of the OTHER variables
+cand_one <- mk(list(c("m", "x1"), c("y", "m"), c("y", "x2")))          # only y ~ x3 removed; x1, x2 stay exogenous
+fit_one <- fit_candidate_model(cand_one, ctx)
+ok(fitMeasures(fit_one, "df") == fitMeasures(fit_base, "df") + 1,
+   "losing one exogenous predictor keeps the covariances among the remaining exogenous variables free (df +1)")
+
 # --- score / improper handling
 ok(is.infinite(candidate_score(list(converged = TRUE, proper = FALSE, aic = 1, bic = 1), "AIC")), "improper -> Inf")
 ok(is.infinite(candidate_score(list(converged = FALSE, aic = 1, bic = 1), "AIC")), "non-converged -> Inf")
