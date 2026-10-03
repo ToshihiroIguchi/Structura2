@@ -6,11 +6,11 @@ if (!requireNamespace("shinylive", quietly = TRUE)) {
   install.packages("shinylive", repos = c("https://posit-dev.r-universe.dev", "https://cloud.r-project.org"))
 }
 
-# Pre-download @hpcc-js/wasm assets for offline use before export
+# Pre-download the @hpcc-js/wasm Graphviz bundle (wasm is embedded in the UMD file, so no separate
+# .wasm file is needed). It is hosted at site/hpcc-js/ rather than inside app.json.
 assets_dir <- "www/hpcc-js"
 dir.create(assets_dir, showWarnings = FALSE, recursive = TRUE)
 js_path <- file.path(assets_dir, "graphviz.umd.js")
-wasm_path <- file.path(assets_dir, "graphvizlib.wasm")
 
 if (!file.exists(js_path)) {
   cat("Downloading graphviz.umd.js for production build...\n")
@@ -20,15 +20,6 @@ if (!file.exists(js_path)) {
     cat(sprintf("WARNING: Failed to download graphviz.umd.js: %s\n", e$message))
   })
 }
-if (!file.exists(wasm_path)) {
-  cat("Downloading graphvizlib.wasm for production build...\n")
-  tryCatch({
-    download.file("https://cdn.jsdelivr.net/npm/@hpcc-js/wasm/dist/graphvizlib.wasm", wasm_path, mode = "wb")
-  }, error = function(e) {
-    cat(sprintf("WARNING: Failed to download graphvizlib.wasm: %s\n", e$message))
-  })
-}
-
 dest_dir <- "site"
 # Use a temporary directory outside the project root to bypass .gitignore rules
 # which prevent renv::dependencies from scanning files inside gitignored directories.
@@ -60,6 +51,9 @@ for (f in files_to_copy) {
 # Copy www assets (recursively, including directories like hpcc-js)
 www_files <- list.files("www", full.names = TRUE)
 for (wf in www_files) {
+  # hpcc-js is hosted directly under site/hpcc-js/ (see below) to keep app.json small and to
+  # avoid serving it through the slow R/webR HTTP emulation.
+  if (basename(wf) == "hpcc-js") next
   if (dir.exists(wf)) {
     dest_subdir <- file.path(src_dir, "www", basename(wf))
     dir.create(dest_subdir, showWarnings = FALSE, recursive = TRUE)
@@ -70,8 +64,77 @@ for (wf in www_files) {
   cat(sprintf("Copied www asset: %s\n", basename(wf)))
 }
 
+# Build-time dependency hint: makes ShinyLive bundle regsem (and its dependencies) without
+# app.R referencing it, so the browser does not mount it at startup. This file is removed from
+# app.json right after export (see below) and the packages are fetched on first use instead.
+deferred_hint_file <- "_build_deps_hint.R"
+writeLines(c("# Build-only dependency hint (stripped from app.json after export)",
+             "library(regsem)"), file.path(src_dir, deferred_hint_file))
+
 cat("Prepared clean app source directory. Exporting via ShinyLive...\n")
 shinylive::export(appdir = src_dir, destdir = dest_dir)
+
+# ---- Defer optional packages -------------------------------------
+# ShinyLive mounts every bundled package at startup, one by one. Packages not needed by the
+# initial UI (regsem and its dependency closure) are removed from metadata.rds and listed in
+# packages/deferred.txt; their .tgz files stay in the site and app.R loads them on demand.
+tryCatch({
+  # 1. Strip the build-only hint from app.json (it must not be scanned by the browser)
+  app_json <- file.path(dest_dir, "app.json")
+  bundle <- jsonlite::read_json(app_json, simplifyVector = FALSE)
+  bundle <- Filter(function(f) !identical(f$name, deferred_hint_file), bundle)
+  jsonlite::write_json(bundle, app_json, auto_unbox = TRUE, null = "null", digits = NA)
+
+  # 2. Split metadata.rds into eager and deferred packages
+  webr_dir <- file.path(dest_dir, "shinylive", "webr")
+  meta_path <- file.path(webr_dir, "packages", "metadata.rds")
+  meta <- readRDS(meta_path)
+  pkg_names <- vapply(meta, function(x) as.character(x$name), character(1))
+  names(meta) <- pkg_names
+
+  direct_deps <- function(entry) {
+    tmp <- tempfile()
+    dir.create(tmp)
+    on.exit(unlink(tmp, recursive = TRUE))
+    desc_in_tgz <- paste0(entry$name, "/DESCRIPTION")
+    utils::untar(file.path(webr_dir, entry$path), files = desc_in_tgz, exdir = tmp)
+    dcf <- read.dcf(file.path(tmp, desc_in_tgz), fields = c("Depends", "Imports", "LinkingTo"))
+    deps <- trimws(strsplit(paste(stats::na.omit(as.character(dcf)), collapse = ","), ",")[[1]])
+    deps <- sub("\\s*\\(.*$", "", deps)
+    intersect(deps[nzchar(deps)], pkg_names)
+  }
+
+  eager_roots <- intersect(c("shinyjs", "DT", "rhandsontable", "markdown", "lavaan"), pkg_names)
+  eager <- eager_roots
+  repeat {
+    new_deps <- setdiff(unique(unlist(lapply(meta[eager], direct_deps))), eager)
+    if (length(new_deps) == 0) break
+    eager <- c(eager, new_deps)
+  }
+  deferred <- setdiff(pkg_names, eager)
+
+  if (!("regsem" %in% deferred)) {
+    stop("regsem is not in the deferred set; leaving metadata.rds untouched")
+  }
+  saveRDS(unname(meta[eager]), meta_path)
+  writeLines(vapply(meta[deferred], function(x) as.character(x$path), character(1)),
+             file.path(webr_dir, "packages", "deferred.txt"))
+  cat(sprintf("Deferred %d packages (loaded on demand): %s\n", length(deferred),
+              paste(deferred, collapse = ", ")))
+}, error = function(e) {
+  cat(sprintf("WARNING: package deferral skipped (%s). The site still works but starts slower.\n", e$message))
+})
+
+# Host the Graphviz bundle as a plain static file next to index.html
+dir.create(file.path(dest_dir, "hpcc-js"), showWarnings = FALSE, recursive = TRUE)
+if (file.exists(js_path)) {
+  file.copy(js_path, file.path(dest_dir, "hpcc-js", "graphviz.umd.js"), overwrite = TRUE)
+  cat("Copied graphviz.umd.js to site/hpcc-js/
+")
+} else {
+  cat("WARNING: graphviz.umd.js not found; path diagrams will not render in the static site
+")
+}
 
 # Copy favicon.ico to the root of site directory
 if (file.exists("www/favicon.ico")) {
@@ -87,8 +150,15 @@ if (file.exists(index_html)) {
   # Update title (using case-insensitive regex for title tag to be robust)
   html_content <- gsub("<title>.*?</title>", "<title>Structura2</title>", html_content, ignore.case = TRUE)
   
+  # Host-page loading overlay (real startup milestones): sources live in host/
+  read_host_file <- function(f) paste(readLines(file.path("host", f), warn = FALSE), collapse = "\n")
+  splash_css  <- read_host_file("splash.css")
+  splash_html <- read_host_file("splash.html")
+  splash_js   <- read_host_file("splash.js")
+
   # Inject favicon.ico, SW cache buster, and custom CSS overrides before </head>
-  custom_css <- paste0(
+  # (fixed = TRUE: the injected text contains backslashes and must be inserted verbatim)
+  head_inject <- paste0(
     '    <link rel="icon" type="image/x-icon" href="./favicon.ico" />\n',
     '    <script>\n',
     '      if ("serviceWorker" in navigator) {\n',
@@ -108,140 +178,20 @@ if (file.exists(index_html)) {
     '        width: 100%; height: 100%;\n',
     '        background-color: #0f172a !important;\n',
     '      }\n',
-    '      #structura-splash-overlay {\n',
-    '        position: fixed; inset: 0; z-index: 999999;\n',
-    '        display: flex; flex-direction: column; justify-content: center; align-items: center;\n',
-    '        background: radial-gradient(circle at 50% 35%, #1e293b 0%, #0f172a 100%);\n',
-    '        color: #f8fafc; pointer-events: auto;\n',
-    '      }\n',
-    '      .structura-splash-card {\n',
-    '        position: relative; width: 90%; max-width: 440px;\n',
-    '        background: rgba(30, 41, 59, 0.75);\n',
-    '        border: 1px solid rgba(255, 255, 255, 0.12);\n',
-    '        border-radius: 16px; padding: 36px 32px;\n',
-    '        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5), 0 0 40px rgba(59, 130, 246, 0.12);\n',
-    '        backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);\n',
-    '        text-align: center;\n',
-    '      }\n',
-    '      .structura-splash-close {\n',
-    '        position: absolute; top: 12px; right: 16px;\n',
-    '        background: transparent; border: none; color: #94a3b8;\n',
-    '        font-size: 18px; cursor: pointer; padding: 4px 8px;\n',
-    '        border-radius: 6px; transition: color 0.2s;\n',
-    '      }\n',
-    '      .structura-splash-close:hover { color: #f8fafc; background: rgba(255, 255, 255, 0.08); }\n',
-    '      .structura-title {\n',
-    '        margin: 0 0 6px 0; font-size: 26px; font-weight: 600; letter-spacing: 1px;\n',
-    '        background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 100%);\n',
-    '        -webkit-background-clip: text; -webkit-text-fill-color: transparent;\n',
-    '      }\n',
-    '      .structura-subtitle {\n',
-    '        margin: 0 0 26px 0; font-size: 13px; color: #94a3b8; font-weight: 400;\n',
-    '      }\n',
-    '      .structura-progress-track {\n',
-    '        position: relative; width: 100%; height: 6px;\n',
-    '        background: rgba(255, 255, 255, 0.08); border-radius: 9999px;\n',
-    '        overflow: hidden; margin-bottom: 16px;\n',
-    '      }\n',
-    '      .structura-progress-indeterminate {\n',
-    '        position: absolute; top: 0; height: 100%;\n',
-    '        background: linear-gradient(90deg, #3b82f6 0%, #60a5fa 50%, #3b82f6 100%);\n',
-    '        border-radius: 9999px;\n',
-    '        box-shadow: 0 0 12px rgba(59, 130, 246, 0.6);\n',
-    '        animation: structura-shimmer 2.2s infinite ease-in-out;\n',
-    '      }\n',
-    '      @keyframes structura-shimmer {\n',
-    '        0% { left: -35%; width: 35%; }\n',
-    '        50% { left: 40%; width: 45%; }\n',
-    '        100% { left: 100%; width: 35%; }\n',
-    '      }\n',
-    '      .structura-status-row {\n',
-    '        display: flex; justify-content: space-between; align-items: center;\n',
-    '        font-size: 12px; color: #94a3b8;\n',
-    '      }\n',
+    splash_css, '\n',
     '    </style>\n',
     '  </head>'
   )
-  html_content <- gsub("</head>", custom_css, html_content, ignore.case = TRUE)
-  
-  # Inject Indeterminate Progress Overlay inside <body>
+  html_content <- sub("</head>", head_inject, html_content, fixed = TRUE)
+
+  # Inject the progress overlay right after <body> so its script runs before shinylive.js
+  # creates the WebR worker (module scripts are deferred until parsing is complete).
   splash_overlay <- paste0(
-    '  <body>\n',
-    '    <div id="structura-splash-overlay">\n',
-    '      <div class="structura-splash-card">\n',
-    '        <button class="structura-splash-close" title="Dismiss overlay" onclick="window.__hideStructuraOverlay()">&#215;</button>\n',
-    '        <h1 class="structura-title">Structura2</h1>\n',
-    '        <p class="structura-subtitle">Structural Equation Modeling Engine</p>\n',
-    '        <div class="structura-progress-track">\n',
-    '          <div class="structura-progress-indeterminate"></div>\n',
-    '        </div>\n',
-    '        <div class="structura-status-row">\n',
-    '          <span id="structura-splash-status">Starting WebR environment...</span>\n',
-    '        </div>\n',
-    '      </div>\n',
-    '    </div>\n',
-    '    <script>\n',
-    '      (function() {\n',
-    '        let dismissed = false;\n',
-    '        function hideOverlay() {\n',
-    '          if (dismissed) return;\n',
-    '          dismissed = true;\n',
-    '          const overlay = document.getElementById("structura-splash-overlay");\n',
-    '          if (overlay) {\n',
-    '            overlay.style.transition = "opacity 0.6s ease-out";\n',
-    '            overlay.style.opacity = "0";\n',
-    '            setTimeout(function() { overlay.remove(); }, 650);\n',
-    '          }\n',
-    '        }\n',
-    '        window.__hideStructuraOverlay = hideOverlay;\n',
-    '        \n',
-    '        // Phase status text rotator\n',
-    '        const startTime = Date.now();\n',
-    '        const statusElem = document.getElementById("structura-splash-status");\n',
-    '        const statusTimer = setInterval(function() {\n',
-    '          if (dismissed || !statusElem) return;\n',
-    '          const elapsed = (Date.now() - startTime) / 1000;\n',
-    '          if (elapsed > 8) {\n',
-    '            statusElem.innerText = "Preparing Structura2 UI...";\n',
-    '          } else if (elapsed > 3.5) {\n',
-    '            statusElem.innerText = "Loading SEM engine & libraries...";\n',
-    '          }\n',
-    '        }, 500);\n',
-    '        \n',
-    '        // 1. Listen for postMessage from Shiny server\n',
-    '        window.addEventListener("message", function(e) {\n',
-    '          if (e.data && (e.data.type === "structura-ready" || e.data === "structura-ready")) {\n',
-    '            clearInterval(statusTimer);\n',
-    '            if (statusElem) statusElem.innerText = "Ready!";\n',
-    '            setTimeout(hideOverlay, 200);\n',
-    '          }\n',
-    '        });\n',
-    '        \n',
-    '        // 2. DOM fallback check for modal/app container inside iframe\n',
-    '        const domCheck = setInterval(function() {\n',
-    '          if (dismissed) { clearInterval(domCheck); return; }\n',
-    '          const iframe = document.querySelector("iframe");\n',
-    '          if (iframe && iframe.contentDocument) {\n',
-    '            if (iframe.contentDocument.querySelector("#sample_ds, #structura-main-app, .modal-dialog")) {\n',
-    '              clearInterval(domCheck);\n',
-    '              clearInterval(statusTimer);\n',
-    '              if (statusElem) statusElem.innerText = "Ready!";\n',
-    '              setTimeout(hideOverlay, 200);\n',
-    '            }\n',
-    '          }\n',
-    '        }, 200);\n',
-    '        \n',
-    '        // 3. Fallback safety timeout (35s)\n',
-    '        setTimeout(function() {\n',
-    '          clearInterval(statusTimer);\n',
-    '          clearInterval(domCheck);\n',
-    '          hideOverlay();\n',
-    '        }, 35000);\n',
-    '      })();\n',
-    '    </script>'
+    '  <body>\n', splash_html, '\n',
+    '    <script>\n', splash_js, '\n    </script>'
   )
-  html_content <- gsub("<body>", splash_overlay, html_content, fixed = TRUE)
-  
+  html_content <- sub("<body>", splash_overlay, html_content, fixed = TRUE)
+
   writeLines(html_content, index_html)
   cat("Updated index.html with Structura2 dark theme loader and favicon\n")
 }

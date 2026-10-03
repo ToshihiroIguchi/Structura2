@@ -1,0 +1,28 @@
+    <div id="structura-splash-overlay" role="status" aria-live="polite">
+      <div class="structura-splash-card">
+        <button class="structura-splash-close" title="Dismiss overlay" aria-label="Dismiss overlay" onclick="window.__hideStructuraOverlay()">&#215;</button>
+        <h1 class="structura-title">Structura2</h1>
+        <p class="structura-subtitle">Structural Equation Modeling Engine</p>
+        <div class="structura-progress-track">
+          <div id="structura-progress-fill" class="structura-progress-fill"></div>
+        </div>
+        <div class="structura-status-row">
+          <span id="structura-splash-status">Starting...</span>
+          <span id="structura-splash-meta">0% &middot; 0 s</span>
+        </div>
+        <ul id="structura-stage-list" class="structura-stage-list"></ul>
+        <div id="structura-splash-slow" class="structura-splash-note" hidden>
+          <div>Taking longer than usual. The first visit downloads about 50 MB; later visits are faster.</div>
+          <div class="structura-splash-actions">
+            <button type="button" id="structura-slow-wait">Keep waiting</button>
+            <button type="button" id="structura-slow-reload">Reload</button>
+          </div>
+        </div>
+        <div id="structura-splash-error" class="structura-splash-note structura-splash-error" hidden>
+          <div>Structura2 failed to start: <span id="structura-error-text"></span></div>
+          <div class="structura-splash-actions">
+            <button type="button" id="structura-error-reload">Reload</button>
+          </div>
+        </div>
+      </div>
+    </div>

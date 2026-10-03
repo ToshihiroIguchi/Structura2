@@ -6,9 +6,53 @@
 
 options(
   shiny.fullstacktrace = TRUE,
-  shiny.reactlog       = TRUE,
+  shiny.reactlog       = FALSE,
   shiny.sanitize.errors = TRUE
 )
+
+# ---- Startup Progress Reporting ----------------------------------
+# Sends real startup milestones to the outer ShinyLive page (loading overlay in index.html)
+# through a BroadcastChannel. Silent no-op outside WebR or on any failure.
+report_startup_stage <- function(stage) {
+  tryCatch({
+    if (!grepl("emscripten", R.version$platform, fixed = TRUE)) return(invisible(FALSE))
+    eval_js <- get("eval_js", envir = asNamespace("webr"))
+    eval_js(sprintf(
+      "new BroadcastChannel('structura-progress').postMessage({type:'stage',stage:'%s'}); 0",
+      stage))
+    invisible(TRUE)
+  }, error = function(e) invisible(FALSE))
+}
+report_startup_stage("app_start")
+
+# ---- Deferred regsem Loader --------------------------------------
+# In the ShinyLive build, regsem and its dependencies (future, Rsolnp, ...) are not mounted at
+# startup (see export_shinylive.R); they are fetched on first use. No-op when regsem is already
+# installed (local R) or already loaded. Returns TRUE when regsem is available.
+# The package name is built dynamically on purpose: ShinyLive scans app.R for literal package
+# names and would otherwise install regsem and its dependencies at startup.
+regsem_pkg <- paste0("reg", "sem")
+# Availability is checked with system.file(): requireNamespace() would trigger WebR's automatic
+# download from repo.r-wasm.org instead of using the copies hosted next to the site.
+ensure_regsem_loaded <- function() {
+  if (nzchar(system.file(package = regsem_pkg))) return(requireNamespace(regsem_pkg, quietly = TRUE))
+  if (!grepl("emscripten", R.version$platform, fixed = TRUE)) return(FALSE)
+  tryCatch({
+    list_file <- tempfile(fileext = ".txt")
+    utils::download.file("packages/deferred.txt", list_file, quiet = TRUE)
+    tgz_paths <- readLines(list_file, warn = FALSE)
+    tgz_paths <- tgz_paths[nzchar(tgz_paths)]
+    lib <- "/shinylive/webr/packages"
+    for (tgz_path in tgz_paths) {
+      tmp <- tempfile(fileext = ".tgz")
+      utils::download.file(tgz_path, tmp, quiet = TRUE, mode = "wb")
+      utils::untar(tmp, exdir = lib, tar = "internal", extras = "--no-same-permissions")
+      unlink(tmp)
+    }
+    if (!(lib %in% .libPaths())) .libPaths(c(.libPaths(), lib))
+    requireNamespace(regsem_pkg, quietly = TRUE)
+  }, error = function(e) FALSE)
+}
 
 # ---- WebR / Parallel Compatibility Patch -------------------------
 # Patch parallel::detectCores BEFORE loading any library to intercept lavaan's startup checks.
@@ -30,22 +74,14 @@ library(shinyjs)
 library(DT)
 library(rhandsontable)
 library(markdown)
+report_startup_stage("libs_attached")
 
-# Parser bypass block to guarantee dependency packaging during Shinylive build
-# while deferring execution to the dynamic lazy-loader at runtime.
+# Parser bypass block to guarantee dependency packaging during Shinylive build.
+# regsem is intentionally NOT listed here: ShinyLive would mount it at startup. It is bundled
+# via a build-only hint file instead (see export_shinylive.R) and loaded on demand.
 if (FALSE) {
   library(lavaan)
-  library(regsem)
 }
-
-# Offline assets warning (assets should be prepared at build time)
-tryCatch({
-  js_path <- "www/hpcc-js/graphviz.umd.js"
-  wasm_path <- "www/hpcc-js/graphvizlib.wasm"
-  if (!file.exists(js_path) || !file.exists(wasm_path)) {
-    warning("Graphviz assets are missing in www/hpcc-js/. They should be prepared at build time.")
-  }
-}, error = function(e) NULL)
 
 # Patch the lavaan option cache to prevent NA bounds crashes during estimation checks
 tryCatch({
@@ -453,7 +489,7 @@ get_suggested_structural_paths <- function(fit, struct_df, mi_threshold = 3.84) 
 ui <- fluidPage(
   useShinyjs(),
   tags$head(
-    tags$link(rel = "icon", type = "image/png", href = "logo.png"),
+    tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
     tags$style(HTML("
 #app-logo { position: absolute; top: 8px; right: 16px; }
 .modal-header { background: #f8f9fa; }
@@ -503,6 +539,15 @@ ui <- fluidPage(
   width: 0%;
   transition: width 0.3s ease;
 }
+.structura-preload-bar-indeterminate {
+  position: relative;
+  width: 35% !important;
+  animation: structura-preload-slide 1.6s infinite ease-in-out;
+}
+@keyframes structura-preload-slide {
+  0% { margin-left: 0%; } 50% { margin-left: 65%; } 100% { margin-left: 0%; }
+}
+.structura-embedded #structura-preload-container { display: none !important; }
 
 /* Print Report Styling */
 #structura-print-report {
@@ -604,7 +649,14 @@ ui <- fluidPage(
   }
 }
 ")),
-    tags$script(src = if (file.exists("www/hpcc-js/graphviz.umd.js")) "hpcc-js/graphviz.umd.js" else "https://cdn.jsdelivr.net/npm/@hpcc-js/wasm/dist/graphviz.umd.js"),
+    # Graphviz bundle (wasm embedded). Local runApp serves it from www/; in the ShinyLive static
+    # site it is hosted next to index.html (site/hpcc-js/) so it bypasses the slow R/webR HTTP
+    # emulation. Loaded with `defer` so it never blocks the first render.
+    tags$script(
+      defer = NA,
+      src = if (file.exists("www/hpcc-js/graphviz.umd.js")) "hpcc-js/graphviz.umd.js"
+            else "../hpcc-js/graphviz.umd.js"
+    ),
     tags$script(HTML("
       // Progress bar logic (JavaScript-driven to avoid R blocking issues)
       (function() {
@@ -618,7 +670,7 @@ ui <- fluidPage(
           var status = document.getElementById('structura-preload-status');
           
           if (success) {
-            if (bar) bar.style.width = '100%';
+            if (bar) { bar.classList.remove('structura-preload-bar-indeterminate'); bar.style.width = '100%'; }
             if (status) status.innerText = 'Ready!';
             setTimeout(function() {
               var container = document.getElementById('structura-preload-container');
@@ -631,6 +683,7 @@ ui <- fluidPage(
             }, 300);
           } else {
             if (bar) {
+              bar.classList.remove('structura-preload-bar-indeterminate');
               bar.style.backgroundColor = '#ef4444';
               bar.style.width = '100%';
             }
@@ -641,7 +694,11 @@ ui <- fluidPage(
           }
         };
 
-        // Poll for DOM elements before starting the progress bar updates
+        // Local runApp only: the real progress overlay lives in the ShinyLive host page, so this
+        // inner overlay just shows an indeterminate bar (no fabricated percentage).
+        if (window.parent !== window) {
+          document.documentElement.classList.add('structura-embedded');
+        }
         var startTimer = function() {
           var bar = document.getElementById('structura-preload-bar');
           var status = document.getElementById('structura-preload-status');
@@ -649,31 +706,12 @@ ui <- fluidPage(
             setTimeout(startTimer, 100);
             return;
           }
-
-          interval = setInterval(function() {
-            if (width >= 90) {
-              clearInterval(interval);
-              return;
-            }
-            var step = (90 - width) * 0.08;
-            if (step < 0.2) step = 0.2;
-            width += step;
-            bar.style.width = width + '%';
-            
-            if (width < 30) {
-              status.innerText = 'Connecting to analysis environment...';
-            } else if (width < 65) {
-              status.innerText = 'Initializing R runtime and utilities...';
-            } else {
-              status.innerText = 'Loading structural equation engine (lavaan)...';
-            }
-          }, 150);
+          bar.classList.add('structura-preload-bar-indeterminate');
+          status.innerText = 'Loading structural equation engine (lavaan)...';
         };
 
         startTimer();
       })();
-
-      window.__hpcc_wasmFolder = 'hpcc-js';
 
       // Standalone client-side diagram export helpers
       window.downloadSemDiagramSvg = function() {
@@ -1234,19 +1272,22 @@ ui <- fluidPage(
   ) # end div (structura-main-app)
   ) # end hidden
 ) # end fluidPage
+report_startup_stage("ui_built")
 
 # ================================================================
 # SERVER
 # ================================================================
 
 server <- function(input, output, session) {
+  report_startup_stage("session_start")
 
-  # Dynamic Lazy Loader sequence triggered on Shiny session connection
+  # Session-start sequence triggered on Shiny session connection
   observeEvent(TRUE, {
     tryCatch({
-      # Load lavaan (only package we defer now, direct call to bypass WebR VFS bugs)
+      # Attach lavaan explicitly (direct call to bypass WebR VFS bugs)
       library(lavaan)
-      
+      report_startup_stage("lavaan_loaded")
+
       # Complete the progress bar and transition out successfully
       runjs("if (window.parent) { window.parent.postMessage({ type: 'structura-ready' }, '*'); }")
       runjs("if (window.finishStructuraPreload) { window.finishStructuraPreload(true); } else { $('#structura-preload-container').hide(); }")
@@ -1273,9 +1314,27 @@ server <- function(input, output, session) {
       err_msg <- gsub("'", "\\'", e$message, fixed = TRUE)
       err_msg <- gsub("\n", " ", err_msg, fixed = TRUE)
       runjs(sprintf("if (window.finishStructuraPreload) { window.finishStructuraPreload(false, '%s'); }", err_msg))
-      warning("Structura2 lazy loading failed: ", e$message)
+      runjs(sprintf("if (window.parent) { window.parent.postMessage({ type: 'structura-error', message: '%s' }, '*'); }", err_msg))
+      warning("Structura2 startup failed: ", e$message)
     })
   }, once = TRUE)
+
+  # Prefetch the deferred regsem packages as soon as the strategy is selected, so the
+  # (synchronous) download happens while a notification is visible rather than mid-optimization.
+  observeEvent(input$prune_strategy, {
+    req(identical(input$prune_strategy, "regsem"))
+    if (nzchar(system.file(package = regsem_pkg))) return()
+    nid <- showNotification("Loading regularized SEM engine (regsem)...", duration = NULL,
+                            closeButton = FALSE, session = session)
+    session$onFlushed(function() {
+      ok <- ensure_regsem_loaded()
+      removeNotification(nid, session = session)
+      if (!ok) {
+        showNotification("Could not load regsem. Check your network connection and reload the page.",
+                         type = "error", duration = 10, session = session)
+      }
+    }, once = TRUE)
+  }, ignoreInit = TRUE)
 
   data <- reactiveVal(NULL)
 
@@ -3327,12 +3386,18 @@ server <- function(input, output, session) {
         pen_type <- st$regsem_type %||% "lasso"
         n_lambda <- st$regsem_n_lambda %||% 30
 
+        # Resolve regsem functions dynamically so ShinyLive does not detect it as a startup dependency
+        regsem_loaded <- ensure_regsem_loaded()
+        if (!regsem_loaded) {
+          showNotification("Regularized SEM engine (regsem) could not be loaded; showing an approximate lasso path instead.",
+                           type = "warning", duration = 8)
+        }
         reg_obj <- tryCatch({
-          regsem::cv_regsem(st$base_fit, type = pen_type, pars_pen = "regressions",
-                            n.lambda = n_lambda, jump = 0.04)
+          getExportedValue(regsem_pkg, "cv_regsem")(st$base_fit, type = pen_type, pars_pen = "regressions",
+                                                  n.lambda = n_lambda, jump = 0.04)
         }, error = function(e) {
           tryCatch({
-            regsem::regsem(st$base_fit, type = pen_type, pars_pen = "regressions", lambda = 0.05)
+            getExportedValue(regsem_pkg, "regsem")(st$base_fit, type = pen_type, pars_pen = "regressions", lambda = 0.05)
           }, error = function(e2) NULL)
         })
 

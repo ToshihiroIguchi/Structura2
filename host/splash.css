@@ -1,0 +1,74 @@
+#structura-splash-overlay {
+  position: fixed; inset: 0; z-index: 999999;
+  display: flex; flex-direction: column; justify-content: center; align-items: center;
+  background: radial-gradient(circle at 50% 35%, #1e293b 0%, #0f172a 100%);
+  color: #f8fafc; pointer-events: auto;
+}
+.structura-splash-card {
+  position: relative; width: 90%; max-width: 440px;
+  background: rgba(30, 41, 59, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px; padding: 36px 32px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5), 0 0 40px rgba(59, 130, 246, 0.12);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  text-align: center;
+}
+.structura-splash-close {
+  position: absolute; top: 12px; right: 16px;
+  background: transparent; border: none; color: #94a3b8;
+  font-size: 18px; cursor: pointer; padding: 4px 8px;
+  border-radius: 6px; transition: color 0.2s;
+}
+.structura-splash-close:hover { color: #f8fafc; background: rgba(255, 255, 255, 0.08); }
+.structura-title {
+  margin: 0 0 6px 0; font-size: 26px; font-weight: 600; letter-spacing: 1px;
+  background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.structura-subtitle {
+  margin: 0 0 26px 0; font-size: 13px; color: #94a3b8; font-weight: 400;
+}
+.structura-progress-track {
+  position: relative; width: 100%; height: 6px;
+  background: rgba(255, 255, 255, 0.08); border-radius: 9999px;
+  overflow: hidden; margin-bottom: 12px;
+}
+.structura-progress-fill {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, #3b82f6 0%, #60a5fa 100%);
+  border-radius: 9999px;
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.6);
+  transition: width 0.4s ease-out;
+}
+.structura-progress-fill.structura-failed {
+  background: #ef4444; box-shadow: 0 0 12px rgba(239, 68, 68, 0.6);
+}
+.structura-status-row {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 12px; color: #94a3b8; gap: 12px;
+}
+.structura-stage-list {
+  list-style: none; margin: 18px 0 0 0; padding: 0; text-align: left;
+  font-size: 12px; color: #64748b;
+}
+.structura-stage-list li { padding: 3px 0; display: flex; align-items: center; gap: 8px; }
+.structura-stage-list li .structura-stage-mark { width: 14px; text-align: center; }
+.structura-stage-list li.structura-stage-done { color: #94a3b8; }
+.structura-stage-list li.structura-stage-done .structura-stage-mark { color: #34d399; }
+.structura-stage-list li.structura-stage-active { color: #f8fafc; }
+.structura-stage-list li.structura-stage-active .structura-stage-mark { color: #60a5fa; }
+.structura-splash-note {
+  margin-top: 18px; padding: 10px 12px; border-radius: 8px;
+  background: rgba(251, 191, 36, 0.1); border: 1px solid rgba(251, 191, 36, 0.3);
+  font-size: 12px; color: #fde68a; text-align: left;
+}
+.structura-splash-note[hidden] { display: none; }
+.structura-splash-note.structura-splash-error {
+  background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.4); color: #fecaca;
+}
+.structura-splash-actions { margin-top: 8px; display: flex; gap: 8px; }
+.structura-splash-actions button {
+  background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #f8fafc; border-radius: 6px; padding: 4px 12px; font-size: 12px; cursor: pointer;
+}
+.structura-splash-actions button:hover { background: rgba(255, 255, 255, 0.16); }

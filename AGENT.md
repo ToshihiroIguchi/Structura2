@@ -26,8 +26,10 @@ Structura2/
 ├── app.R              # Main Shiny application (UI + Server with inlined semDiagram)
 ├── help.md            # User-facing help documentation
 ├── export_shinylive.R # Script to export the app as a static ShinyLive site
+├── host/              # Loading overlay for the static site (splash.css/html/js), injected into index.html by export_shinylive.R
 ├── www/
-│   ├── logo.png       # Application logo
+│   ├── logo.png       # Application logo (small; shown at 40 px)
+│   ├── hpcc-js/       # graphviz.umd.js (wasm embedded); hosted at site/hpcc-js/ in the static site, not in app.json
 │   └── style.css      # Custom CSS overrides
 ├── test_webr/         # Minimal test app for WebR compatibility verification
 ├── AGENT.md           # This file: agent guidelines (all AI models)
@@ -83,6 +85,12 @@ shiny::runApp(".")
 source("export_shinylive.R")
 ```
 This generates a `site/` directory with static HTML/JS/WASM assets.
+
+Startup-time design of the static site (keep these in mind when changing `app.R` or the export script):
+
+- **Progress overlay**: `host/splash.*` is injected into `site/index.html`. It shows real milestones: the WebR worker is hooked in the host page, and `app.R` reports stages (`report_startup_stage()`) through a `BroadcastChannel` named `structura-progress`; `structura-ready` / `structura-error` arrive via `postMessage`. Add new milestones in both `host/splash.js` (`MILESTONES`) and `app.R`.
+- **Small `app.json`**: `graphviz.umd.js` is copied to `site/hpcc-js/` instead of being bundled (bundled files are served through the slow R/webR HTTP emulation). Keep `www/` assets small.
+- **Deferred packages**: regsem and its dependencies are removed from `metadata.rds` after export and listed in `packages/deferred.txt`; `ensure_regsem_loaded()` fetches them on first use. ShinyLive scans `app.R` for literal package names (`library()`, `pkg::`, `requireNamespace("pkg")`, ...) and installs them at startup, so regsem must only be referenced through `regsem_pkg` (a dynamically built name). A build-only hint file (`_build_deps_hint.R`) makes the export bundle regsem and is stripped from `app.json`.
 
 ### Serving the Static Site Locally
 ```bash
