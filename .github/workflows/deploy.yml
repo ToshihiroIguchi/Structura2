@@ -34,8 +34,18 @@ jobs:
       - name: Install ShinyLive R Package
         uses: r-lib/actions/setup-r-dependencies@v2
         with:
+          # The app packages must be installed on the runner so that shinylive::export() bundles
+          # them into the site (served from GitHub Pages) instead of leaving the browser to
+          # download each one from repo.r-wasm.org at startup.
           packages: |
             any::shinylive
+            any::shiny
+            any::shinyjs
+            any::DT
+            any::rhandsontable
+            any::markdown
+            any::lavaan
+            any::regsem
 
       - name: Export ShinyLive site
         run: Rscript export_shinylive.R
