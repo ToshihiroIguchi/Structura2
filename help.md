@@ -154,7 +154,8 @@ The Structural Model defines linear regressions ($\sim$ operator) among dependen
 
 ### 4.3 Suggested Paths via Modification Indices
 Structura2 incorporates automated **Modification Index (MI)** detection to recommend exploratory paths for model refinement:
-* **Threshold**: Identifies unselected structural paths where the expected univariate $\chi^2$ drop exceeds **$3.84$** ($\alpha = 0.05$ critical threshold for $1$ degree of freedom).
+* **Thresholds**: Identifies unselected structural paths where the expected univariate $\chi^2$ drop exceeds the **MI threshold** (default **$6.63$**, $p < .01$ for $1$ degree of freedom) *and* the absolute standardized expected parameter change reaches the **|std.EPC| threshold** (default $0.1$). Both are adjustable in the UI.
+* **Ranking and Cycles**: The strongest suggestion (rank #1) gets a thicker border; paths that would close a feedback loop with existing paths are drawn in orange. A collapsible **Modification Indices** table also lists residual covariances (`~~`) and cross-loadings (`=~`), which can be appended to Manual Equations.
 * **Blue Border Highlighting**: When enabled via the **Highlight suggested paths** checkbox, potential paths display a prominent blue border.
 * **Informative Tooltip**: Hovering your cursor over a highlighted cell displays:
   - **MI**: Expected decrease in model $\chi^2$ test statistic if this path were freely estimated.
@@ -202,13 +203,13 @@ Structura2 provides a robust suite of optimization strategies spanning exact com
 * **Adaptive Auto-Switch** *(Recommended for General Use)*:
   Calculates the total combinatorial search space $2^M$, where $M$ is the number of unlocked structural paths. If $2^M \le 1024$ (configurable threshold), it executes an **Exhaustive Search** guaranteeing global optimality. If $2^M > 1024$, it automatically switches to a **Stepwise Search** for instant convergence without browser freezing.
 * **Regularized SEM (Lasso / Elastic Net - Modern Industry Standard)**:
-  Penalized maximum likelihood estimation (`regsem::cv_regsem`) applying $L_1$ (Lasso), $L_2$ (Ridge), or Elastic Net regularization to structural regression coefficients across a grid of shrinkage parameters ($\lambda$). The modern gold standard for continuous shrinkage and sparse model selection in SEM.
+  Penalized maximum likelihood estimation (`regsem::cv_regsem`) applying $L_1$ (Lasso) or Elastic Net regularization to structural regression coefficients across a grid of shrinkage parameters ($\lambda$). The modern gold standard for continuous shrinkage and sparse model selection in SEM.
 * **Stepwise Search (Fast & Deterministic)**:
   Greedy backward elimination removing the single path at each iteration that yields the largest improvement in the chosen criterion (AIC or BIC), halting when no further reduction is possible.
 * **Exhaustive Search (100% Exact All-Subset)**:
   Evaluates every possible permutation ($2^M$) of present/absent paths. Recommended when $M \le 10$.
 * **Simulated Annealing (SA - Fast Trajectory Search)**:
-  Stochastic meta-heuristic capable of escaping local minima by probabilistically accepting temporary score degradations at higher temperatures ($T$). Hyperparameters (Iterations, Initial Temp, Cooling Rate) can be fine-tuned under *Advanced Algorithm Hyper-Parameters*.
+  Stochastic meta-heuristic capable of escaping local minima by probabilistically accepting temporary score degradations at higher temperatures ($T$). Hyperparameters (Iterations, Initial Temp, Random Seed) can be fine-tuned under *Advanced Algorithm Hyper-Parameters*; the cooling rate is derived from the iteration count and the seed makes runs reproducible.
 
 ### 5.2 Variable Isolation Prevention & Path Locking
 * **Variable Isolation Prevention**:
