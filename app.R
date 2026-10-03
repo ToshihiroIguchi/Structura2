@@ -232,8 +232,11 @@ semDiagram <- function(
   label_parts <- c(annot_block, if (show_fit) fit_block else NULL, if (show_collinearity) coll_block else NULL)
   top_label <- sprintf("<%s>", paste(label_parts, collapse = "<BR/>"))
 
-  latents   <- unique(params$lhs[params$op == "=~"])
-  observeds <- setdiff(unique(c(params$lhs, params$rhs)), c(latents, "1", ""))
+  # Only structural rows define nodes; defined parameters (:=), constraints and thresholds must not
+  # appear as boxes in the diagram.
+  node_params <- params[params$op %in% c("=~", "~", "~~", "~1"), , drop = FALSE]
+  latents   <- unique(node_params$lhs[node_params$op == "=~"])
+  observeds <- setdiff(unique(c(node_params$lhs, node_params$rhs)), c(latents, "1", ""))
   nodes <- list()
   for (lv in latents) nodes[[lv]] <- list(
     shape = "ellipse", label = lv, style = "filled", fillcolor = "#F0F0F0",
@@ -247,8 +250,9 @@ semDiagram <- function(
     if (p$op %in% c("=~","~","~~") && p$lhs != p$rhs) {
       value <- if (standardized) p$std.all else p$est
       if (is.na(value)) value <- p$est
+      if (is.na(value)) value <- 0
 
-      pen <- (abs(value) / max_abs) * (max_width - min_width) + min_width
+      pen <-(abs(value) / max_abs) * (max_width - min_width) + min_width
       if (!is.finite(pen)) pen <- min_width
 
       alpha_edge <- if (is.na(p$pvalue)) low_alpha else if (p$pvalue < alpha) 1 else low_alpha
@@ -319,7 +323,7 @@ semDiagram <- function(
 lavaan_to_equations <- function(fit, digits = 3, cached_pe = NULL) {
 
   # ---- Extract coefficients (non-standardized) ------------------------------
-  pe <- if (!is.null(cached_pe)) cached_pe else lavaan::parameterEstimates(fit, standardized = FALSE, remove.def = TRUE)
+  pe <- if (!is.null(cached_pe)) cached_pe else lavaan::parameterEstimates(fit, standardized = FALSE, remove.def = FALSE)
 
   # ---- Number formatter --------------------------------------
   format_est <- function(x, digits = 3) {
@@ -426,6 +430,23 @@ check_variable_isolation <- function(s_df, retain_deps, retain_preds, pred_cols)
 struct_pred_cols <- function(struct_df) {
   if (is.null(struct_df) || ncol(struct_df) < 3) return(character(0))
   names(struct_df)[3:ncol(struct_df)]
+}
+
+# Measurement-table rows -> "Latent =~ ind1 + ind2" lines. Latent names are normalized with the same
+# make.names() rule the Model tab applies, so they match the names used in the structural matrix.
+# Returns character(0) when the table has no indicator columns.
+build_meas_lines <- function(meas) {
+  if (is.null(meas) || ncol(meas) < 4 || nrow(meas) == 0) return(character(0))
+  vars <- names(meas)[4:ncol(meas)]
+  lines <- lapply(seq_len(nrow(meas)), function(i) {
+    lt <- trimws(as.character(meas$Latent[i]))
+    if (!nzchar(lt)) return(NULL)
+    lt <- make.names(lt)
+    inds <- vars[vapply(meas[i, vars], function(x) isTRUE(as.logical(x)), logical(1))]
+    if (!length(inds)) return(NULL)
+    paste0(lt, " =~ ", paste(inds, collapse = " + "))
+  })
+  as.character(unlist(lines))
 }
 
 build_struct_lines <- function(struct_df) {
@@ -1588,6 +1609,9 @@ server <- function(input, output, session) {
         stop("The loaded dataset has no data rows.")
       }
       names(df) <- make.names(names(df), unique = TRUE)
+      if (!any(vapply(df, is.numeric, logical(1)))) {
+        stop("The loaded dataset has no numeric columns. Check the delimiter and that the file is a CSV with numeric variables.")
+      }
       data(df)
       updateRadioButtons(session, "sample_ds", selected = "None")
       removeModal()
@@ -1947,9 +1971,12 @@ server <- function(input, output, session) {
     df <- processed_data(); req(df)
     deps <- as.character(input$display_columns %||% names(df))
     meas <- input_table_data(); req(meas)
-    vars <- names(meas)[4:ncol(meas)]
-    row_has_indicator <- apply(meas[vars], 1, function(x) any(as.logical(x), na.rm = TRUE))
-    convs <- setdiff(na.omit(unique(meas$Indicator[row_has_indicator])), "")
+    vars <- setdiff(names(meas), c("Latent", "Indicator", "Operator"))
+    convs <- character(0)
+    if (length(vars)) {
+      row_has_indicator <- apply(meas[vars], 1, function(x) any(as.logical(x), na.rm = TRUE))
+      convs <- setdiff(na.omit(unique(meas$Indicator[row_has_indicator])), "")
+    }
     unique(c(deps, convs))
   })
 
@@ -2227,13 +2254,7 @@ server <- function(input, output, session) {
   lavaan_model_str <- reactive({
     req(input$input_table, struct_table_data())
     meas <- hot_to_r(input$input_table)
-    mlines <- lapply(seq_len(nrow(meas)), function(i) {
-      lt   <- meas$Latent[i]; if (!nzchar(lt)) return(NULL)
-      vars <- names(meas)[4:ncol(meas)]
-      inds <- vars[vapply(meas[i, vars], function(x) isTRUE(as.logical(x)), logical(1))]
-      if (!length(inds)) return(NULL)
-      paste0(lt, " =~ ", paste(inds, collapse = " + "))
-    })
+    mlines <- build_meas_lines(meas)
     struc <- struct_table_data(); req(struc)
     slines <- build_struct_lines(struc)
     # ----- add manual equations (new) -----------------------------
@@ -2286,7 +2307,7 @@ server <- function(input, output, session) {
       eqs <- NULL
       if (converged) {
         pe_std <- tryCatch(parameterEstimates(fm, standardized = TRUE), error = function(e) NULL)
-        pe_raw <- tryCatch(parameterEstimates(fm, standardized = FALSE, remove.def = TRUE), error = function(e) NULL)
+        pe_raw <- tryCatch(parameterEstimates(fm, standardized = FALSE, remove.def = FALSE), error = function(e) NULL)
         fit_meas <- tryCatch(
           fitMeasures(fm, c("nobs", "chisq", "df", "pvalue", "srmr", "rmsea", "gfi", "agfi", "nfi", "cfi", "aic", "bic")),
           error = function(e) NULL
@@ -2354,7 +2375,7 @@ server <- function(input, output, session) {
     }
     vals <- round(as.numeric(ms[c("pvalue","srmr","rmsea","aic","bic","gfi","agfi","nfi","cfi")]), 3)
     names(vals) <- c("pvalue","srmr","rmsea","aic","bic","gfi","agfi","nfi","cfi")
-    thr <- c(pvalue = .05, srmr = .08, rmsea = .06,
+    thr <- c(pvalue = .05, srmr = .08, rmsea = .08,
              gfi = .90, agfi = .90, nfi = .90, cfi = .90)
     fmt <- function(idx, v) {
       ok <- switch(idx,
@@ -2486,11 +2507,11 @@ server <- function(input, output, session) {
     if (!model$ok) {
       session$sendCustomMessage("update_sem_plot", list(
         error = TRUE,
-        message = model$msg_friendly
+        message = htmltools::htmlEscape(model$msg_friendly)
       ))
       return()
     }
-    
+
     # If model is empty
     ln <- lavaan_model_str()
     if (length(ln) == 0) {
@@ -2502,13 +2523,22 @@ server <- function(input, output, session) {
     }
     
     # Generate DOT code
-    dot_code <- semDiagram(model$fit,
-                           standardized        = std_for_plot,
-                           layout              = rank,
-                           engine              = eng,
-                           cached_params       = if (std_for_plot) model$pe_std else model$pe_raw,
-                           cached_fit_measures = model$fit_measures)
-    
+    dot_code <- tryCatch(
+      semDiagram(model$fit,
+                 standardized        = std_for_plot,
+                 layout              = rank,
+                 engine              = eng,
+                 cached_params       = if (std_for_plot) model$pe_std else model$pe_raw,
+                 cached_fit_measures = model$fit_measures),
+      error = function(e) e)
+    if (inherits(dot_code, "error")) {
+      session$sendCustomMessage("update_sem_plot", list(
+        error = TRUE,
+        message = htmltools::htmlEscape(paste("Could not draw the path diagram:", conditionMessage(dot_code)))
+      ))
+      return()
+    }
+
     # Send DOT code to client JS
     session$sendCustomMessage("update_sem_plot", list(
       error = FALSE,
@@ -2772,7 +2802,7 @@ server <- function(input, output, session) {
         param_table_html     = param_html,
         defined_effects_html = defined_effects_html,
         opt_history_html     = opt_history_html,
-        syntax_text          = paste(model_res$syntax, collapse = "\n")
+        syntax_text          = htmltools::htmlEscape(paste(model_res$syntax, collapse = "\n"))
       )
 
       session$sendCustomMessage("prepare_and_print_pdf_report", payload)
@@ -3313,13 +3343,7 @@ server <- function(input, output, session) {
     base_score <- if (criterion == "AIC") as.numeric(base_ms["aic"]) else as.numeric(base_ms["bic"])
 
     meas_syntax <- hot_to_r(input$input_table)
-    mlines <- unlist(lapply(seq_len(nrow(meas_syntax)), function(i) {
-      lt   <- meas_syntax$Latent[i]; if (!nzchar(lt)) return(NULL)
-      vars <- names(meas_syntax)[4:ncol(meas_syntax)]
-      inds <- vars[vapply(meas_syntax[i, vars], function(x) isTRUE(as.logical(x)), logical(1))]
-      if (!length(inds)) return(NULL)
-      paste0(lt, " =~ ", paste(inds, collapse = " + "))
-    }))
+    mlines <- build_meas_lines(meas_syntax)
 
     extra <- strsplit(input$extra_eq, "\\n")[[1]]
     extra <- trimws(extra); extra <- extra[nzchar(extra)]
@@ -3815,7 +3839,7 @@ server <- function(input, output, session) {
     
     datatable(
       tbl,
-      selection = list(mode = "single", selected = selected_prune_idx()),
+      selection = list(mode = "single", selected = isolate(selected_prune_idx())),
       rownames = FALSE,
       options = list(pageLength = 6, dom = 'tp', scrollX = TRUE)
     )
@@ -3909,11 +3933,20 @@ server <- function(input, output, session) {
     eng   <- parts[1]
     rank  <- ifelse(length(parts) == 2, parts[2], "LR")
     
-    dot_code <- semDiagram(cand$fit,
-                           standardized = std_for_plot,
-                           layout       = rank,
-                           engine       = eng)
-    
+    dot_code <- tryCatch(
+      semDiagram(cand$fit,
+                 standardized = std_for_plot,
+                 layout       = rank,
+                 engine       = eng),
+      error = function(e) e)
+    if (inherits(dot_code, "error")) {
+      session$sendCustomMessage("update_prune_preview_plot", list(
+        error = TRUE,
+        message = htmltools::htmlEscape(paste("Could not draw the path diagram:", conditionMessage(dot_code)))
+      ))
+      return()
+    }
+
     session$sendCustomMessage("update_prune_preview_plot", list(
       error = FALSE,
       dot = dot_code,
