@@ -742,7 +742,8 @@ ui <- fluidPage(
           var svgElem = plotContainer ? plotContainer.querySelector('svg') : null;
           var svgHtml = svgElem ? svgElem.outerHTML : '<p style=\"color:#666; font-style:italic;\">No diagram available</p>';
 
-          reportDiv.innerHTML = '<div class=\"print-header\">' +
+          var sectionIdx = 1;
+          var html = '<div class=\"print-header\">' +
             '<div>' +
               '<h1>Structura2 Analysis Report</h1>' +
               '<div class=\"meta\" style=\"margin-top: 3px;\">Structural Insights, Simplified</div>' +
@@ -753,24 +754,56 @@ ui <- fluidPage(
             '</div>' +
           '</div>' +
           '<div class=\"print-avoid-break\">' +
-            '<div class=\"print-section-title\">1. Model Fit Summary</div>' +
+            '<div class=\"print-section-title\">' + (sectionIdx++) + '. Model Fit Summary & Diagnostics</div>' +
             msg.fit_table_html +
-          '</div>' +
-          '<div class=\"print-avoid-break\">' +
-            '<div class=\"print-section-title\">2. Path Diagram</div>' +
+          '</div>';
+
+          if (msg.opt_history_html && msg.opt_history_html.trim() !== '') {
+            html += '<div class=\"print-avoid-break\">' +
+              '<div class=\"print-section-title\">Model Optimization History</div>' +
+              msg.opt_history_html +
+            '</div>';
+          }
+
+          if (msg.var_stats_html && msg.var_stats_html.trim() !== '') {
+            html += '<div class=\"print-avoid-break\">' +
+              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Variable Summary Statistics</div>' +
+              msg.var_stats_html +
+            '</div>';
+          }
+
+          if (msg.latent_rel_html && msg.latent_rel_html.trim() !== '') {
+            html += '<div class=\"print-avoid-break\">' +
+              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Latent Variable Reliability & Validity</div>' +
+              msg.latent_rel_html +
+            '</div>';
+          }
+
+          html += '<div class=\"print-avoid-break\">' +
+            '<div class=\"print-section-title\">' + (sectionIdx++) + '. Path Diagram</div>' +
             '<div class=\"print-diagram-box\">' +
               svgHtml +
             '</div>' +
           '</div>' +
           '<div class=\"print-page-break\"></div>' +
           '<div class=\"print-avoid-break\">' +
-            '<div class=\"print-section-title\">3. Parameter Estimates</div>' +
+            '<div class=\"print-section-title\">' + (sectionIdx++) + '. Parameter Estimates</div>' +
             msg.param_table_html +
-          '</div>' +
-          '<div class=\"print-avoid-break\" style=\"margin-top: 16px;\">' +
-            '<div class=\"print-section-title\">4. Model Syntax (lavaan)</div>' +
+          '</div>';
+
+          if (msg.defined_effects_html && msg.defined_effects_html.trim() !== '') {
+            html += '<div class=\"print-avoid-break\" style=\"margin-top: 14px;\">' +
+              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Defined & Indirect Effects</div>' +
+              msg.defined_effects_html +
+            '</div>';
+          }
+
+          html += '<div class=\"print-avoid-break\" style=\"margin-top: 14px;\">' +
+            '<div class=\"print-section-title\">' + (sectionIdx++) + '. Model Syntax (lavaan)</div>' +
             '<pre class=\"print-syntax-box\">' + msg.syntax_text + '</pre>' +
           '</div>';
+
+          reportDiv.innerHTML = html;
 
           setTimeout(function() {
             window.print();
@@ -2108,7 +2141,26 @@ server <- function(input, output, session) {
       fit <- model_res$fit
       ms <- lavaan::fitMeasures(fit, c("nobs", "chisq", "df", "pvalue", "cfi", "tli", "rmsea", "srmr", "aic", "bic"))
       
-      # Build Fit HTML Table
+      # Multicollinearity calculation
+      condition_number <- NA
+      max_cond_index <- NA
+      tryCatch({
+        samp_cov <- lavaan::lavInspect(fit, "sampstat")$cov
+        if (!is.null(samp_cov) && nrow(samp_cov) > 0) {
+          samp_cor <- stats::cov2cor(samp_cov)
+          eig_vals <- eigen(samp_cor, symmetric = TRUE, only.values = TRUE)$values
+          if (length(eig_vals) > 0 && min(eig_vals) > 1e-12) {
+            condition_number <- max(eig_vals) / min(eig_vals)
+            max_cond_indices <- sqrt(max(eig_vals) / eig_vals)
+            max_cond_index <- max(max_cond_indices)
+          }
+        }
+      }, error = function(e) NULL)
+
+      cond_num_str <- if (!is.na(condition_number)) sprintf("%.1f", condition_number) else "-"
+      max_cond_str <- if (!is.na(max_cond_index)) sprintf("%.1f", max_cond_index) else "-"
+
+      # Build Fit & Diagnostics HTML Table
       n_obs_val <- if (!is.na(ms["nobs"])) as.integer(ms["nobs"]) else 0L
       chisq_val <- if (!is.na(ms["chisq"])) ms["chisq"] else 0
       df_val    <- if (!is.na(ms["df"])) as.integer(ms["df"]) else 0L
@@ -2122,20 +2174,118 @@ server <- function(input, output, session) {
 
       fit_html <- paste0(
         "<table class='print-table'>",
-        "<thead><tr><th>N</th><th>Chi-square</th><th>df</th><th>p-value</th><th>CFI</th><th>TLI</th><th>RMSEA</th><th>SRMR</th><th>AIC</th><th>BIC</th></tr></thead>",
+        "<thead><tr><th>N</th><th>Chi-square</th><th>df</th><th>p-value</th><th>CFI</th><th>TLI</th><th>RMSEA</th><th>SRMR</th><th>AIC</th><th>BIC</th><th>Cond. No.</th><th>Max Cond. Index</th></tr></thead>",
         "<tbody><tr>",
-        sprintf("<td>%d</td><td>%.2f</td><td>%d</td><td>%.3f</td><td>%.3f</td><td>%.3f</td><td>%.3f</td><td>%.3f</td><td>%.1f</td><td>%.1f</td>",
-                n_obs_val, chisq_val, df_val, pval_val, cfi_val, tli_val, rmsea_val, srmr_val, aic_val, bic_val),
+        sprintf("<td>%d</td><td>%.2f</td><td>%d</td><td>%.3f</td><td>%.3f</td><td>%.3f</td><td>%.3f</td><td>%.3f</td><td>%.1f</td><td>%.1f</td><td>%s</td><td>%s</td>",
+                n_obs_val, chisq_val, df_val, pval_val, cfi_val, tli_val, rmsea_val, srmr_val, aic_val, bic_val, cond_num_str, max_cond_str),
         "</tr></tbody></table>"
       )
+
+      # Build Variable Summary Statistics Table
+      var_stats_html <- tryCatch({
+        df_proc <- processed_data()
+        ov_vars <- lavaan::lavNames(fit, "ov")
+        ov_vars <- intersect(ov_vars, names(df_proc))
+        if (length(ov_vars) > 0) {
+          rows <- vapply(ov_vars, function(v) {
+            x <- df_proc[[v]]
+            x_valid <- x[!is.na(x) & is.numeric(x)]
+            n_total <- length(x)
+            n_valid <- length(x_valid)
+            n_miss <- n_total - n_valid
+            pct_miss <- if (n_total > 0) (n_miss / n_total) * 100 else 0
+            
+            if (n_valid > 1) {
+              m_val <- mean(x_valid)
+              sd_val <- sd(x_valid)
+              z <- (x_valid - m_val) / ifelse(sd_val > 0, sd_val, 1)
+              skew_val <- mean(z^3)
+              kurt_val <- mean(z^4) - 3
+              sprintf("<tr><td><b>%s</b></td><td style='text-align:right;'>%d</td><td style='text-align:right;'>%d (%.1f%%)</td><td style='text-align:right;'>%.3f</td><td style='text-align:right;'>%.3f</td><td style='text-align:right;'>%.3f</td><td style='text-align:right;'>%.3f</td></tr>",
+                      htmltools::htmlEscape(v), n_valid, n_miss, pct_miss, m_val, sd_val, skew_val, kurt_val)
+            } else {
+              sprintf("<tr><td><b>%s</b></td><td style='text-align:right;'>%d</td><td style='text-align:right;'>%d (%.1f%%)</td><td style='text-align:right;'>-</td><td style='text-align:right;'>-</td><td style='text-align:right;'>-</td><td style='text-align:right;'>-</td></tr>",
+                      htmltools::htmlEscape(v), n_valid, n_miss, pct_miss)
+            }
+          }, character(1))
+          
+          paste0(
+            "<table class='print-table'>",
+            "<thead><tr><th>Variable</th><th style='text-align:right;'>Valid N</th><th style='text-align:right;'>Missing N (%)</th><th style='text-align:right;'>Mean</th><th style='text-align:right;'>Std.Dev</th><th style='text-align:right;'>Skewness</th><th style='text-align:right;'>Kurtosis</th></tr></thead>",
+            "<tbody>", paste(rows, collapse = ""), "</tbody></table>"
+          )
+        } else ""
+      }, error = function(e) "")
+
+      # Build Latent Variable Reliability & Validity Table
+      latent_rel_html <- tryCatch({
+        lv_vars <- lavaan::lavNames(fit, "lv")
+        if (length(lv_vars) > 0) {
+          pe_std <- tryCatch(lavaan::parameterEstimates(fit, standardized = TRUE), error = function(e) NULL)
+          df_proc <- processed_data()
+          
+          if (!is.null(pe_std)) {
+            lv_rows <- vapply(lv_vars, function(lv) {
+              meas_sub <- pe_std[pe_std$lhs == lv & pe_std$op == "=~", ]
+              indicators <- meas_sub$rhs
+              k <- length(indicators)
+              
+              loadings <- meas_sub$std.all
+              loadings <- loadings[!is.na(loadings)]
+              
+              alpha_str <- "-"
+              if (length(indicators) >= 2 && all(indicators %in% names(df_proc))) {
+                ind_df <- na.omit(df_proc[, indicators, drop = FALSE])
+                if (nrow(ind_df) > 2) {
+                  cov_mat <- cov(ind_df)
+                  var_sum <- sum(diag(cov_mat))
+                  total_var <- sum(cov_mat)
+                  if (total_var > 0 && var_sum > 0) {
+                    alpha_val <- (k / (k - 1)) * (1 - (var_sum / total_var))
+                    alpha_str <- sprintf("%.3f", alpha_val)
+                  }
+                }
+              }
+              
+              cr_str <- "-"
+              ave_str <- "-"
+              if (length(loadings) > 0) {
+                sum_lambda <- sum(loadings)
+                sum_lambda_sq <- sum(loadings^2)
+                sum_theta <- sum(1 - loadings^2)
+                
+                if ((sum_lambda^2 + sum_theta) > 0) {
+                  cr_val <- (sum_lambda^2) / (sum_lambda^2 + sum_theta)
+                  cr_str <- sprintf("%.3f", cr_val)
+                }
+                if ((sum_lambda_sq + sum_theta) > 0) {
+                  ave_val <- sum_lambda_sq / (sum_lambda_sq + sum_theta)
+                  ave_str <- sprintf("%.3f", ave_val)
+                }
+              }
+              
+              ind_list_str <- paste(indicators, collapse = ", ")
+              sprintf("<tr><td><b>%s</b></td><td>%s</td><td style='text-align:right;'>%d</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td></tr>",
+                      htmltools::htmlEscape(lv), htmltools::htmlEscape(ind_list_str), k, alpha_str, cr_str, ave_str)
+            }, character(1))
+            
+            paste0(
+              "<table class='print-table'>",
+              "<thead><tr><th>Latent Construct</th><th>Indicators</th><th style='text-align:right;'>Count</th><th style='text-align:right;'>Cronbach's &alpha;</th><th style='text-align:right;'>CR (Composite Reliability)</th><th style='text-align:right;'>AVE (Average Variance Extracted)</th></tr></thead>",
+              "<tbody>", paste(lv_rows, collapse = ""), "</tbody></table>"
+            )
+          } else ""
+        } else ""
+      }, error = function(e) "")
 
       # Build Parameter Estimates Table
       pe <- tryCatch({
         lavaan::parameterEstimates(fit, standardized = TRUE)
       }, error = function(e) lavaan::parameterEstimates(fit))
       
-      param_rows <- vapply(seq_len(nrow(pe)), function(i) {
-        r <- pe[i, ]
+      main_pe <- pe[pe$op != ":=", ]
+      param_rows <- vapply(seq_len(nrow(main_pe)), function(i) {
+        r <- main_pe[i, ]
         p_val_str <- if (is.na(r$pvalue)) "-" else if (r$pvalue < 0.001) "< .001" else sprintf("%.3f", r$pvalue)
         std_val_str <- if ("std.all" %in% names(r) && !is.na(r$std.all)) sprintf("%.3f", r$std.all) else "-"
         se_str <- if (is.na(r$se)) "-" else sprintf("%.3f", r$se)
@@ -2153,13 +2303,79 @@ server <- function(input, output, session) {
         "<tbody>", paste(param_rows, collapse = ""), "</tbody></table>"
       )
 
+      # Build Defined & Indirect Effects Table
+      defined_effects_html <- tryCatch({
+        def_sub <- pe[pe$op == ":=", ]
+        if (!is.null(def_sub) && nrow(def_sub) > 0) {
+          def_rows <- vapply(seq_len(nrow(def_sub)), function(i) {
+            r <- def_sub[i, ]
+            p_val_str <- if (is.na(r$pvalue)) "-" else if (r$pvalue < 0.001) "< .001" else sprintf("%.3f", r$pvalue)
+            std_val_str <- if ("std.all" %in% names(r) && !is.na(r$std.all)) sprintf("%.3f", r$std.all) else "-"
+            se_str <- if (is.na(r$se)) "-" else sprintf("%.3f", r$se)
+            z_str <- if (is.na(r$z)) "-" else sprintf("%.3f", r$z)
+            sprintf("<tr><td><b>%s</b></td><td style='text-align:right;'>%.3f</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td></tr>",
+                    htmltools::htmlEscape(as.character(r$lhs)),
+                    r$est, se_str, z_str, p_val_str, std_val_str)
+          }, character(1))
+          
+          paste0(
+            "<table class='print-table'>",
+            "<thead><tr><th>Defined Parameter / Indirect Effect</th><th style='text-align:right;'>Estimate</th><th style='text-align:right;'>Std.Err</th><th style='text-align:right;'>z-value</th><th style='text-align:right;'>p-value</th><th style='text-align:right;'>Std.all</th></tr></thead>",
+            "<tbody>", paste(def_rows, collapse = ""), "</tbody></table>"
+          )
+        } else ""
+      }, error = function(e) "")
+
+      # Build Auto-Optimization History Details
+      opt_history_html <- tryCatch({
+        res <- prune_results()
+        if (!is.null(res) && !is.null(res$candidates) && length(res$candidates) > 0) {
+          strat <- res$strategy_used %||% "Unknown"
+          crit  <- res$criterion %||% "AIC"
+          baseline_cand <- NULL
+          optimal_cand  <- res$candidates[[1]]
+          for (cand in res$candidates) {
+            if (isTRUE(cand$status == "[Baseline]")) {
+              baseline_cand <- cand; break
+            }
+          }
+          
+          base_score <- if (!is.null(baseline_cand)) {
+            if (crit == "AIC") sprintf("%.2f", baseline_cand$aic) else sprintf("%.2f", baseline_cand$bic)
+          } else "-"
+          
+          opt_score <- if (!is.null(optimal_cand)) {
+            if (crit == "AIC") sprintf("%.2f", optimal_cand$aic) else sprintf("%.2f", optimal_cand$bic)
+          } else "-"
+          
+          pruned_paths_count <- if (!is.null(optimal_cand) && !is.null(optimal_cand$removed_paths)) {
+            length(optimal_cand$removed_paths)
+          } else 0
+          
+          sprintf(
+            "<div style='background-color:#f8fafc; border:1px solid #e2e8f0; border-radius:4px; padding:8px 12px; font-size:11px; margin-bottom:12px;'>" +
+            "<div><b>Optimization Strategy:</b> %s | <b>Criterion:</b> %s</div>" +
+            "<div><b>Baseline %s Score:</b> %s &rarr; <b>Optimal %s Score:</b> %s</div>" +
+            "<div><b>Paths Pruned:</b> %d path(s)</div>" +
+            "</div>",
+            htmltools::htmlEscape(strat), htmltools::htmlEscape(crit),
+            htmltools::htmlEscape(crit), base_score, htmltools::htmlEscape(crit), opt_score,
+            pruned_paths_count
+          )
+        } else ""
+      }, error = function(e) "")
+
       payload <- list(
-        timestamp        = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
-        analysis_mode    = if (input$analysis_mode == "std") "Standardized" else "Raw",
-        missing_method   = input$missing_method,
-        fit_table_html   = fit_html,
-        param_table_html = param_html,
-        syntax_text      = paste(model_res$syntax, collapse = "\n")
+        timestamp            = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+        analysis_mode        = if (input$analysis_mode == "std") "Standardized" else "Raw",
+        missing_method       = input$missing_method,
+        fit_table_html       = fit_html,
+        var_stats_html       = var_stats_html,
+        latent_rel_html      = latent_rel_html,
+        param_table_html     = param_html,
+        defined_effects_html = defined_effects_html,
+        opt_history_html     = opt_history_html,
+        syntax_text          = paste(model_res$syntax, collapse = "\n")
       )
 
       session$sendCustomMessage("prepare_and_print_pdf_report", payload)
