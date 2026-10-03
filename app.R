@@ -420,65 +420,275 @@ check_variable_isolation <- function(s_df, retain_deps, retain_preds, pred_cols)
   TRUE
 }
 
-# ---- Helper: Suggested Structural Paths based on Modification Indices ------------
-get_suggested_structural_paths <- function(fit, struct_df, mi_threshold = 3.84) {
-  if (is.null(fit) || !isTRUE(lavaan::lavInspect(fit, "converged"))) {
-    return(NULL)
-  }
-  
-  mi_res <- tryCatch({
-    lavaan::modificationindices(fit, standardized = TRUE, sort = TRUE, minimum.value = mi_threshold)
-  }, error = function(e) {
-    NULL
+# ---------- Helper: Structural Table <-> lavaan Syntax / Keys ----------
+# Single source of truth for turning the structural checkbox matrix into lavaan lines and
+# canonical candidate keys (previously duplicated in several server observers).
+struct_pred_cols <- function(struct_df) {
+  if (is.null(struct_df) || ncol(struct_df) < 3) return(character(0))
+  names(struct_df)[3:ncol(struct_df)]
+}
+
+build_struct_lines <- function(struct_df) {
+  pred_cols <- struct_pred_cols(struct_df)
+  if (!length(pred_cols)) return(character(0))
+  lines <- lapply(seq_len(nrow(struct_df)), function(i) {
+    dp <- struct_df$Dependent[i]
+    if (!nzchar(dp)) return(NULL)
+    ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
+    if (!length(ps)) return(NULL)
+    paste0(dp, " ~ ", paste(ps, collapse = " + "))
   })
-  
-  if (is.null(mi_res) || nrow(mi_res) == 0) {
-    return(NULL)
+  unlist(lines)
+}
+
+make_struct_key <- function(struct_df) {
+  pred_cols <- struct_pred_cols(struct_df)
+  lines <- c()
+  for (i in seq_len(nrow(struct_df))) {
+    dp <- struct_df$Dependent[i]
+    ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
+    if (length(ps)) lines <- c(lines, paste0(dp, "~", paste(sort(ps), collapse = ",")))
   }
-  
-  # Filter only regression / structural paths (op == "~")
+  res <- paste(sort(lines), collapse = ";")
+  if (!nzchar(res)) "EMPTY_PATH" else res
+}
+
+# Variables that take part in at least one active structural path (as dependent or predictor).
+active_struct_vars <- function(struct_df) {
+  pred_cols <- struct_pred_cols(struct_df)
+  if (!length(pred_cols)) return(character(0))
+  vars <- character(0)
+  for (i in seq_len(nrow(struct_df))) {
+    ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
+    if (length(ps)) vars <- c(vars, struct_df$Dependent[i], ps)
+  }
+  unique(vars)
+}
+
+# Dependent variables that have at least one active incoming path.
+struct_dependents <- function(struct_df) {
+  pred_cols <- struct_pred_cols(struct_df)
+  if (!length(pred_cols) || is.null(struct_df) || nrow(struct_df) == 0) return(character(0))
+  has_path <- vapply(seq_len(nrow(struct_df)), function(i) {
+    any(vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1)))
+  }, logical(1))
+  unique(struct_df$Dependent[has_path])
+}
+
+# Active structural paths as a data.frame(dep, pred).
+struct_edges <- function(struct_df) {
+  pred_cols <- struct_pred_cols(struct_df)
+  out <- list()
+  if (length(pred_cols)) {
+    for (i in seq_len(nrow(struct_df))) {
+      ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
+      if (length(ps) && nzchar(struct_df$Dependent[i])) out[[length(out) + 1]] <- data.frame(dep = struct_df$Dependent[i], pred = ps, stringsAsFactors = FALSE)
+    }
+  }
+  if (length(out)) do.call(rbind, out) else data.frame(dep = character(0), pred = character(0), stringsAsFactors = FALSE)
+}
+
+# Builds the extra lavaan lines that make every candidate a faithful "paths removed" version of the
+# baseline (and keep AIC/BIC comparable):
+#  * Same variable set: a variable that loses all of its paths is pinned with an explicit variance so
+#    lavaan does not silently drop it (otherwise the likelihood is computed on different variables).
+#  * Removing a path must remove the association. A variable that was DEPENDENT in the baseline but has
+#    lost all incoming paths becomes exogenous, and with fixed.x = FALSE lavaan would then free its
+#    covariances with the other exogenous variables, silently re-introducing the very association that was
+#    "removed" (m ~ x1 turns into m ~~ x1 with the same likelihood). Those covariances are fixed to 0.
+#  * The same holds for two variables that both stay dependent: lavaan frees the residual covariance of
+#    dependent variables that have no direct path between them, so dropping the baseline path y ~ m would
+#    otherwise just turn it into m ~~ y (same likelihood). That residual covariance is fixed to 0 as well.
+#  * Variables that were already EXOGENOUS in the baseline keep their free covariances with each other,
+#    even when they lose every path (they are nuisance parameters of the baseline, not paths).
+build_anchor_lines <- function(struct_df, anchor_vars, baseline_dvs = character(0), baseline_edges = NULL) {
+  active <- active_struct_vars(struct_df)
+  cand_dvs <- struct_dependents(struct_df)
+  exo_active <- setdiff(active, cand_dvs)                 # appear only as predictors
+  turned <- intersect(exo_active, baseline_dvs)           # endogenous in baseline, exogenous now
+  base_exo_active <- setdiff(exo_active, turned)
+  lost <- setdiff(anchor_vars, active)
+  exo_lost <- setdiff(lost, baseline_dvs)
+
+  lines <- character(0)
+  # Baseline-dependent variables that are no longer dependent (turned exogenous, or left with no path at
+  # all) must not covary with the other exogenous variables. This also matters for latent variables,
+  # which lavaan correlates automatically even when they take part in no structural path.
+  lost_dv <- intersect(lost, baseline_dvs)
+  zero_cov <- unique(c(turned, lost_dv))
+  pool <- unique(c(exo_active, lost))
+  for (z in zero_cov) {
+    for (e in pool) {
+      if (e != z && (!(e %in% zero_cov) || z < e)) lines <- c(lines, paste0(z, " ~~ 0*", e))
+    }
+  }
+  if (length(lost)) lines <- c(lines, paste0(lost, " ~~ ", lost))
+  if (!is.null(baseline_edges) && nrow(baseline_edges) > 0) {
+    cand_edges <- struct_edges(struct_df)
+    has_cand <- function(a, b) any((cand_edges$dep == a & cand_edges$pred == b) | (cand_edges$dep == b & cand_edges$pred == a))
+    seen_pairs <- character(0)
+    for (k in seq_len(nrow(baseline_edges))) {
+      a <- baseline_edges$dep[k]; b <- baseline_edges$pred[k]
+      key <- paste(sort(c(a, b)), collapse = "|")
+      if (key %in% seen_pairs) next
+      seen_pairs <- c(seen_pairs, key)
+      if (a %in% cand_dvs && b %in% cand_dvs && !has_cand(a, b)) lines <- c(lines, paste0(a, " ~~ 0*", b))
+    }
+  }
+  free_pool <- unique(c(base_exo_active, exo_lost))
+  for (a in exo_lost) {
+    for (e in free_pool) {
+      if (e != a && (!(e %in% exo_lost) || a < e)) lines <- c(lines, paste0(a, " ~~ ", e))
+    }
+  }
+  lines
+}
+
+# TRUE when the solution is admissible (no negative variances, non-positive-definite matrices, ...).
+# If the check itself cannot be evaluated the fit is not penalised.
+fit_is_proper <- function(fit) {
+  tryCatch(isTRUE(suppressWarnings(lavaan::lavInspect(fit, "post.check"))), error = function(e) TRUE)
+}
+
+# Which conventional fit cutoffs (CFI < .90, RMSEA > .08, SRMR > .08) a set of fit measures violates.
+fit_cutoff_violations <- function(ms) {
+  get <- function(nm) if (nm %in% names(ms)) as.numeric(ms[nm]) else NA_real_
+  c(cfi   = isTRUE(get("cfi") < 0.90),
+    rmsea = isTRUE(get("rmsea") > 0.08),
+    srmr  = isTRUE(get("srmr") > 0.08))
+}
+
+# Score used for ranking/search. Non-converged or improper (e.g. negative variance) fits never win.
+candidate_score <- function(rec, criterion) {
+  if (is.null(rec) || !isTRUE(rec$converged) || isFALSE(rec$proper)) return(Inf)
+  s <- if (criterion == "AIC") rec$aic else rec$bic
+  if (is.null(s) || is.na(s)) Inf else s
+}
+
+# Fits one candidate structural model. `ctx` carries data, estimation options, measurement lines,
+# extra lines, anchor variables and an optional warm-start fit. Returns NULL when estimation fails.
+fit_candidate_model <- function(struct_df, ctx) {
+  all_syntax <- unlist(c(ctx$meas_lines, build_struct_lines(struct_df),
+                         build_anchor_lines(struct_df, ctx$anchor_vars, ctx$baseline_dvs, ctx$baseline_edges), ctx$extra_lines))
+  if (!length(all_syntax)) return(NULL)
+  syntax_str <- paste(all_syntax, collapse = "\n")
+
+  run_sem <- function(...) {
+    tryCatch(
+      lavaan::sem(syntax_str,
+                  data          = ctx$data,
+                  missing       = ctx$missing_method,
+                  fixed.x       = FALSE,
+                  parser        = "old",
+                  meanstructure = ctx$needs_meanstructure,
+                  ncpus         = 1L,
+                  ...),
+      error = function(e) NULL)
+  }
+
+  fm <- NULL
+  if (!is.null(ctx$base_fit)) fm <- run_sem(start = ctx$base_fit)
+  # Safety fallback: cold start if warm start failed or did not converge
+  if (is.null(fm) || !isTRUE(lavaan::lavInspect(fm, "converged"))) fm <- run_sem()
+  fm
+}
+
+# ---------- Helper: Reachability on the structural graph (edges: predictor -> dependent) ----------
+struct_descendants <- function(struct_df, from) {
+  seen <- character(0)
+  queue <- from
+  while (length(queue)) {
+    cur <- queue[1]; queue <- queue[-1]
+    if (!cur %in% names(struct_df)) next
+    flags <- vapply(struct_df[[cur]], function(x) isTRUE(as.logical(x)), logical(1))
+    kids <- setdiff(struct_df$Dependent[flags], seen)
+    seen <- c(seen, kids)
+    queue <- c(queue, kids)
+  }
+  seen
+}
+
+# ---- Helper: Diagnostic fit used to generate suggestions ------------
+# lavaan only evaluates modification indices for variables that already take part in the model's
+# regressions/loadings, so a variable with no structural path yet can never be suggested. This refits the
+# current syntax with each unused variable attached as an exogenous predictor through a fixed-zero
+# regression (`anchor ~ 0*v`), which leaves every estimate of the real model unchanged but makes lavaan
+# score all paths into/out of v. (The reverse direction, `v ~ 0*anchor`, does not work: lavaan then
+# reports no MI for paths from v.) `anchor_var` should be an observed endogenous variable of the model.
+# The result is for diagnostics only and is never shown as the user's model.
+fit_suggestion_model <- function(syntax_lines, unused_vars, anchor_var, ctx) {
+  if (!length(unused_vars) || is.null(anchor_var) || !nzchar(anchor_var)) return(NULL)
+  syntax_str <- paste(c(syntax_lines, paste0(unused_vars, " ~ 0*", anchor_var)), collapse = "\n")
+  fm <- tryCatch(
+    lavaan::sem(syntax_str,
+                data          = ctx$data,
+                missing       = ctx$missing_method,
+                fixed.x       = FALSE,
+                parser        = "old",
+                meanstructure = ctx$needs_meanstructure,
+                ncpus         = 1L),
+    error = function(e) NULL)
+  if (is.null(fm) || !isTRUE(lavaan::lavInspect(fm, "converged"))) NULL else fm
+}
+
+# ---- Helper: Modification-index based suggestions ------------
+# All MI rows (regressions, residual covariances, cross-loadings) passing the MI and |std.EPC| filters.
+get_modification_suggestions <- function(fit, mi_threshold = 6.63, epc_threshold = 0) {
+  if (is.null(fit) || !isTRUE(lavaan::lavInspect(fit, "converged"))) return(NULL)
+  mi_res <- tryCatch(
+    lavaan::modificationindices(fit, standardized = TRUE, sort. = TRUE, minimum.value = mi_threshold),
+    error = function(e) NULL)
+  if (is.null(mi_res) || nrow(mi_res) == 0) return(NULL)
+  mi_res <- mi_res[mi_res$op %in% c("~", "~~", "=~") & mi_res$lhs != mi_res$rhs, , drop = FALSE]
+  if (nrow(mi_res) == 0) return(NULL)
+  if (epc_threshold > 0 && "sepc.all" %in% names(mi_res)) {
+    keep <- is.na(mi_res$sepc.all) | abs(mi_res$sepc.all) >= epc_threshold
+    mi_res <- mi_res[keep, , drop = FALSE]
+  }
+  if (nrow(mi_res) == 0) return(NULL)
+  mi_res[order(-mi_res$mi), , drop = FALSE]
+}
+
+# Suggested regression paths mapped onto the structural checkbox matrix by variable NAME.
+# Each cell is NULL or list(mi, epc, std_epc, rank, cyclic). `rank` orders suggestions by MI
+# (1 = strongest); `cyclic` flags paths that would close a feedback loop with existing paths.
+get_suggested_structural_paths <- function(fit, struct_df, mi_threshold = 6.63, epc_threshold = 0) {
+  mi_res <- get_modification_suggestions(fit, mi_threshold, epc_threshold)
+  if (is.null(mi_res)) return(NULL)
   reg_mi <- mi_res[mi_res$op == "~", , drop = FALSE]
-  if (nrow(reg_mi) == 0) {
-    return(NULL)
-  }
-  
+  if (nrow(reg_mi) == 0) return(NULL)
+
   deps <- struct_df$Dependent
-  preds <- names(struct_df)[3:ncol(struct_df)]
-  
+  preds <- struct_pred_cols(struct_df)
   suggested_matrix <- replicate(nrow(struct_df), vector("list", length(preds)), simplify = FALSE)
   has_suggestions <- FALSE
-  
+  rank_counter <- 0L
+
   for (i in seq_len(nrow(reg_mi))) {
     row_dep <- as.character(reg_mi$lhs[i])
     col_pred <- as.character(reg_mi$rhs[i])
-    
-    r_idx <- which(deps == row_dep)
-    c_idx <- which(preds == col_pred)
-    
-    if (length(r_idx) > 0 && length(c_idx) > 0) {
-      r <- r_idx[1]
-      c <- c_idx[1]
-      
-      # Exclude self-loop or already active paths in struct_df
-      is_active <- isTRUE(as.logical(struct_df[r, preds[c]]))
-      if (!is_active && r != c) {
-        std_val <- if ("sepc.all" %in% names(reg_mi)) as.numeric(reg_mi$sepc.all[i]) else NULL
-        if (is.null(std_val) || is.na(std_val)) std_val <- NULL
-        
-        suggested_matrix[[r]][[c]] <- list(
-          mi = as.numeric(reg_mi$mi[i]),
-          epc = as.numeric(reg_mi$epc[i]),
-          std_epc = std_val
-        )
-        has_suggestions <- TRUE
-      }
-    }
+    r <- match(row_dep, deps)
+    c <- match(col_pred, preds)
+    if (is.na(r) || is.na(c)) next
+
+    # Exclude already active paths (self-loops are already removed by get_modification_suggestions)
+    if (isTRUE(as.logical(struct_df[r, preds[c]]))) next
+
+    std_val <- if ("sepc.all" %in% names(reg_mi)) as.numeric(reg_mi$sepc.all[i]) else NA_real_
+    if (is.na(std_val)) std_val <- NULL
+    rank_counter <- rank_counter + 1L
+
+    suggested_matrix[[r]][[c]] <- list(
+      mi = as.numeric(reg_mi$mi[i]),
+      epc = as.numeric(reg_mi$epc[i]),
+      std_epc = std_val,
+      rank = rank_counter,
+      cyclic = col_pred %in% struct_descendants(struct_df, row_dep)
+    )
+    has_suggestions <- TRUE
   }
-  
-  if (!has_suggestions) {
-    return(NULL)
-  }
-  
+
+  if (!has_suggestions) return(NULL)
   suggested_matrix
 }
 
@@ -1167,15 +1377,40 @@ ui <- fluidPage(
                       div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; flex-wrap: wrap; gap: 8px;",
                           h4("Structural Model", style = "margin: 0; font-weight: 600;"),
                           div(style = "margin-bottom: 0;",
-                              checkboxInput("show_suggested_paths", "Highlight suggested paths (MI ≥ 3.84)", value = TRUE)
+                              checkboxInput("show_suggested_paths", "Highlight suggested paths (by Modification Indices)", value = TRUE)
                           )
+                      ),
+                      conditionalPanel(
+                        condition = "input.show_suggested_paths",
+                        div(style = "display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 4px;",
+                            div(style = "width: 210px;",
+                                numericInput("mi_threshold", "MI threshold (6.63 = p < .01):", value = 6.63, min = 0, step = 0.5)),
+                            div(style = "width: 170px;",
+                                numericInput("epc_threshold", "Min |std.EPC|:", value = 0.1, min = 0, max = 1, step = 0.05))
+                        )
                       ),
                       p("Color intensity indicates R² strength (white: low, red: high). ",
                         tags$span(style = "color: #2563eb; font-weight: 600;", "Blue border"),
-                        " indicates recommended paths based on Modification Indices (MI ≥ 3.84). ",
+                        " indicates recommended paths based on Modification Indices (thick border + #1 = strongest; ",
+                        tags$span(style = "color: #d97706; font-weight: 600;", "orange border"),
+                        " = would create a feedback loop). Add ONE path at a time and re-run the model, because MI values change after every change. ",
                         "Use as exploratory reference alongside theoretical knowledge.",
                         style = "font-size: 12px; color: #666; margin-bottom: 10px;"),
+                      uiOutput("suggestion_status_ui"),
                       rHandsontableOutput("checkbox_matrix"),
+                      tags$details(
+                        style = "margin-top: 10px; border: 1px solid #ddd; padding: 8px 10px; border-radius: 4px; background-color: #fafafa;",
+                        tags$summary(style = "font-weight: 600; cursor: pointer;",
+                                     "Modification Indices (regressions, residual covariances, cross-loadings)"),
+                        div(style = "margin-top: 8px;",
+                            DTOutput("mi_table"),
+                            div(style = "margin-top: 8px;",
+                                actionButton("add_mi_to_extra", "Add selected rows to Manual Equations",
+                                             class = "btn btn-default btn-sm"),
+                                tags$span(style = "font-size: 11px; color: #666; margin-left: 8px;",
+                                          "Regressions (~) can also be toggled in the matrix above."))
+                        )
+                      ),
                       tags$hr(),
                       h4("Manual Equations"),
                       div(style = "margin-top: 10px;",
@@ -1763,6 +1998,31 @@ server <- function(input, output, session) {
   # Reactive cache for modification indices suggestions to eliminate heavy recalculation in checkbox_matrix
   cached_suggested_matrix <- reactiveVal(NULL)
 
+  # Fit that modification indices are read from: the user's fitted model, extended with any unused
+  # numeric items attached via fixed-zero regressions so those items can be suggested too.
+  # Refitted only when the model is re-run, not when the MI/EPC thresholds change.
+  suggestion_fit <- reactive({
+    if (!isTRUE(input$show_suggested_paths)) return(NULL)
+    model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
+    if (is.null(model_res) || !isTRUE(model_res$ok) || is.null(model_res$fit)) return(NULL)
+    items <- tryCatch(model_items(), error = function(e) character(0))
+    df <- tryCatch(processed_data(), error = function(e) NULL)
+    if (is.null(df)) return(model_res$fit)
+    fitted_ov <- lavaan::lavNames(model_res$fit, "ov")
+    unused <- setdiff(items, fitted_ov)
+    unused <- unused[unused %in% names(df)]
+    unused <- unused[vapply(unused, function(v) is.numeric(df[[v]]), logical(1))]
+    if (!length(unused) || !length(fitted_ov)) return(model_res$fit)
+    needs_meanstructure <- (isolate(input$analysis_mode) == "raw" ||
+                            isolate(input$missing_method) %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
+    ctx <- list(data = df, missing_method = isolate(input$missing_method),
+                needs_meanstructure = needs_meanstructure)
+    endo_ov <- lavaan::lavNames(model_res$fit, "ov.y")
+    anchor_var <- if (length(endo_ov)) endo_ov[1] else fitted_ov[1]
+    aug <- tryCatch(fit_suggestion_model(model_res$syntax, unused, anchor_var, ctx), error = function(e) NULL)
+    if (is.null(aug)) model_res$fit else aug   # fall back to the plain fit if the helper fit fails
+  })
+
   observe({
     show_sug <- isTRUE(input$show_suggested_paths)
     if (!show_sug) {
@@ -1770,14 +2030,85 @@ server <- function(input, output, session) {
       return()
     }
     model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
+    sug_fit <- tryCatch(suggestion_fit(), error = function(e) NULL)
     model_items() # establish dependency so the cache is invalidated when structural items (rows/cols) change shape
+    mi_thr  <- input$mi_threshold %||% 6.63
+    epc_thr <- input$epc_threshold %||% 0
+    if (!is.numeric(mi_thr) || is.na(mi_thr)) mi_thr <- 6.63
+    if (!is.numeric(epc_thr) || is.na(epc_thr)) epc_thr <- 0
+    # Matching is by variable name against the current table, so paths the user has just ticked
+    # (but not yet fitted) are no longer suggested; suggestion_status_ui flags the stale state.
     mat <- isolate(struct_table_data())
-    if (!is.null(model_res) && isTRUE(model_res$ok) && !is.null(model_res$fit) && !is.null(mat)) {
-      sug <- tryCatch(get_suggested_structural_paths(model_res$fit, mat, mi_threshold = 3.84), error = function(e) NULL)
+    if (!is.null(model_res) && isTRUE(model_res$ok) && !is.null(sug_fit) && !is.null(mat)) {
+      sug <- tryCatch(get_suggested_structural_paths(sug_fit, mat, mi_threshold = mi_thr, epc_threshold = epc_thr),
+                      error = function(e) NULL)
       cached_suggested_matrix(sug)
     } else {
       cached_suggested_matrix(NULL)
     }
+  })
+
+  # Tells the user when the highlighted suggestions no longer describe the displayed structure
+  output$suggestion_status_ui <- renderUI({
+    if (!isTRUE(input$show_suggested_paths)) return(NULL)
+    model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
+    current <- tryCatch(lavaan_model_str(), error = function(e) NULL)
+    if (is.null(model_res) || !isTRUE(model_res$ok) || is.null(model_res$syntax)) {
+      return(div(class = "alert alert-info", style = "font-size: 12px; padding: 6px 10px; margin-bottom: 8px;",
+                 "Suggestions appear after the model has been fitted successfully (Run / Update Model)."))
+    }
+    if (!identical(model_res$syntax, current)) {
+      return(div(class = "alert alert-warning", style = "font-size: 12px; padding: 6px 10px; margin-bottom: 8px;",
+                 "The structure has changed since the last fit. Highlighted suggestions are from the previous fit; ",
+                 "click ", tags$b("Run / Update Model"), " to refresh them."))
+    }
+    NULL
+  })
+
+  # Full MI list (regressions, residual covariances, cross-loadings) from the last successful fit
+  mi_table_data <- reactive({
+    if (!isTRUE(input$show_suggested_paths)) return(NULL)
+    sug_fit <- tryCatch(suggestion_fit(), error = function(e) NULL)
+    if (is.null(sug_fit)) return(NULL)
+    mi_thr  <- input$mi_threshold %||% 6.63
+    epc_thr <- input$epc_threshold %||% 0
+    if (!is.numeric(mi_thr) || is.na(mi_thr)) mi_thr <- 6.63
+    if (!is.numeric(epc_thr) || is.na(epc_thr)) epc_thr <- 0
+    res <- tryCatch(get_modification_suggestions(sug_fit, mi_thr, epc_thr), error = function(e) NULL)
+    if (is.null(res)) return(NULL)
+    res <- head(res, 50)
+    data.frame(
+      Syntax = paste(res$lhs, res$op, res$rhs),
+      Type = c("~" = "Regression", "~~" = "Residual covariance", "=~" = "Cross-loading")[res$op],
+      MI = round(res$mi, 2),
+      EPC = round(res$epc, 3),
+      `std.EPC` = if ("sepc.all" %in% names(res)) round(res$sepc.all, 3) else NA_real_,
+      check.names = FALSE, stringsAsFactors = FALSE, row.names = NULL
+    )
+  })
+
+  output$mi_table <- renderDT({
+    tbl <- mi_table_data()
+    validate(need(!is.null(tbl) && nrow(tbl) > 0,
+                  "No modification indices above the current thresholds (or the model has not been fitted yet)."))
+    datatable(tbl, rownames = FALSE, selection = "multiple",
+              options = list(pageLength = 5, dom = "tp", scrollX = TRUE))
+  }, server = FALSE)
+
+  observeEvent(input$add_mi_to_extra, {
+    tbl <- mi_table_data()
+    sel <- input$mi_table_rows_selected
+    if (is.null(tbl) || !length(sel)) {
+      showNotification("Select one or more rows in the Modification Indices table first.", type = "warning", duration = 4)
+      return()
+    }
+    new_lines <- tbl$Syntax[sel]
+    existing <- strsplit(input$extra_eq %||% "", "\\n")[[1]]
+    existing <- trimws(existing); existing <- existing[nzchar(existing)]
+    updateTextAreaInput(session, "extra_eq", value = paste(unique(c(existing, new_lines)), collapse = "\n"))
+    showNotification(
+      sprintf("Added %d line(s) to Manual Equations. Click Run / Update Model to refit; MI values change after each addition, so add one at a time when possible.", length(new_lines)),
+      type = "message", duration = 6)
   })
 
   output$checkbox_matrix <- renderRHandsontable({
@@ -1850,16 +2181,24 @@ server <- function(input, output, session) {
           if (suggested_matrix && row < suggested_matrix.length && col_var_idx >= 0 && col_var_idx < suggested_matrix[row].length) {
             var sug = suggested_matrix[row][col_var_idx];
             if (sug && !value) {
-              td.style.boxShadow = 'inset 0 0 0 2.5px #2563eb';
+              var is_top = (sug.rank === 1);
+              var is_cyclic = (sug.cyclic === true);
+              var sug_color = is_cyclic ? '#d97706' : '#2563eb';
+              td.style.boxShadow = 'inset 0 0 0 ' + (is_top ? '4px ' : '2.5px ') + sug_color;
               if (chk) {
-                chk.style.outline = '2px solid #2563eb';
+                chk.style.outline = '2px solid ' + sug_color;
                 chk.style.outlineOffset = '1px';
                 chk.style.borderRadius = '3px';
               }
-              var tipText = 'Suggested Path to Add:\\nMI: ' + Number(sug.mi).toFixed(2) + ' (Chi-sq drop)';
+              var tipText = 'Suggested Path to Add' + (sug.rank ? ' (#' + sug.rank + ' by MI)' : '') +
+                            ':\\nMI: ' + Number(sug.mi).toFixed(2) + ' (Chi-sq drop)';
               if (sug.std_epc !== null && sug.std_epc !== undefined && !isNaN(sug.std_epc)) {
                 tipText += '\\nstd.EPC: ' + Number(sug.std_epc).toFixed(3);
               }
+              if (is_cyclic) {
+                tipText += '\\nWARNING: would create a feedback loop (non-recursive model).';
+              }
+              tipText += '\\nAdd one path at a time, then re-run the model.';
               td.title = tipText;
             }
           }
@@ -1894,13 +2233,7 @@ server <- function(input, output, session) {
       paste0(lt, " =~ ", paste(inds, collapse = " + "))
     })
     struc <- struct_table_data(); req(struc)
-    slines <- lapply(seq_len(nrow(struc)), function(i) {
-      dp    <- struc$Dependent[i]; if (!nzchar(dp)) return(NULL)
-      preds <- names(struc)[3:ncol(struc)]
-      ps    <- preds[vapply(struc[i, preds], function(x) isTRUE(as.logical(x)), logical(1))]
-      if (!length(ps)) return(NULL)
-      paste0(dp, " ~ ", paste(ps, collapse = " + "))
-    })
+    slines <- build_struct_lines(struc)
     # ----- add manual equations (new) -----------------------------
     extra <- strsplit(input$extra_eq, "\\n")[[1]]
     extra <- trimws(extra)
@@ -2407,16 +2740,19 @@ server <- function(input, output, session) {
             if (crit == "AIC") sprintf("%.2f", optimal_cand$aic) else sprintf("%.2f", optimal_cand$bic)
           } else "-"
           
-          pruned_paths_count <- if (!is.null(optimal_cand) && !is.null(optimal_cand$removed_paths)) {
-            length(optimal_cand$removed_paths)
-          } else 0
-          
+          # removed_str lists the pruned paths as "dep ~ pred; dep ~ pred" (or the baseline label)
+          pruned_paths_count <- if (!is.null(optimal_cand) && !is.null(optimal_cand$removed_str) &&
+                                    !identical(optimal_cand$status, "[Baseline]")) {
+            length(strsplit(optimal_cand$removed_str, ";", fixed = TRUE)[[1]])
+          } else 0L
+
           sprintf(
-            "<div style='background-color:#f8fafc; border:1px solid #e2e8f0; border-radius:4px; padding:8px 12px; font-size:11px; margin-bottom:12px;'>" +
-            "<div><b>Optimization Strategy:</b> %s | <b>Criterion:</b> %s</div>" +
-            "<div><b>Baseline %s Score:</b> %s &rarr; <b>Optimal %s Score:</b> %s</div>" +
-            "<div><b>Paths Pruned:</b> %d path(s)</div>" +
-            "</div>",
+            paste0(
+              "<div style='background-color:#f8fafc; border:1px solid #e2e8f0; border-radius:4px; padding:8px 12px; font-size:11px; margin-bottom:12px;'>",
+              "<div><b>Optimization Strategy:</b> %s | <b>Criterion:</b> %s</div>",
+              "<div><b>Baseline %s Score:</b> %s &rarr; <b>Optimal %s Score:</b> %s</div>",
+              "<div><b>Paths Pruned:</b> %d path(s)</div>",
+              "</div>"),
             htmltools::htmlEscape(strat), htmltools::htmlEscape(crit),
             htmltools::htmlEscape(crit), base_score, htmltools::htmlEscape(crit), opt_score,
             pruned_paths_count
@@ -2586,6 +2922,8 @@ server <- function(input, output, session) {
             )
           )
         ),
+        p("Only paths from the structural matrix are optimized. Equations typed under Manual Equations are kept unchanged in every candidate.",
+          style = "font-size: 12px; color: #64748b; margin-bottom: 8px;"),
         p("Select structural paths to lock (protect from pruning).", style = "font-size: 13px; color: #334155; margin-bottom: 4px;"),
         p("Highlighted cells represent active paths in your current model. Unchecked active paths will be evaluated for optimization.",
           style = "font-size: 12px; color: #64748b;"),
@@ -2625,15 +2963,16 @@ server <- function(input, output, session) {
               condition = "input.prune_strategy == 'sa'",
               fluidRow(
                 column(4, numericInput("sa_max_iter", "SA Max Iterations:", value = 150, min = 20, max = 500, step = 10)),
-                column(4, numericInput("sa_temp_init", "SA Initial Temp:", value = 10.0, min = 1.0, max = 100.0, step = 1.0)),
-                column(4, numericInput("sa_cooling_rate", "SA Cooling Rate (Alpha):", value = 0.90, min = 0.50, max = 0.99, step = 0.01))
-              )
+                column(4, numericInput("sa_temp_init", "SA Initial Temp (in AIC/BIC units):", value = 10.0, min = 1.0, max = 100.0, step = 1.0)),
+                column(4, numericInput("sa_seed", "Random Seed:", value = 1, min = 1, step = 1))
+              ),
+              helpText("The cooling rate is derived automatically so the temperature falls to 0.1 at the final iteration.")
             ),
             conditionalPanel(
               condition = "input.prune_strategy == 'regsem'",
               fluidRow(
                 column(6, selectInput("regsem_type", "Regularization Penalty:",
-                                     choices = c("Lasso (L1)" = "lasso", "Ridge (L2)" = "ridge", "Elastic Net" = "enet"),
+                                     choices = c("Lasso (L1)" = "lasso", "Elastic Net" = "enet"),
                                      selected = "lasso")),
                 column(6, numericInput("regsem_n_lambda", "Number of Lambda Steps:", value = 30, min = 10, max = 100, step = 5))
               ),
@@ -2739,32 +3078,53 @@ server <- function(input, output, session) {
     opt_running(FALSE)
     
     candidates_list <- unname(st$candidates_map)
-    scores <- vapply(candidates_list, function(x) {
-      if (!x$converged) return(Inf)
-      if (st$criterion == "AIC") x$aic else x$bic
-    }, numeric(1))
-    
+    scores <- vapply(candidates_list, candidate_score, numeric(1), criterion = st$criterion)
+
     ord <- order(scores, decreasing = FALSE)
     sorted_candidates <- candidates_list[ord]
-    if (length(sorted_candidates) > 0 && sorted_candidates[[1]]$converged && sorted_candidates[[1]]$status != "[Baseline]") {
+    scores <- scores[ord]
+    if (length(sorted_candidates) > 0 && is.finite(scores[1]) && sorted_candidates[[1]]$status != "[Baseline]") {
       sorted_candidates[[1]]$status <- "[Optimal]"
     }
-    
-    # Post-compute detailed fit measures (CFI, RMSEA, SRMR) for every converged candidate so the
-    # "[Degraded Fit]" flag is consistent across the whole ranking table, not just the first page.
-    # fitMeasures() only reads off the already-fitted lavaan object, so this is cheap (no re-estimation).
+
+    # Distance from the best candidate and Akaike-type weights (exp(-delta/2), normalized).
+    # Candidates within 2 units of the best are statistically hard to distinguish from it.
+    best_score <- if (length(scores) > 0) scores[1] else Inf
+    if (is.finite(best_score)) {
+      delta_best <- scores - best_score
+      w_raw <- ifelse(is.finite(delta_best), exp(-delta_best / 2), 0)
+      weights <- w_raw / sum(w_raw)
+      for (k in seq_along(sorted_candidates)) {
+        sorted_candidates[[k]]$delta_best <- delta_best[k]
+        sorted_candidates[[k]]$weight <- weights[k]
+        if (k > 1 && is.finite(delta_best[k]) && delta_best[k] < 2 &&
+            sorted_candidates[[k]]$status %in% c("[Good]", "[Improved]")) {
+          sorted_candidates[[k]]$status <- "[Equivalent]"
+        }
+      }
+    }
+
+    # Post-compute detailed fit measures (CFI, RMSEA, SRMR) for the top candidates only. Keeping
+    # every lavaan object (up to 2^M of them for the exhaustive search) exhausts memory in WebR,
+    # so lower-ranked fits are released and re-estimated on demand when previewed.
+    max_keep_fits <- 20L
+    base_violations <- fit_cutoff_violations(st$base_ms)
     if (length(sorted_candidates) > 0) {
       for (k in seq_along(sorted_candidates)) {
         cand_k <- sorted_candidates[[k]]
+        if (k > max_keep_fits) {
+          sorted_candidates[[k]]$fit <- NULL
+          next
+        }
         if (cand_k$converged && !is.null(cand_k$fit) && is.na(cand_k$cfi)) {
           ms_k <- tryCatch(lavaan::fitMeasures(cand_k$fit, c("cfi", "rmsea", "srmr")), error = function(e) NULL)
           if (!is.null(ms_k)) {
             sorted_candidates[[k]]$cfi <- as.numeric(ms_k["cfi"])
             sorted_candidates[[k]]$rmsea <- as.numeric(ms_k["rmsea"])
             sorted_candidates[[k]]$srmr <- as.numeric(ms_k["srmr"])
-            if ((!is.na(ms_k["cfi"]) && ms_k["cfi"] < 0.90) || 
-                (!is.na(ms_k["rmsea"]) && ms_k["rmsea"] > 0.08) || 
-                (!is.na(ms_k["srmr"]) && ms_k["srmr"] > 0.08)) {
+            # Flag only a NEW violation: a cutoff the baseline met but this candidate breaks. If the
+            # baseline already violates a cutoff, every candidate would otherwise be flagged as well.
+            if (any(fit_cutoff_violations(ms_k) & !base_violations)) {
               if (sorted_candidates[[k]]$status != "[Baseline]" && sorted_candidates[[k]]$status != "[Optimal]") {
                 sorted_candidates[[k]]$status <- "[Degraded Fit]"
               }
@@ -2787,6 +3147,8 @@ server <- function(input, output, session) {
       stopped_early = stopped_early,
       stopped_at_step = current_step,
       max_steps = st$max_steps,
+      ctx = st$ctx,
+      fallback_note = st$fallback_note %||% "",
       message = "Success"
     )
     
@@ -2821,7 +3183,13 @@ server <- function(input, output, session) {
                     toupper(res$strategy_used),
                     if (nzchar(res$isolation_summary %||% "")) paste0(" [Protected: ", res$isolation_summary, "]") else "",
                     if (stopped_early) sprintf(" (Exploration halted early at step %d of %d; best candidates evaluated so far are shown)", current_step, st$max_steps) else ""),
-            style = if (stopped_early) "margin: 0; font-size: 13px; color: #92400e;" else "margin: 0; font-size: 13px; color: #334155;")
+            style = if (stopped_early) "margin: 0; font-size: 13px; color: #92400e;" else "margin: 0; font-size: 13px; color: #334155;"),
+          p("Note: the top-ranked model was selected using the same data it is evaluated on, so its fit is optimistic. ",
+            "Candidates marked [Equivalent] are within 2 ", res$criterion, " units of the best and cannot be reliably distinguished from it; ",
+            "prefer the one that is theoretically most defensible. [Improper] models (e.g. negative variances) are never ranked first.",
+            style = "margin: 6px 0 0 0; font-size: 12px; color: #64748b;"),
+          if (nzchar(res$fallback_note %||% ""))
+            p(res$fallback_note, style = "margin: 6px 0 0 0; font-size: 12px; color: #b45309; font-weight: 600;")
         ),
         DTOutput("prune_candidates_table"),
         tags$hr(style = "margin: 15px 0;"),
@@ -2982,27 +3350,45 @@ server <- function(input, output, session) {
     ))
 
     # Initialize stepper state
-    sa_max_iter <- input$sa_max_iter %||% 150
-    ga_pop_size <- input$ga_pop_size %||% 12
-    ga_max_gen  <- input$ga_max_gen %||% 10
+    sa_max_iter <- as.integer(input$sa_max_iter %||% 150)
     regsem_n_lambda <- as.integer(input$regsem_n_lambda %||% 30)
 
+    # Upper bound on the number of candidate evaluations of a backward-elimination run:
+    # at most M + (M-1) + ... + 1 fits (one per tick, so Stop/Cancel stay responsive).
     max_steps <- if (eff_strategy == "exhaustive") {
       total_comb
     } else if (eff_strategy == "stepwise") {
-      M
+      M * (M + 1) / 2
     } else if (eff_strategy == "sa") {
       sa_max_iter
-    } else if (eff_strategy == "regsem") {
-      regsem_n_lambda
     } else {
-      ga_max_gen
+      regsem_n_lambda
     }
     grid_matrix <- if (eff_strategy == "exhaustive") expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE)) else NULL
+
+    # Reproducible stochastic search; temperature is annealed from T0 to 0.1 over the whole run.
+    set.seed(as.integer(input$sa_seed %||% 1))
+    sa_T0 <- max(input$sa_temp_init %||% 10.0, 0.2)
+    sa_alpha <- (0.1 / sa_T0)^(1 / max(sa_max_iter, 1))
+
+    # Fixing the observed-variable set keeps AIC/BIC comparable across candidates
+    anchor_vars <- active_struct_vars(struct_df)
+    ctx <- list(
+      data = processed_data(),
+      missing_method = input$missing_method,
+      needs_meanstructure = needs_meanstructure,
+      meas_lines = mlines,
+      extra_lines = extra,
+      anchor_vars = anchor_vars,
+      baseline_dvs = struct_dependents(struct_df),
+      baseline_edges = struct_edges(struct_df),
+      base_fit = base_model$fit
+    )
 
     state_obj <- list(
       eff_strategy = eff_strategy,
       criterion = criterion,
+      ctx = ctx,
       base_fit = base_model$fit,
       base_ms = base_ms,
       base_score = base_score,
@@ -3010,11 +3396,6 @@ server <- function(input, output, session) {
       M = M,
       struct_df = struct_df,
       pred_cols = pred_cols,
-      data = processed_data(),
-      meas_lines = mlines,
-      extra_lines = extra,
-      missing_method = input$missing_method,
-      needs_meanstructure = needs_meanstructure,
       max_steps = max_steps,
       grid_matrix = grid_matrix,
       candidates_map = list(),
@@ -3022,32 +3403,20 @@ server <- function(input, output, session) {
       best_scores_hist = base_score,
       curr_vec = rep(TRUE, M),
       curr_df = struct_df,
-      T_val = input$sa_temp_init %||% 10.0,
-      sa_alpha = input$sa_cooling_rate %||% 0.90,
-      pop = if (eff_strategy == "ga") matrix(sample(c(TRUE, FALSE), ga_pop_size * M, replace = TRUE), nrow = ga_pop_size, ncol = M) else NULL,
-      ga_pop_size = ga_pop_size,
-      ga_max_gen = ga_max_gen,
-      ga_pmut = input$ga_pmut %||% 0.10,
+      T_val = sa_T0,
+      sa_alpha = sa_alpha,
+      # Stepwise sub-step state: one candidate fit per tick
+      sw_idx = 1L,
+      sw_best_score = NULL,
+      sw_best_df = NULL,
+      sw_improved = FALSE,
       regsem_type = input$regsem_type %||% "lasso",
       regsem_n_lambda = regsem_n_lambda,
       retain_deps = retain_deps,
       retain_preds = retain_preds
     )
 
-    if (eff_strategy == "ga") state_obj$pop[1, ] <- TRUE
-
-    make_key <- function(s_df) {
-      lines <- c()
-      for (i in seq_len(nrow(s_df))) {
-        dp <- s_df$Dependent[i]
-        ps <- pred_cols[vapply(s_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
-        if (length(ps)) lines <- c(lines, paste0(dp, "~", paste(sort(ps), collapse = ",")))
-      }
-      res <- paste(sort(lines), collapse = ";")
-      if (!nzchar(res)) "EMPTY_PATH" else res
-    }
-
-    base_key <- make_key(struct_df)
+    base_key <- make_struct_key(struct_df)
     state_obj$candidates_map[[base_key]] <- list(
       removed_str = "None (Baseline Model)",
       retained_str = build_retained_str(struct_df),
@@ -3061,6 +3430,7 @@ server <- function(input, output, session) {
       rmsea = as.numeric(base_ms["rmsea"]),
       srmr = as.numeric(base_ms["srmr"]),
       converged = TRUE,
+      proper = fit_is_proper(base_model$fit),
       status = "[Baseline]"
     )
 
@@ -3083,72 +3453,19 @@ server <- function(input, output, session) {
       return()
     }
 
-    fit_candidate_local <- function(curr_struct_df) {
-      slines <- lapply(seq_len(nrow(curr_struct_df)), function(i) {
-        dp <- curr_struct_df$Dependent[i]
-        if (!nzchar(dp)) return(NULL)
-        preds <- names(curr_struct_df)[3:ncol(curr_struct_df)]
-        ps <- preds[vapply(curr_struct_df[i, preds], function(x) isTRUE(as.logical(x)), logical(1))]
-        if (!length(ps)) return(NULL)
-        paste0(dp, " ~ ", paste(ps, collapse = " + "))
-      })
-      all_syntax <- unlist(c(st$meas_lines, slines, st$extra_lines))
-      if (!length(all_syntax)) return(NULL)
-      
-      syntax_str <- paste(all_syntax, collapse = "\n")
-      
-      # Fast estimation with safe warm start from base fit
-      fm <- NULL
-      if (!is.null(st$base_fit)) {
-        fm <- tryCatch({
-          lavaan::sem(syntax_str,
-                      data          = st$data,
-                      missing       = st$missing_method,
-                      fixed.x       = FALSE,
-                      parser        = "old",
-                      meanstructure = st$needs_meanstructure,
-                      ncpus         = 1L,
-                      start         = st$base_fit)
-        }, error = function(e) NULL)
-      }
-      
-      # Safety fallback: cold start if warm start failed or did not converge
-      if (is.null(fm) || !lavaan::lavInspect(fm, "converged")) {
-        fm <- tryCatch({
-          lavaan::sem(syntax_str,
-                      data          = st$data,
-                      missing       = st$missing_method,
-                      fixed.x       = FALSE,
-                      parser        = "old",
-                      meanstructure = st$needs_meanstructure,
-                      ncpus         = 1L)
-        }, error = function(e) NULL)
-      }
-      fm
-    }
-
-    make_key_local <- function(s_df) {
-      lines <- c()
-      for (i in seq_len(nrow(s_df))) {
-        dp <- s_df$Dependent[i]
-        ps <- st$pred_cols[vapply(s_df[i, st$pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
-        if (length(ps)) lines <- c(lines, paste0(dp, "~", paste(sort(ps), collapse = ",")))
-      }
-      res <- paste(sort(lines), collapse = ";")
-      if (!nzchar(res)) "EMPTY_PATH" else res
-    }
+    make_key_local <- make_struct_key
 
     build_candidate_record_local <- function(curr_s_df, removed_str) {
-      fm <- fit_candidate_local(curr_s_df)
+      fm <- fit_candidate_model(curr_s_df, st$ctx)
       ret_str <- build_retained_str(curr_s_df)
-      if (is.null(fm) || !lavaan::lavInspect(fm, "converged")) {
+      if (is.null(fm) || !isTRUE(lavaan::lavInspect(fm, "converged"))) {
         return(list(
           removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
           retained_str = ret_str,
           struct_df = curr_s_df, fit = NULL,
           aic = NA_real_, bic = NA_real_, delta_aic = NA_real_, delta_bic = NA_real_,
           cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
-          converged = FALSE, status = "[Non-converged]"
+          converged = FALSE, proper = FALSE, status = "[Non-converged]"
         ))
       }
       # Ultra-fast score extraction using stats::AIC and stats::BIC (skips baseline model fitting)
@@ -3156,18 +3473,24 @@ server <- function(input, output, session) {
       c_bic <- tryCatch(as.numeric(stats::BIC(fm)), error = function(e) NA_real_)
       d_aic <- c_aic - as.numeric(st$base_ms["aic"])
       d_bic <- c_bic - as.numeric(st$base_ms["bic"])
-      
+      proper <- fit_is_proper(fm)
+
       stat <- "[Good]"
       if ((st$criterion == "AIC" && d_aic < -0.01) || (st$criterion == "BIC" && d_bic < -0.01)) stat <- "[Improved]"
-      
+      if (!proper) stat <- "[Improper]"
+
       list(
         removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
         retained_str = ret_str,
         struct_df = curr_s_df, fit = fm,
         aic = c_aic, bic = c_bic, delta_aic = d_aic, delta_bic = d_bic,
-        cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_, converged = TRUE, status = stat
+        cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
+        converged = TRUE, proper = proper, status = stat
       )
     }
+
+    # Score of a record under the active criterion; Inf for non-converged or improper fits
+    score_of <- function(rec) candidate_score(rec, st$criterion)
 
     curr_score_step <- st$base_score
     best_curr <- if (length(st$best_scores_hist) > 0) tail(st$best_scores_hist, 1) else st$base_score
@@ -3175,57 +3498,70 @@ server <- function(input, output, session) {
     step_advance <- 1L
 
     if (st$eff_strategy == "stepwise") {
-      curr_k <- make_key_local(st$curr_df)
-      curr_rec <- st$candidates_map[[curr_k]]
-      best_score <- if (!is.null(curr_rec) && isTRUE(curr_rec$converged)) {
-        if (st$criterion == "AIC") curr_rec$aic else curr_rec$bic
-      } else Inf
-      
-      best_step_s_df <- st$curr_df
-      improved <- FALSE
-      
-      for (idx in seq_along(st$removable_paths)) {
-        rp <- st$removable_paths[[idx]]
-        if (isTRUE(as.logical(st$curr_df[st$curr_df$Dependent == rp$dep, rp$pred]))) {
-          test_s_df <- st$curr_df
-          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-          
-          # Check variable isolation constraints
-          if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) {
-            next
-          }
-          
-          rem_vec <- c()
-          for (j in seq_along(st$removable_paths)) {
-            jp <- st$removable_paths[[j]]
-            if (!isTRUE(as.logical(test_s_df[test_s_df$Dependent == jp$dep, jp$pred]))) {
-              rem_vec <- c(rem_vec, paste0(jp$dep, " ~ ", jp$pred))
-            }
-          }
-          k_str <- make_key_local(test_s_df)
-          if (!k_str %in% names(st$candidates_map)) {
-            rem_label <- paste(rem_vec, collapse = "; ")
-            st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
-          }
-          rec <- st$candidates_map[[k_str]]
-          if (!is.null(rec) && isTRUE(rec$converged)) {
-            cand_score <- if (st$criterion == "AIC") rec$aic else rec$bic
-            if (!is.na(cand_score) && cand_score < best_score - 0.01) {
-              best_score <- cand_score
-              best_step_s_df <- test_s_df
-              improved <- TRUE
-            }
+      # Backward elimination, one candidate fit per tick so Stop/Cancel stay responsive in the
+      # single-threaded WebR runtime. A sweep tries removing each remaining active path from the
+      # current model; at the end of the sweep the best improving removal (if any) is adopted.
+      if (is.null(st$sw_best_score)) {
+        st$sw_best_score <- score_of(st$candidates_map[[make_key_local(st$curr_df)]])
+        st$sw_best_df <- st$curr_df
+        st$sw_start_score <- st$sw_best_score
+        st$sw_tie_df <- NULL
+        st$sw_improved <- FALSE
+        st$sw_idx <- 1L
+      }
+
+      evaluated <- FALSE
+      last_cand_score <- NA_real_
+      while (!evaluated && st$sw_idx <= length(st$removable_paths)) {
+        rp <- st$removable_paths[[st$sw_idx]]
+        st$sw_idx <- st$sw_idx + 1L
+        if (!isTRUE(as.logical(st$curr_df[st$curr_df$Dependent == rp$dep, rp$pred]))) next
+
+        test_s_df <- st$curr_df
+        test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+
+        # Check variable isolation constraints
+        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) next
+
+        rem_vec <- c()
+        for (j in seq_along(st$removable_paths)) {
+          jp <- st$removable_paths[[j]]
+          if (!isTRUE(as.logical(test_s_df[test_s_df$Dependent == jp$dep, jp$pred]))) {
+            rem_vec <- c(rem_vec, paste0(jp$dep, " ~ ", jp$pred))
           }
         }
+        k_str <- make_key_local(test_s_df)
+        if (!k_str %in% names(st$candidates_map)) {
+          st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, paste(rem_vec, collapse = "; "))
+          evaluated <- TRUE   # only a real model fit consumes the tick; cached candidates are free
+        }
+        cand_score <- score_of(st$candidates_map[[k_str]])
+        last_cand_score <- cand_score
+        if (is.finite(cand_score) && cand_score < st$sw_best_score - 0.01) {
+          st$sw_best_score <- cand_score
+          st$sw_best_df <- test_s_df
+          st$sw_improved <- TRUE
+        } else if (is.finite(cand_score) && is.null(st$sw_tie_df) &&
+                   abs(cand_score - st$sw_start_score) <= 0.01) {
+          # Equal fit with one path fewer (typical for saturated structural parts, where removing a
+          # path just frees a covariance). Remembered so the search can walk across such plateaus.
+          st$sw_tie_df <- test_s_df
+        }
       }
-      
-      if (improved) {
-        st$curr_df <- best_step_s_df
-        curr_score_step <- best_score
-      } else {
-        curr_score_step <- best_score
-        step_advance <- st$max_steps + 1
+
+      if (st$sw_idx > length(st$removable_paths)) {
+        # Sweep finished
+        if (st$sw_improved || !is.null(st$sw_tie_df)) {
+          # Prefer a strictly improving removal; otherwise accept the first equal-fit removal (parsimony)
+          st$curr_df <- if (st$sw_improved) st$sw_best_df else st$sw_tie_df
+          st$sw_best_score <- NULL   # start a fresh sweep from the adopted model on the next tick
+        } else {
+          step_advance <- st$max_steps + 1   # no improving removal left: search converged
+        }
       }
+
+      curr_score_step <- if (is.finite(last_cand_score)) last_cand_score else
+        if (!is.null(st$sw_best_score) && is.finite(st$sw_best_score)) st$sw_best_score else st$base_score
       st$scores_hist <- c(st$scores_hist, curr_score_step)
       if (is.finite(curr_score_step) && curr_score_step < best_curr) {
         best_curr <- curr_score_step
@@ -3255,12 +3591,7 @@ server <- function(input, output, session) {
             rem_label <- paste(removed_paths_vec, collapse = "; ")
             st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
           }
-          rec <- st$candidates_map[[k_str]]
-          if (!is.null(rec) && isTRUE(rec$converged)) {
-            curr_score_step <- if (st$criterion == "AIC") rec$aic else rec$bic
-          } else {
-            curr_score_step <- Inf
-          }
+          curr_score_step <- score_of(st$candidates_map[[k_str]])
         }
         st$scores_hist <- c(st$scores_hist, curr_score_step)
         if (is.finite(curr_score_step) && curr_score_step < best_curr) {
@@ -3293,19 +3624,13 @@ server <- function(input, output, session) {
             rem_label <- paste(rem_vec, collapse = "; ")
             st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
           }
-          c_rec <- st$candidates_map[[k_str]]
-          c_score <- if (!is.null(c_rec) && isTRUE(c_rec$converged)) {
-            if (st$criterion == "AIC") c_rec$aic else c_rec$bic
-          } else Inf
+          c_score <- score_of(st$candidates_map[[k_str]])
         }
-        
-        curr_rec <- st$candidates_map[[make_key_local(st$curr_df)]]
+
         if (is.finite(c_score)) {
           curr_score_step <- c_score
-          curr_score <- if (!is.null(curr_rec) && isTRUE(curr_rec$converged)) {
-            if (st$criterion == "AIC") curr_rec$aic else curr_rec$bic
-          } else Inf
-          
+          curr_score <- score_of(st$candidates_map[[make_key_local(st$curr_df)]])
+
           dE <- as.numeric(c_score - curr_score)
           if (!is.na(dE) && !is.nan(dE)) {
             eff_T <- max(st$T_val, 1e-6)
@@ -3326,60 +3651,6 @@ server <- function(input, output, session) {
         st$best_scores_hist <- c(st$best_scores_hist, best_curr)
       }
       step_advance <- chunk_size
-    } else if (st$eff_strategy == "ga") {
-      evaluate_chrom_local <- function(chrom_vec) {
-        test_s_df <- st$struct_df
-        rem_vec <- c()
-        for (idx in seq_along(st$removable_paths)) {
-          rp <- st$removable_paths[[idx]]
-          if (!chrom_vec[idx]) {
-            test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-            rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
-          }
-        }
-        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) {
-          return(Inf)
-        }
-        k_str <- make_key_local(test_s_df)
-        if (!k_str %in% names(st$candidates_map)) {
-          rem_label <- paste(rem_vec, collapse = "; ")
-          st$candidates_map[[k_str]] <<- build_candidate_record_local(test_s_df, rem_label)
-        }
-        rec <- st$candidates_map[[k_str]]
-        if (is.null(rec) || !isTRUE(rec$converged)) return(Inf)
-        if (st$criterion == "AIC") rec$aic else rec$bic
-      }
-
-      scores_ga <- apply(st$pop, 1, evaluate_chrom_local)
-      scores_ga[is.na(scores_ga)] <- Inf
-      best_idx <- which.min(scores_ga)
-      if (length(best_idx) == 0) best_idx <- 1L
-      curr_score_step <- scores_ga[best_idx]
-      
-      new_pop <- st$pop
-      new_pop[1, ] <- st$pop[best_idx, ]
-      
-      for (p in seq(2, st$ga_pop_size, by = 2)) {
-        i1 <- sample.int(st$ga_pop_size, 2); parent1 <- st$pop[i1[which.min(scores_ga[i1])], ]
-        i2 <- sample.int(st$ga_pop_size, 2); parent2 <- st$pop[i2[which.min(scores_ga[i2])], ]
-        if (st$M > 1 && runif(1) < 0.80) {
-          x_pt <- sample.int(st$M - 1, 1)
-          child1 <- c(parent1[1:x_pt], parent2[(x_pt + 1):st$M])
-          child2 <- c(parent2[1:x_pt], parent1[(x_pt + 1):st$M])
-        } else {
-          child1 <- parent1; child2 <- parent2
-        }
-        mut1 <- runif(st$M) < st$ga_pmut; child1[mut1] <- !child1[mut1]
-        mut2 <- runif(st$M) < st$ga_pmut; child2[mut2] <- !child2[mut2]
-        new_pop[p, ] <- child1
-        if (p + 1 <= st$ga_pop_size) new_pop[p + 1, ] <- child2
-      }
-      st$pop <- new_pop
-      st$scores_hist <- c(st$scores_hist, curr_score_step)
-      if (is.finite(curr_score_step) && curr_score_step < best_curr) {
-        best_curr <- curr_score_step
-      }
-      st$best_scores_hist <- c(st$best_scores_hist, best_curr)
     } else if (st$eff_strategy == "regsem") {
       # Regularized SEM (cv_regsem / regsem)
       if (is.null(st$reg_params_mat)) {
@@ -3388,18 +3659,17 @@ server <- function(input, output, session) {
 
         # Resolve regsem functions dynamically so ShinyLive does not detect it as a startup dependency
         regsem_loaded <- ensure_regsem_loaded()
-        if (!regsem_loaded) {
-          showNotification("Regularized SEM engine (regsem) could not be loaded; showing an approximate lasso path instead.",
-                           type = "warning", duration = 8)
+        reg_obj <- NULL
+        if (regsem_loaded) {
+          reg_obj <- tryCatch({
+            getExportedValue(regsem_pkg, "cv_regsem")(st$base_fit, type = pen_type, pars_pen = "regressions",
+                                                    n.lambda = n_lambda, jump = 0.04)
+          }, error = function(e) {
+            tryCatch({
+              getExportedValue(regsem_pkg, "regsem")(st$base_fit, type = pen_type, pars_pen = "regressions", lambda = 0.05)
+            }, error = function(e2) NULL)
+          })
         }
-        reg_obj <- tryCatch({
-          getExportedValue(regsem_pkg, "cv_regsem")(st$base_fit, type = pen_type, pars_pen = "regressions",
-                                                  n.lambda = n_lambda, jump = 0.04)
-        }, error = function(e) {
-          tryCatch({
-            getExportedValue(regsem_pkg, "regsem")(st$base_fit, type = pen_type, pars_pen = "regressions", lambda = 0.05)
-          }, error = function(e2) NULL)
-        })
 
         params_mat <- NULL
         if (!is.null(reg_obj)) {
@@ -3410,19 +3680,27 @@ server <- function(input, output, session) {
           }
         }
 
-        # Fallback if regsem fitting failed: simulate regularized coefficients from base fit
+        # Fallback if regsem is unavailable or failed: soft-threshold the STANDARDIZED regression
+        # coefficients so the result does not depend on variable scales. Clearly labelled as approximate.
+        # Column names follow regsem's "predictor -> dependent" convention.
         if (is.null(params_mat)) {
-          pe <- tryCatch(lavaan::parameterEstimates(st$base_fit), error = function(e) NULL)
-          if (!is.null(pe)) {
-            reg_pe <- pe[pe$op == "~", , drop = FALSE]
+          note <- if (!regsem_loaded) {
+            "Regularized SEM engine (regsem) could not be loaded"
+          } else {
+            "regsem could not estimate this model (for example because of its missing-data setting)"
+          }
+          st$fallback_note <- paste0(note, "; results use an approximate soft-threshold path on standardized coefficients, NOT regsem.")
+          showNotification(st$fallback_note, type = "warning", duration = 10)
+          ss <- tryCatch(lavaan::standardizedSolution(st$base_fit), error = function(e) NULL)
+          if (!is.null(ss)) {
+            reg_ss <- ss[ss$op == "~", , drop = FALSE]
             lambdas <- seq(0.01, 0.5, length.out = n_lambda)
-            params_mat <- matrix(0, nrow = n_lambda, ncol = nrow(reg_pe))
-            colnames(params_mat) <- paste0(reg_pe$lhs, "~", reg_pe$rhs)
+            params_mat <- matrix(0, nrow = n_lambda, ncol = nrow(reg_ss))
+            colnames(params_mat) <- paste0(reg_ss$rhs, " -> ", reg_ss$lhs)
             for (li in seq_along(lambdas)) {
-              lam <- lambdas[li]
-              for (ci in seq_len(nrow(reg_pe))) {
-                b <- reg_pe$est[ci]
-                params_mat[li, ci] <- sign(b) * max(0, abs(b) - lam)
+              for (ci in seq_len(nrow(reg_ss))) {
+                b <- reg_ss$est.std[ci]
+                params_mat[li, ci] <- sign(b) * max(0, abs(b) - lambdas[li])
               }
             }
           }
@@ -3438,11 +3716,12 @@ server <- function(input, output, session) {
 
       if (!is.null(st$reg_params_mat) && curr_lambda_idx <= nrow(st$reg_params_mat)) {
         p_row <- st$reg_params_mat[curr_lambda_idx, ]
+        p_names <- names(p_row)
         test_s_df <- st$struct_df
 
         for (rp in st$removable_paths) {
-          p_names <- names(p_row)
-          match_idx <- grep(paste0("^", rp$dep, ".*~.*", rp$pred, "$"), p_names)
+          # Exact (not regex) match on regsem's "predictor -> dependent" parameter names
+          match_idx <- which(p_names == paste0(rp$pred, " -> ", rp$dep))
           if (length(match_idx) > 0) {
             val <- abs(p_row[match_idx[1]])
             if (!is.na(val) && val < 1e-4) {
@@ -3462,10 +3741,7 @@ server <- function(input, output, session) {
             }
             st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, paste(rem_vec, collapse = "; "))
           }
-          rec <- st$candidates_map[[k_str]]
-          if (!is.null(rec) && isTRUE(rec$converged)) {
-            curr_score_step <- if (st$criterion == "AIC") rec$aic else rec$bic
-          }
+          curr_score_step <- score_of(st$candidates_map[[k_str]])
         }
       }
 
@@ -3523,6 +3799,8 @@ server <- function(input, output, session) {
         BIC = if (is.na(c_item$bic)) "—" else sprintf("%.2f", c_item$bic),
         `ΔAIC` = if (is.na(c_item$delta_aic)) "—" else sprintf("%+.2f", c_item$delta_aic),
         `ΔBIC` = if (is.na(c_item$delta_bic)) "—" else sprintf("%+.2f", c_item$delta_bic),
+        `Δ vs Best` = if (is.null(c_item$delta_best) || !is.finite(c_item$delta_best)) "—" else sprintf("%.2f", c_item$delta_best),
+        Weight = if (is.null(c_item$weight) || !is.finite(c_item$weight)) "—" else sprintf("%.3f", c_item$weight),
         CFI = if (is.na(c_item$cfi)) "—" else sprintf("%.3f", c_item$cfi),
         RMSEA = if (is.na(c_item$rmsea)) "—" else sprintf("%.3f", c_item$rmsea),
         SRMR = if (is.na(c_item$srmr)) "—" else sprintf("%.3f", c_item$srmr),
@@ -3600,11 +3878,27 @@ server <- function(input, output, session) {
     cand <- selected_prune_cand()
     if (is.null(cand)) return()
     
-    if (!cand$converged || is.null(cand$fit)) {
+    if (!cand$converged) {
       session$sendCustomMessage("update_prune_preview_plot", list(
         error = TRUE,
         message = "Candidate model did not converge."
       ))
+      return()
+    }
+
+    # Lower-ranked candidates release their lavaan object to save memory; re-estimate on demand.
+    if (is.null(cand$fit)) {
+      ctx <- isolate(prune_results())$ctx
+      refit <- if (!is.null(ctx)) tryCatch(fit_candidate_model(cand$struct_df, ctx), error = function(e) NULL) else NULL
+      if (is.null(refit)) {
+        session$sendCustomMessage("update_prune_preview_plot", list(
+          error = TRUE,
+          message = "Could not re-estimate this candidate for preview."
+        ))
+        return()
+      }
+      cand$fit <- refit
+      selected_prune_cand(cand)   # cache so Apply and re-selection reuse it
       return()
     }
     
@@ -3644,8 +3938,8 @@ server <- function(input, output, session) {
     
     # 4. Trigger automatic model re-fitting so path diagram, fit indices, and params update immediately
     shinyjs::click("run_model")
-    
-    showNotification("Selected model applied to structural UI and refitted successfully!", type = "message", duration = 4)
+
+    showNotification("Selected model applied to the structural UI; refitting now...", type = "message", duration = 4)
   })
 }
 
