@@ -11,9 +11,9 @@ const puppeteer = require('puppeteer-core');
   const t0 = Date.now();
   page.on('requestfinished', r => {
     const u = r.url();
-    if (/\.tgz|\/packages\/|repo\.r-wasm|metadata\.rds|deferred\.txt/.test(u)) reqs.push(((Date.now() - t0) / 1000).toFixed(1) + 's ' + u.replace('http://localhost:8100/', ''));
+    if (/\.tgz|\/packages\/|repo\.r-wasm|metadata\.rds|deferred\.txt/.test(u)) reqs.push(((Date.now() - t0) / 1000).toFixed(1) + 's ' + u.replace('' + (process.argv[2] || 'http://localhost:8100') + '/', ''));
   });
-  await page.goto('http://localhost:8100', { waitUntil: 'domcontentloaded' });
+  await page.goto('' + (process.argv[2] || 'http://localhost:8100') + '', { waitUntil: 'domcontentloaded' });
   await new Promise(r => setTimeout(r, 30000));
   console.log(reqs.join('\n'));
   console.log('package-ish requests:', reqs.length);

@@ -18,7 +18,7 @@ const fs = require('fs');
   page.on('pageerror', err => console.error('PAGE ERROR:', err.message));
 
   console.log('Navigating to http://localhost:8100 ...');
-  await page.goto('http://localhost:8100', { waitUntil: 'networkidle2', timeout: 60000 });
+  await page.goto((process.argv[2] || 'http://localhost:8100'), { waitUntil: 'networkidle2', timeout: 60000 });
 
   console.log('Waiting for Shinylive webR app iframe to mount...');
   let targetFrame = null;
