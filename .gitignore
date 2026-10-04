@@ -10,3 +10,4 @@ test_browser/screenshot.png
 test_browser/error_*.png
 test_webr/
 
+.playwright-mcp/
