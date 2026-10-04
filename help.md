@@ -19,6 +19,7 @@
    - [Suggested Paths via Modification Indices](#43-suggested-paths-via-modification-indices)
    - [Manual Equations (Advanced Syntax)](#44-manual-equations-advanced-syntax)
    - [Inspecting Compiled Syntax](#45-inspecting-compiled-syntax)
+   - [Saving & Restoring Models](#46-saving--restoring-models)
 5. [Automated Model Optimization (Model Pruning)](#5-automated-model-optimization-model-pruning)
    - [Strategy & Criteria Configuration](#51-step-1-strategy--criteria-configuration)
    - [Variable Isolation Prevention & Path Locking](#52-variable-isolation-prevention--path-locking)
@@ -34,6 +35,7 @@
    - [Diagram Visual Conventions](#72-diagram-visual-conventions)
    - [Vector SVG & High-Resolution PNG Export](#73-vector-svg--high-resolution-png-export)
    - [Browser-Rendered A4 PDF Analysis Report](#74-browser-rendered-a4-pdf-analysis-report)
+   - [Results ZIP Download](#75-results-zip-download)
 8. [Troubleshooting & Common Lavaan Errors](#8-troubleshooting--common-lavaan-errors)
 9. [Methodological Best Practices & Citations](#9-methodological-best-practices--citations)
 
@@ -76,7 +78,9 @@ Follow these steps to specify and estimate your first SEM model in under five mi
    - Click the green **Run / Update Model** button.
    - Within seconds, the vector **Path Diagram** renders in the right pane, while global fit measures appear in the **Diagnostics** sub-tab.
 6. **Export Findings**:
-   - Click **Save SVG** or **Save PNG** to save publication-grade diagrams, or click **Export PDF Report** to produce an A4 summary report ready for distribution.
+   - Click **Save SVG** or **Save PNG** to save publication-grade diagrams, click **Export PDF Report** to produce an A4 summary report ready for distribution, or click **Download Results (ZIP)** to get every result file (and the model definition) in one archive.
+7. **Keep Your Model**:
+   - Every successful fit is autosaved in your browser. After a reload, load the same data again and choose **Restore it** (see [Saving & Restoring Models](#46-saving--restoring-models)).
 
 ---
 
@@ -183,6 +187,19 @@ Directly beneath the structural grid, the **Manual Equations** text box allows y
 ### 4.5 Inspecting Compiled Syntax
 The **lavaan Syntax** box provides live, read-only transparency. Every change made across the measurement table, structural matrix, or manual text box is instantly parsed into standardized lavaan code, ensuring total reproducibility.
 
+### 4.6 Saving & Restoring Models
+The **Saved Models** panel (Model tab, above the measurement table) keeps your model definition so you do not have to rebuild it after a reload:
+* **Autosave**: after every *successful* fit, the model is saved automatically in this browser. When you load a dataset with matching columns, Structura2 offers **Restore it**; the link also stays available in the panel.
+* **Named models**: type a name and click **Save**; choose a saved model and click **Load** or **Delete**. Up to 20 models are kept.
+* **Export JSON / Import JSON**: writes the current model to a `.json` file (and reads one back). Use this as your durable backup and to move a model to another browser or computer.
+
+What is saved: the measurement rows, the active structural paths, the manual equations, and the analysis settings (analysis mode, missing-data handling, log-transform and displayed columns, diagram options, modification-index thresholds). **No data values are ever saved** — only variable names — so the same dataset (or one with the same column names) must be loaded first.
+
+Things to know:
+* A restore **does not fit the model**: review the tables, then click **Run / Update Model**.
+* Variables or paths that do not exist in the current data are skipped, and the notification lists them. If the saved model was fitted on a different number of rows (for example, because the Data tab was filtered), you are told as well; the Data-tab row filter itself is not saved.
+* Browser storage belongs to the site you are using. It can be wiped by the browser (private windows, "clear site data", Safari's inactivity cleanup), and sites that share a domain (for example several apps on one `github.io` address) also share it. When storage is unavailable the panel says so; **Export JSON** always works.
+
 ---
 
 ## 5. Automated Model Optimization (Model Pruning)
@@ -282,7 +299,7 @@ Located in the **Details** tab, this interactive table displays detailed regress
 * `pvalue`: Two-tailed asymptotic significance level ($p < .001$ formatting supported).
 * `std.all`: Completely standardized solution (variance of both latent and observed variables standardized to $1.0$). Enabled by checking **Include Standardized (std.all)**.
 * **Precision Control**: Use the **Decimals** selector to view `2`, `3`, `4`, or full floating-point precision (`All (Raw)`).
-* **Exporting**: Click **Copy** to place the table onto your clipboard or **CSV** to save directly for statistical reports.
+* **Exporting**: Click **Copy** to place the table onto your clipboard or **CSV** to save directly for statistical reports. Both buttons export **every** row of the table (not only the visible page) and follow the current decimals setting; for full-precision values use **Download Results (ZIP)** (see [7.5](#75-results-zip-download)).
 
 ### 6.4 Comprehensive Model Summary
 The **Model Summary** panel provides complete verbatim text output generated directly by `lavaan::summary()`. It includes optimizer convergence status, number of iterations, log-likelihood values, and degrees of freedom.
@@ -338,6 +355,24 @@ Clicking the **Export PDF Report** button on the Model tab synthesizes your enti
 * **Section 3 (Parameter Estimates)**: Comprehensive table of all estimated paths, standard errors, $z$-values, and standardized coefficients.
 * **Section 4 (lavaan Syntax)**: Complete code listing for full research transparency.
 * **Browser Print Integration**: Automatically opens your browser's native print preview dialog with tailored print CSS styles (`@media print`) configured for clean page breaks. Simply choose "Save as PDF" to produce your publication report.
+
+### 7.5 Results ZIP Download
+Clicking **Download Results (ZIP)** on the Model tab (after a successful fit) saves `structura2_results_<date>_<time>.zip` containing:
+
+| File | Content |
+|------|---------|
+| `parameter_estimates.csv` | All parameter estimates at full precision, including `std.all` |
+| `fit_measures.csv` | Every fit measure reported by lavaan |
+| `variable_summary.csv` | Valid / missing counts, mean, SD, skewness, kurtosis |
+| `reliability.csv` | Cronbach's $\alpha$, CR, AVE per latent construct (only if the model has latent variables) |
+| `modification_indices.csv` | Modification indices (only if *Highlight suggested paths* is enabled) |
+| `model_syntax.txt` | The lavaan syntax that was fitted |
+| `model.json` | The model definition; import it via **Saved Models → Import JSON** to restore the model |
+| `lavaan_summary.txt` | Verbatim `lavaan::summary()` output |
+| `path_diagram.svg` / `.png` | The path diagram as currently displayed |
+| `README.txt` | Data name, settings and lavaan version |
+
+The files describe the model **as it was fitted** (data and settings captured when you pressed *Run*), even if you changed settings afterwards. CSV files are UTF-8 with a byte-order mark, so Excel displays non-ASCII (e.g. Japanese) variable names correctly.
 
 ---
 

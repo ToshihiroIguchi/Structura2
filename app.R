@@ -516,6 +516,242 @@ struct_edges <- function(struct_df) {
   if (length(out)) do.call(rbind, out) else data.frame(dep = character(0), pred = character(0), stringsAsFactors = FALSE)
 }
 
+# ---- Model Spec & Export Helpers ---------------------------------------------
+# A "model spec" describes a model by names only (never data values): the measurement rows, the active
+# structural paths, the manual equations and the analysis settings. It is what gets saved in the browser,
+# exported/imported as JSON and bundled in the results ZIP. Specs cross the R/JS boundary as JSON strings
+# so that length-1 vectors are never unboxed by accident.
+SPEC_FORMAT  <- "structura2-model"
+SPEC_VERSION <- 1L
+
+as_chr <- function(x) as.character(unlist(x, use.names = FALSE))
+
+# Build a spec from the measurement table, the structural matrix and the analysis settings.
+# Vectors are wrapped in lists so that they serialize as JSON arrays even when they have length 1.
+build_model_spec <- function(meas, struct_df, extra_eq, settings, data_info, name = "") {
+  measurement <- list()
+  if (!is.null(meas) && ncol(meas) >= 4 && nrow(meas) > 0) {
+    vars <- names(meas)[4:ncol(meas)]
+    for (i in seq_len(nrow(meas))) {
+      lt   <- trimws(as.character(meas$Latent[i]))
+      inds <- vars[vapply(meas[i, vars], function(x) isTRUE(as.logical(x)), logical(1))]
+      if (!nzchar(lt) && !length(inds)) next
+      measurement[[length(measurement) + 1]] <- list(latent = lt, indicators = as.list(inds))
+    }
+  }
+  structural <- list()
+  pred_cols <- struct_pred_cols(struct_df)
+  if (length(pred_cols) && nrow(struct_df) > 0) {
+    for (i in seq_len(nrow(struct_df))) {
+      ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
+      if (length(ps) && nzchar(struct_df$Dependent[i])) {
+        structural[[length(structural) + 1]] <- list(dependent = struct_df$Dependent[i], predictors = as.list(ps))
+      }
+    }
+  }
+  list(
+    format           = SPEC_FORMAT,
+    version          = SPEC_VERSION,
+    name             = name,
+    data             = list(name = data_info$name %||% "", columns = as.list(data_info$columns),
+                            nrow_used = data_info$nrow_used %||% 0L),
+    settings         = settings,
+    measurement      = measurement,
+    structural       = structural,
+    manual_equations = extra_eq %||% ""
+  )
+}
+
+spec_to_json <- function(spec) {
+  as.character(jsonlite::toJSON(spec, auto_unbox = TRUE, null = "null", na = "null", digits = NA))
+}
+
+# Parse and validate spec JSON text (from the browser store or an imported file).
+# Returns list(ok = TRUE, spec = <normalized spec>) or list(ok = FALSE, msg = <user-facing message>).
+# Every field is normalized to plain character vectors / scalars and unknown setting values are dropped,
+# so later code never has to guess the shape of what the browser sent.
+parse_model_spec_json <- function(txt) {
+  tryCatch({
+    x <- jsonlite::fromJSON(txt, simplifyVector = FALSE)
+    if (!is.list(x) || !identical(x$format, SPEC_FORMAT)) {
+      return(list(ok = FALSE, msg = "This file is not a Structura2 model file (format marker is missing)."))
+    }
+    ver <- suppressWarnings(as.integer(x$version %||% NA))
+    if (is.na(ver) || ver < 1L || ver > SPEC_VERSION) {
+      return(list(ok = FALSE, msg = "This model file was written by a newer version of Structura2. Update Structura2 and try again."))
+    }
+    s <- x$settings %||% list()
+    pick <- function(v, allowed) if (is.character(v) && length(v) == 1 && v %in% allowed) v else NULL
+    num  <- function(v) if (is.numeric(v) && length(v) == 1 && is.finite(v)) v else NULL
+    lgl  <- function(v) if (is.logical(v) && length(v) == 1 && !is.na(v)) v else NULL
+    settings <- list(
+      analysis_mode        = pick(s$analysis_mode, c("raw", "std")),
+      missing_method       = pick(s$missing_method, c("listwise", "ml", "ml.x", "two.stage", "robust.two.stage")),
+      log_columns          = as_chr(s$log_columns),
+      display_columns      = as_chr(s$display_columns),
+      layout_style         = pick(s$layout_style, c("dot_LR", "dot_TB", "neato", "fdp", "circo", "twopi")),
+      diagram_std          = lgl(s$diagram_std),
+      show_suggested_paths = lgl(s$show_suggested_paths),
+      mi_threshold         = num(s$mi_threshold),
+      epc_threshold        = num(s$epc_threshold)
+    )
+    spec <- list(
+      name = as.character((x$name %||% "")[1]),
+      data = list(name = as.character((x$data$name %||% "")[1]),
+                  columns = as_chr(x$data$columns),
+                  nrow_used = suppressWarnings(as.integer((x$data$nrow_used %||% 0L)[1]))),
+      settings = settings,
+      measurement = lapply(x$measurement %||% list(), function(m) {
+        list(latent = as.character((m$latent %||% "")[1]), indicators = as_chr(m$indicators))
+      }),
+      structural = lapply(x$structural %||% list(), function(m) {
+        list(dependent = as.character((m$dependent %||% "")[1]), predictors = as_chr(m$predictors))
+      }),
+      manual_equations = as.character((x$manual_equations %||% "")[1])
+    )
+    list(ok = TRUE, spec = spec)
+  }, error = function(e) {
+    list(ok = FALSE, msg = paste("Could not read the model file:", conditionMessage(e),
+                                 "Check that the file was exported from Structura2 and is not truncated."))
+  })
+}
+
+# Measurement table for a spec: same layout as the initial table built when data is loaded
+# (Latent / Indicator / Operator + one logical column per displayed variable). Indicators that are
+# not among `inds` are reported in `dropped` instead of being silently lost.
+spec_to_meas_table <- function(spec, inds, obs_names) {
+  rows <- spec$measurement
+  if (!length(rows)) rows <- list(list(latent = "LatentVariable1", indicators = character(0)))
+  n <- length(rows)
+  latent <- vapply(rows, function(r) {
+    lt <- trimws(r$latent)
+    if (nzchar(lt)) make.names(lt) else ""
+  }, character(1))
+  mat <- matrix(FALSE, nrow = n, ncol = length(inds))
+  colnames(mat) <- inds
+  dropped <- character(0)
+  for (i in seq_len(n)) {
+    for (ind in rows[[i]]$indicators) {
+      if (ind %in% inds) mat[i, ind] <- TRUE
+      else dropped <- c(dropped, ind)
+    }
+  }
+  tbl <- data.frame(Latent = latent, Indicator = "", Operator = "=~",
+                    mat, stringsAsFactors = FALSE, check.names = FALSE)
+  colnames(tbl) <- c("Latent", "Indicator", "Operator", inds)
+  valid_latents <- ifelse(nzchar(tbl$Latent), tbl$Latent, "latent")
+  convs <- make.unique(c(obs_names, valid_latents))
+  tbl$Indicator <- ifelse(nzchar(tbl$Latent), tail(convs, n), "")
+  list(table = tbl, dropped = unique(dropped))
+}
+
+# Structural matrix for a spec over the current model items (observed variables + latent names).
+# Paths that mention a variable that no longer exists, or a self-loop, are reported in `dropped`.
+spec_to_struct_table <- function(spec, items) {
+  mat <- data.frame(Dependent = items, Operator = "~", stringsAsFactors = FALSE)
+  for (col in items) mat[[col]] <- FALSE
+  dropped <- character(0)
+  for (s in spec$structural) {
+    for (p in s$predictors) {
+      if (s$dependent %in% items && p %in% items && !identical(s$dependent, p)) {
+        mat[mat$Dependent == s$dependent, p] <- TRUE
+      } else {
+        dropped <- c(dropped, paste(s$dependent, "~", p))
+      }
+    }
+  }
+  list(table = mat, dropped = dropped)
+}
+
+# CSV text built with paste() only (no file connections), so non-ASCII column names survive WebR's
+# C locale. Numbers keep up to 15 significant digits; NA becomes an empty field.
+df_to_csv_text <- function(df) {
+  esc <- function(x) paste0("\"", gsub("\"", "\"\"", x, fixed = TRUE), "\"")
+  cell <- function(col) {
+    if (is.integer(col)) {
+      ifelse(is.na(col), "", as.character(col))
+    } else if (is.numeric(col)) {
+      # element-wise "%.15g": a vector-wide format() would pad every value to the same number of decimals
+      out <- ifelse(is.finite(col), formatC(col, digits = 15, format = "g"), "")
+      trimws(out)
+    } else if (is.logical(col)) {
+      ifelse(is.na(col), "", ifelse(col, "TRUE", "FALSE"))
+    } else {
+      out <- esc(as.character(col))
+      out[is.na(col)] <- ""
+      out
+    }
+  }
+  header <- paste(esc(names(df)), collapse = ",")
+  if (nrow(df) == 0) return(paste0(header, "\r\n"))
+  body <- do.call(paste, c(lapply(df, cell), sep = ","))
+  paste0(header, "\r\n", paste(body, collapse = "\r\n"), "\r\n")
+}
+
+# Per-variable summary of the observed variables of a fitted model (valid / missing counts, moments).
+compute_var_stats <- function(fit, df_proc) {
+  ov_vars <- intersect(lavaan::lavNames(fit, "ov"), names(df_proc))
+  if (!length(ov_vars)) return(NULL)
+  rows <- lapply(ov_vars, function(v) {
+    x <- df_proc[[v]]
+    x_valid <- if (is.numeric(x)) x[!is.na(x)] else numeric(0)
+    n_total <- length(x)
+    n_valid <- length(x_valid)
+    n_miss  <- n_total - n_valid
+    out <- data.frame(Variable = v, ValidN = n_valid, MissingN = n_miss,
+                      MissingPct = if (n_total > 0) n_miss / n_total * 100 else 0,
+                      Mean = NA_real_, SD = NA_real_, Skewness = NA_real_, Kurtosis = NA_real_,
+                      stringsAsFactors = FALSE)
+    if (n_valid > 1) {
+      m_val  <- mean(x_valid)
+      sd_val <- sd(x_valid)
+      z <- (x_valid - m_val) / ifelse(sd_val > 0, sd_val, 1)
+      out$Mean <- m_val; out$SD <- sd_val
+      out$Skewness <- mean(z^3); out$Kurtosis <- mean(z^4) - 3
+    }
+    out
+  })
+  do.call(rbind, rows)
+}
+
+# Cronbach's alpha, composite reliability (CR) and AVE per latent construct.
+compute_latent_reliability <- function(fit, df_proc) {
+  lv_vars <- lavaan::lavNames(fit, "lv")
+  if (!length(lv_vars)) return(NULL)
+  pe_std <- tryCatch(lavaan::parameterEstimates(fit, standardized = TRUE), error = function(e) NULL)
+  if (is.null(pe_std)) return(NULL)
+  rows <- lapply(lv_vars, function(lv) {
+    meas_sub   <- pe_std[pe_std$lhs == lv & pe_std$op == "=~", ]
+    indicators <- meas_sub$rhs
+    k <- length(indicators)
+    loadings <- meas_sub$std.all
+    loadings <- loadings[!is.na(loadings)]
+
+    alpha_val <- NA_real_
+    if (k >= 2 && all(indicators %in% names(df_proc))) {
+      ind_df <- na.omit(df_proc[, indicators, drop = FALSE])
+      if (nrow(ind_df) > 2) {
+        cov_mat   <- cov(ind_df)
+        var_sum   <- sum(diag(cov_mat))
+        total_var <- sum(cov_mat)
+        if (total_var > 0 && var_sum > 0) alpha_val <- (k / (k - 1)) * (1 - (var_sum / total_var))
+      }
+    }
+    cr_val <- NA_real_
+    ave_val <- NA_real_
+    if (length(loadings) > 0) {
+      sum_lambda    <- sum(loadings)
+      sum_lambda_sq <- sum(loadings^2)
+      sum_theta     <- sum(1 - loadings^2)
+      if ((sum_lambda^2 + sum_theta) > 0) cr_val <- (sum_lambda^2) / (sum_lambda^2 + sum_theta)
+      if ((sum_lambda_sq + sum_theta) > 0) ave_val <- sum_lambda_sq / (sum_lambda_sq + sum_theta)
+    }
+    data.frame(Latent = lv, Indicators = paste(indicators, collapse = ", "), Count = k,
+               Alpha = alpha_val, CR = cr_val, AVE = ave_val, stringsAsFactors = FALSE)
+  })
+  do.call(rbind, rows)
+}
+
 # ---- Candidate comparability helpers ----------------------------------------
 # A candidate is the baseline syntax with some structural paths removed and is estimated with exactly
 # the same lavaan call as the main model (run_lavaan_sem), so the same path diagram always gives the
@@ -933,62 +1169,269 @@ ui <- fluidPage(
       })();
 
       // Standalone client-side diagram export helpers
-      window.downloadSemDiagramSvg = function() {
+      // The on-screen SVG is sized 100% x 100% to fit its container; exports need absolute pixel sizes
+      // (a percentage size cannot be drawn to a canvas in every browser), so a clone is sized from its viewBox.
+      window.structuraDiagramSvg = function() {
         var container = document.getElementById('sem_plot_container');
-        if (!container) return;
-        var svg = container.querySelector('svg');
-        if (!svg) {
-          alert('No path diagram available to export. Please run and fit a model first.');
-          return;
-        }
-        var svgData = new XMLSerializer().serializeToString(svg);
-        var blob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+        var svg = container ? container.querySelector('svg') : null;
+        if (!svg) return null;
+        var vb = svg.viewBox && svg.viewBox.baseVal;
+        var width = (vb && vb.width > 0) ? vb.width : (svg.clientWidth || 800);
+        var height = (vb && vb.height > 0) ? vb.height : (svg.clientHeight || 600);
+        var clone = svg.cloneNode(true);
+        clone.setAttribute('width', width + 'px');
+        clone.setAttribute('height', height + 'px');
+        if (!clone.getAttribute('xmlns')) clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        return { text: new XMLSerializer().serializeToString(clone), width: width, height: height };
+      };
+
+      // Renders the diagram to a PNG Blob (white background). The scale is reduced for very large diagrams
+      // so the canvas stays below ~16 million pixels.
+      window.structuraDiagramPng = function(scale) {
+        return new Promise(function(resolve, reject) {
+          var d = window.structuraDiagramSvg();
+          if (!d) { reject(new Error('No path diagram available.')); return; }
+          scale = scale || 2;
+          var maxPixels = 16000000;
+          if (d.width * d.height * scale * scale > maxPixels) scale = Math.sqrt(maxPixels / (d.width * d.height));
+          var url = URL.createObjectURL(new Blob([d.text], { type: 'image/svg+xml;charset=utf-8' }));
+          var img = new Image();
+          img.onload = function() {
+            try {
+              var canvas = document.createElement('canvas');
+              canvas.width = Math.max(1, Math.round(d.width * scale));
+              canvas.height = Math.max(1, Math.round(d.height * scale));
+              var ctx = canvas.getContext('2d');
+              ctx.fillStyle = '#ffffff';
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              URL.revokeObjectURL(url);
+              canvas.toBlob(function(b) { b ? resolve(b) : reject(new Error('PNG encoding failed.')); }, 'image/png');
+            } catch (err) { URL.revokeObjectURL(url); reject(err); }
+          };
+          img.onerror = function() { URL.revokeObjectURL(url); reject(new Error('The diagram could not be rendered to an image.')); };
+          img.src = url;
+        });
+      };
+
+      window.structuraSaveBlob = function(blob, filename) {
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a');
         a.href = url;
-        a.download = 'structura2_path_diagram.svg';
+        a.download = filename;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        setTimeout(function() { URL.revokeObjectURL(url); }, 2000);
       };
 
-      window.downloadSemDiagramPng = function(scale) {
-        scale = scale || 2;
-        var container = document.getElementById('sem_plot_container');
-        if (!container) return;
-        var svg = container.querySelector('svg');
-        if (!svg) {
+      window.downloadSemDiagramSvg = function() {
+        var d = window.structuraDiagramSvg();
+        if (!d) {
           alert('No path diagram available to export. Please run and fit a model first.');
           return;
         }
-        var svgData = new XMLSerializer().serializeToString(svg);
-        var svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
-        var url = URL.createObjectURL(svgBlob);
-        var img = new Image();
-        img.onload = function() {
-          var bbox = svg.viewBox.baseVal;
-          var width = (bbox && bbox.width > 0) ? bbox.width : (svg.clientWidth || 800);
-          var height = (bbox && bbox.height > 0) ? bbox.height : (svg.clientHeight || 600);
-          var canvas = document.createElement('canvas');
-          canvas.width = width * scale;
-          canvas.height = height * scale;
-          var ctx = canvas.getContext('2d');
-          ctx.fillStyle = '#ffffff';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          URL.revokeObjectURL(url);
-          var a = document.createElement('a');
-          a.href = canvas.toDataURL('image/png');
-          a.download = 'structura2_path_diagram.png';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-        };
-        img.src = url;
+        window.structuraSaveBlob(new Blob([d.text], { type: 'image/svg+xml;charset=utf-8' }), 'structura2_path_diagram.svg');
       };
 
+      window.downloadSemDiagramPng = function(scale) {
+        if (!window.structuraDiagramSvg()) {
+          alert('No path diagram available to export. Please run and fit a model first.');
+          return;
+        }
+        window.structuraDiagramPng(scale || 2).then(function(blob) {
+          window.structuraSaveBlob(blob, 'structura2_path_diagram.png');
+        }).catch(function(err) {
+          alert('Could not export the PNG: ' + err.message);
+        });
+      };
+
+      // Local timestamp for file names, e.g. 20261004_153012 (taken in the browser: WebR runs in UTC)
+      window.structuraStamp = function() {
+        var d = new Date();
+        var p = function(n) { return (n < 10 ? '0' : '') + n; };
+        return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '_' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+      };
+      window.structuraSafeName = function(s) {
+        var t = String(s || '').replace(/[\\\\/:*?\"<>|\\s]+/g, '_').replace(/^_+|_+$/g, '');
+        return t.length ? t.slice(0, 60) : 'model';
+      };
+
+      // Minimal ZIP writer (STORE method = no compression; all payloads here are small text/PNG files).
+      // entries: [{name: string, data: Uint8Array}]
+      window.structuraBuildZip = function(entries) {
+        var table = window.__structuraCrcTable;
+        if (!table) {
+          table = window.__structuraCrcTable = new Uint32Array(256);
+          for (var n = 0; n < 256; n++) {
+            var c = n;
+            for (var k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+            table[n] = c >>> 0;
+          }
+        }
+        var crc32 = function(buf) {
+          var c = 0xFFFFFFFF;
+          for (var i = 0; i < buf.length; i++) c = table[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+          return (c ^ 0xFFFFFFFF) >>> 0;
+        };
+        var enc = new TextEncoder();
+        var now = new Date();
+        var dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+        var dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+        var parts = [], central = [], offset = 0;
+        entries.forEach(function(e) {
+          var name = enc.encode(e.name);
+          var crc = crc32(e.data);
+          var local = new DataView(new ArrayBuffer(30));
+          local.setUint32(0, 0x04034b50, true); local.setUint16(4, 20, true); local.setUint16(6, 0x0800, true);
+          local.setUint16(8, 0, true); local.setUint16(10, dosTime, true); local.setUint16(12, dosDate, true);
+          local.setUint32(14, crc, true); local.setUint32(18, e.data.length, true); local.setUint32(22, e.data.length, true);
+          local.setUint16(26, name.length, true); local.setUint16(28, 0, true);
+          parts.push(new Uint8Array(local.buffer), name, e.data);
+          var cd = new DataView(new ArrayBuffer(46));
+          cd.setUint32(0, 0x02014b50, true); cd.setUint16(4, 20, true); cd.setUint16(6, 20, true); cd.setUint16(8, 0x0800, true);
+          cd.setUint16(10, 0, true); cd.setUint16(12, dosTime, true); cd.setUint16(14, dosDate, true);
+          cd.setUint32(16, crc, true); cd.setUint32(20, e.data.length, true); cd.setUint32(24, e.data.length, true);
+          cd.setUint16(28, name.length, true); cd.setUint32(42, offset, true);
+          central.push(new Uint8Array(cd.buffer), name);
+          offset += 30 + name.length + e.data.length;
+        });
+        var cdSize = central.reduce(function(s, p) { return s + p.length; }, 0);
+        var end = new DataView(new ArrayBuffer(22));
+        end.setUint32(0, 0x06054b50, true); end.setUint16(8, entries.length, true); end.setUint16(10, entries.length, true);
+        end.setUint32(12, cdSize, true); end.setUint32(16, offset, true);
+        return new Blob(parts.concat(central, [new Uint8Array(end.buffer)]), { type: 'application/zip' });
+      };
+
+      // Browser-side model store (localStorage). Everything is wrapped in try/catch: storage can be missing
+      // or blocked (private windows, site-data settings), and the app must keep working without it.
+      window.structuraStore = (function() {
+        var KEY = 'structura2.models.v1';
+        var MAX_MODELS = 20;
+        function read() {
+          try {
+            var t = window.localStorage.getItem(KEY);
+            var o = t ? JSON.parse(t) : {};
+            return { autosave: o.autosave || null, models: o.models || {} };
+          } catch (e) { return null; }
+        }
+        function write(o) {
+          try { window.localStorage.setItem(KEY, JSON.stringify(o)); return true; } catch (e) { return false; }
+        }
+        function label(spec) {
+          if (!spec) return '';
+          var dn = (spec.data && spec.data.name) ? spec.data.name : 'unknown data';
+          return dn + (spec.saved_at ? ' (' + spec.saved_at + ')' : '');
+        }
+        function publish(extra) {
+          if (!window.Shiny || !Shiny.setInputValue) return;
+          var o = read();
+          var info = o === null
+            ? { available: false, names: [], autosave_label: '', autosave_columns: [] }
+            : { available: true, names: Object.keys(o.models).sort(),
+                autosave_label: label(o.autosave),
+                autosave_columns: (o.autosave && o.autosave.data && o.autosave.data.columns) ? o.autosave.data.columns : [] };
+          if (extra) Object.keys(extra).forEach(function(k) { info[k] = extra[k]; });
+          Shiny.setInputValue('stored_models', JSON.stringify(info), { priority: 'event' });
+        }
+        function respond(spec, source) {
+          Shiny.setInputValue('restore_spec_json', { nonce: Date.now(), source: source, json: JSON.stringify(spec) }, { priority: 'event' });
+        }
+        function handle(msg) {
+          var o = read();
+          if (o === null) { publish({ error: 'Browser storage is unavailable.' }); return; }
+          var stamp = new Date().toLocaleString();
+          if (msg.op === 'autosave') {
+            var s = JSON.parse(msg.json); s.saved_at = stamp; o.autosave = s;
+            if (!write(o)) publish({ error: 'Could not write to browser storage (it may be full or blocked).' }); else publish();
+          } else if (msg.op === 'save') {
+            var m = JSON.parse(msg.json); m.name = msg.name; m.saved_at = stamp;
+            if (!(msg.name in o.models) && Object.keys(o.models).length >= MAX_MODELS) {
+              publish({ error: 'At most ' + MAX_MODELS + ' models can be kept. Delete one first, or use Export JSON.' }); return;
+            }
+            o.models[msg.name] = m;
+            if (!write(o)) publish({ error: 'Could not write to browser storage (it may be full or blocked).' }); else publish({ notice: 'Saved \"' + msg.name + '\".', saved_name: msg.name });
+          } else if (msg.op === 'delete') {
+            delete o.models[msg.name];
+            write(o); publish({ notice: 'Deleted \"' + msg.name + '\".' });
+          } else if (msg.op === 'get') {
+            var spec = msg.kind === 'autosave' ? o.autosave : o.models[msg.name];
+            if (!spec) publish({ error: 'That saved model was not found in this browser.' });
+            else respond(spec, msg.kind === 'autosave' ? 'autosave' : msg.name);
+          }
+        }
+        return { handle: handle, publish: publish };
+      })();
+
+      // Imported JSON model file -> R (the file input is reset so the same file can be imported again)
+      $(document).on('change', '#model_import_file', function(e) {
+        var file = e.target.files[0];
+        if (!file) return;
+        var reader = new FileReader();
+        reader.onload = function(evt) {
+          Shiny.setInputValue('model_import_json', { nonce: Date.now(), name: file.name, text: evt.target.result }, { priority: 'event' });
+          e.target.value = '';
+        };
+        reader.onerror = function() {
+          Shiny.setInputValue('model_import_json', { nonce: Date.now(), name: file.name, text: '' }, { priority: 'event' });
+          e.target.value = '';
+        };
+        reader.readAsText(file, 'utf-8');
+      });
+
       $(document).on('shiny:connected', function() {
+
+        var notifyR = function(type, msg) {
+          Shiny.setInputValue('client_notice', { nonce: Date.now(), type: type, msg: msg }, { priority: 'event' });
+        };
+
+        // Browser model store bridge (see structuraStore) and first status report
+        Shiny.addCustomMessageHandler('structura_store', function(msg) {
+          try { window.structuraStore.handle(msg); } catch (err) { notifyR('error', 'Model storage failed: ' + err.message); }
+        });
+        window.structuraStore.publish();
+
+        // Generic text download (model JSON)
+        Shiny.addCustomMessageHandler('structura_download_text', function(msg) {
+          try {
+            var name = msg.stem + (msg.label ? '_' + window.structuraSafeName(msg.label) : '') +
+                       (msg.stamp ? '_' + window.structuraStamp() : '') + '.' + msg.ext;
+            window.structuraSaveBlob(new Blob([msg.text], { type: msg.mime || 'text/plain;charset=utf-8' }), name);
+          } catch (err) { notifyR('error', 'Download failed: ' + err.message); }
+        });
+
+        // Results ZIP: text files come from R; the path diagram (SVG + PNG) is taken from the page
+        Shiny.addCustomMessageHandler('structura_build_zip', function(msg) {
+          var enc = new TextEncoder();
+          var entries = (msg.files || []).map(function(f) {
+            var body = enc.encode(f.text);
+            if (f.name.slice(-4).toLowerCase() === '.csv') {
+              // UTF-8 BOM so that Excel reads non-ASCII (e.g. Japanese) headers correctly
+              var withBom = new Uint8Array(body.length + 3);
+              withBom.set([0xEF, 0xBB, 0xBF], 0); withBom.set(body, 3);
+              body = withBom;
+            }
+            return { name: f.name, data: body };
+          });
+          var finish = function(note) {
+            try {
+              var blob = window.structuraBuildZip(entries);
+              window.structuraSaveBlob(blob, 'structura2_results_' + window.structuraStamp() + '.zip');
+              notifyR(note ? 'warning' : 'message', note || ('Results ZIP created (' + entries.length + ' files).'));
+            } catch (err) { notifyR('error', 'Could not create the ZIP file: ' + err.message); }
+          };
+          var svg = window.structuraDiagramSvg();
+          if (!svg) { finish('Results ZIP created without the path diagram (no diagram is displayed).'); return; }
+          entries.push({ name: 'path_diagram.svg', data: enc.encode(svg.text) });
+          window.structuraDiagramPng(2).then(function(blob) {
+            return blob.arrayBuffer();
+          }).then(function(buf) {
+            entries.push({ name: 'path_diagram.png', data: new Uint8Array(buf) });
+            finish(null);
+          }).catch(function(err) {
+            finish('Results ZIP created without the PNG diagram (' + err.message + '); the SVG is included.');
+          });
+        });
 
         // Printable PDF Report Assembly & Trigger
         Shiny.addCustomMessageHandler('prepare_and_print_pdf_report', function(msg) {
@@ -1320,7 +1763,7 @@ ui <- fluidPage(
           img(src = "logo.png", height = 40,
               title = "Structural Insights, Simplified")),
 
-  tabsetPanel(
+  tabsetPanel(id = "main_tabs",
 
     # ---------------- Data tab -----------------------------------
     tabPanel("Data", h4("Uploaded Data"), DTOutput("datatable")),
@@ -1368,8 +1811,40 @@ ui <- fluidPage(
                                           class = "btn btn-info")
                            ),
                            actionButton("export_pdf_btn", "Export PDF Report",
+                                         class = "btn btn-default"),
+                           actionButton("export_zip_btn", "Download Results (ZIP)",
                                          class = "btn btn-default")
                        ),
+                      # ---- Saved Models (browser storage + JSON) --------------
+                      tags$details(
+                        style = "margin-bottom: 10px; border: 1px solid #ddd; padding: 8px 10px; border-radius: 4px; background-color: #fafafa;",
+                        tags$summary(style = "font-weight: 600; cursor: pointer;", "Saved Models"),
+                        div(style = "margin-top: 8px;",
+                            uiOutput("saved_models_status"),
+                            div(style = "display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap;",
+                                div(style = "width: 220px;",
+                                    textInput("save_model_name", "Save current model as:", placeholder = "e.g. 3-factor CFA")),
+                                actionButton("save_model_btn", "Save", class = "btn btn-primary btn-sm",
+                                             style = "margin-bottom: 15px;")),
+                            div(style = "display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap;",
+                                div(style = "width: 220px;",
+                                    selectInput("saved_model_select", "Saved models in this browser:", choices = character(0))),
+                                actionButton("load_model_btn", "Load", class = "btn btn-default btn-sm",
+                                             style = "margin-bottom: 15px;"),
+                                actionButton("delete_model_btn", "Delete", class = "btn btn-default btn-sm",
+                                             style = "margin-bottom: 15px;")),
+                            div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
+                                actionButton("export_model_json_btn", "Export JSON", class = "btn btn-default btn-sm"),
+                                actionButton("import_model_json_btn", "Import JSON", class = "btn btn-default btn-sm",
+                                             onclick = "document.getElementById('model_import_file').click();"),
+                                tags$input(id = "model_import_file", type = "file", accept = ".json,application/json",
+                                           style = "display: none;")),
+                            tags$p(style = "font-size: 11px; color: #666; margin: 8px 0 0 0;",
+                                   "Models are saved by variable names only (never data values) in this browser's storage. ",
+                                   "Storage can be cleared by the browser (private windows, site-data cleanup), so use ",
+                                   tags$b("Export JSON"), " for a durable backup.")
+                        )
+                      ),
                       shinyjs::hidden(
                         div(id = "latent_error_box",
                             class = "alert alert-danger",
@@ -1581,6 +2056,7 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   data <- reactiveVal(NULL)
+  data_label <- reactiveVal("")   # file name or demo dataset name; stored in model specs for reference only
 
   observeEvent(input$datafile_utf8, {
     req(input$datafile_utf8)
@@ -1598,6 +2074,7 @@ server <- function(input, output, session) {
       if (!any(vapply(df, is.numeric, logical(1)))) {
         stop("The loaded dataset has no numeric columns. Check the delimiter and that the file is a CSV with numeric variables.")
       }
+      data_label(as.character(input$datafile_utf8$name %||% ""))
       data(df)
       updateRadioButtons(session, "sample_ds", selected = "None")
       removeModal()
@@ -1619,6 +2096,7 @@ server <- function(input, output, session) {
                  "Demo.growth"           = Demo.growth,
                  "Demo.twolevel"         = Demo.twolevel,
                  "FacialBurns"           = FacialBurns)
+    data_label(input$sample_ds)
     data(ds)
     removeModal()
   })
@@ -1650,6 +2128,8 @@ server <- function(input, output, session) {
     checkboxGroupInput("log_columns", "Log-transform columns (log10):",
                        choices = valid, inline = TRUE)
   })
+  # Rendered even while the Filtered tab is hidden, so a model restore can set the selection
+  outputOptions(output, "log_transform_ui", suspendWhenHidden = FALSE)
 
   # Column-name shape (log10 renames / one-hot dummy names) computed from the full,
   # unfiltered dataset. Kept independent of input$datatable_rows_all so UI elements that
@@ -2260,6 +2740,30 @@ server <- function(input, output, session) {
 
   # ---------- Fit model safely (eventReactive) -------------------
 
+  # Analysis settings that belong to a model spec (read under isolate by callers)
+  current_settings <- function() {
+    list(
+      analysis_mode        = input$analysis_mode %||% "std",
+      missing_method       = input$missing_method %||% "listwise",
+      log_columns          = as.list(as_chr(input$log_columns)),
+      display_columns      = as.list(as_chr(input$display_columns)),
+      layout_style         = input$layout_style %||% "dot_LR",
+      diagram_std          = isTRUE(input$diagram_std),
+      show_suggested_paths = isTRUE(input$show_suggested_paths),
+      mi_threshold         = input$mi_threshold %||% 6.63,
+      epc_threshold        = input$epc_threshold %||% 0.1
+    )
+  }
+
+  # Spec of the model currently defined in the tables (used at fit time and for named saves)
+  make_model_spec <- function(df_used, name = "") {
+    meas <- if (!is.null(input$input_table)) hot_to_r(input$input_table) else input_table_data()
+    build_model_spec(
+      meas, struct_table_data(), input$extra_eq, current_settings(),
+      list(name = data_label(), columns = names(data()), nrow_used = nrow(df_used)),
+      name = name)
+  }
+
   fit_model_safe <- eventReactive(input$run_model, {
     ln <- isolate(lavaan_model_str())
     if (length(ln) == 0) {
@@ -2278,7 +2782,9 @@ server <- function(input, output, session) {
       needs_meanstructure <- (input$analysis_mode == "raw" || 
                               input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
 
-      fm <- run_lavaan_sem(paste(ln, collapse = "\n"), processed_data(),
+      snapshot_error <- NULL
+      df_fit <- processed_data()
+      fm <- run_lavaan_sem(paste(ln, collapse = "\n"), df_fit,
                            input$missing_method, needs_meanstructure)
 
       converged <- isTRUE(lavInspect(fm, "converged"))
@@ -2305,7 +2811,15 @@ server <- function(input, output, session) {
            pe_std = pe_std,
            pe_raw = pe_raw,
            fit_measures = fit_meas,
-           equations = eqs)
+           equations = eqs,
+           # Data and model spec as they were at fit time: autosave, ZIP and PDF describe this fit,
+           # not whatever the inputs say when the export button is pressed
+           fit_data = df_fit,
+           snapshot = if (converged) tryCatch(make_model_spec(df_fit), error = function(e) {
+             snapshot_error <<- conditionMessage(e)
+             NULL
+           }) else NULL,
+           snapshot_error = snapshot_error)
     }, error = function(e) {
       # Enhanced error message with specific diagnosis
       error_msg <- conditionMessage(e)
@@ -2471,7 +2985,7 @@ server <- function(input, output, session) {
     }, error = function(e) {
       validate(need(FALSE, paste("Error rendering parameter estimates table:", e$message)))
     })
-  })
+  }, server = FALSE)  # client-side table: the Copy / CSV buttons then export every row, not only the visible page
 
   # ----------------- Path diagram server observer ---------------
   observe({
@@ -2586,34 +3100,17 @@ server <- function(input, output, session) {
         "</tr></tbody></table>"
       )
 
+      # The report describes the model as it was fitted (data and settings captured at fit time)
+      df_fit <- model_res$fit_data %||% processed_data()
+
       # Build Variable Summary Statistics Table
       var_stats_html <- tryCatch({
-        df_proc <- processed_data()
-        ov_vars <- lavaan::lavNames(fit, "ov")
-        ov_vars <- intersect(ov_vars, names(df_proc))
-        if (length(ov_vars) > 0) {
-          rows <- vapply(ov_vars, function(v) {
-            x <- df_proc[[v]]
-            x_valid <- x[!is.na(x) & is.numeric(x)]
-            n_total <- length(x)
-            n_valid <- length(x_valid)
-            n_miss <- n_total - n_valid
-            pct_miss <- if (n_total > 0) (n_miss / n_total) * 100 else 0
-            
-            if (n_valid > 1) {
-              m_val <- mean(x_valid)
-              sd_val <- sd(x_valid)
-              z <- (x_valid - m_val) / ifelse(sd_val > 0, sd_val, 1)
-              skew_val <- mean(z^3)
-              kurt_val <- mean(z^4) - 3
-              sprintf("<tr><td><b>%s</b></td><td style='text-align:right;'>%d</td><td style='text-align:right;'>%d (%.1f%%)</td><td style='text-align:right;'>%.3f</td><td style='text-align:right;'>%.3f</td><td style='text-align:right;'>%.3f</td><td style='text-align:right;'>%.3f</td></tr>",
-                      htmltools::htmlEscape(v), n_valid, n_miss, pct_miss, m_val, sd_val, skew_val, kurt_val)
-            } else {
-              sprintf("<tr><td><b>%s</b></td><td style='text-align:right;'>%d</td><td style='text-align:right;'>%d (%.1f%%)</td><td style='text-align:right;'>-</td><td style='text-align:right;'>-</td><td style='text-align:right;'>-</td><td style='text-align:right;'>-</td></tr>",
-                      htmltools::htmlEscape(v), n_valid, n_miss, pct_miss)
-            }
-          }, character(1))
-          
+        vs <- compute_var_stats(fit, df_fit)
+        if (!is.null(vs) && nrow(vs) > 0) {
+          num_cell <- function(x) ifelse(is.na(x), "-", sprintf("%.3f", x))
+          rows <- sprintf("<tr><td><b>%s</b></td><td style='text-align:right;'>%d</td><td style='text-align:right;'>%d (%.1f%%)</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td></tr>",
+                          htmltools::htmlEscape(vs$Variable), as.integer(vs$ValidN), as.integer(vs$MissingN), vs$MissingPct,
+                          num_cell(vs$Mean), num_cell(vs$SD), num_cell(vs$Skewness), num_cell(vs$Kurtosis))
           paste0(
             "<table class='print-table'>",
             "<thead><tr><th>Variable</th><th style='text-align:right;'>Valid N</th><th style='text-align:right;'>Missing N (%)</th><th style='text-align:right;'>Mean</th><th style='text-align:right;'>Std.Dev</th><th style='text-align:right;'>Skewness</th><th style='text-align:right;'>Kurtosis</th></tr></thead>",
@@ -2624,62 +3121,17 @@ server <- function(input, output, session) {
 
       # Build Latent Variable Reliability & Validity Table
       latent_rel_html <- tryCatch({
-        lv_vars <- lavaan::lavNames(fit, "lv")
-        if (length(lv_vars) > 0) {
-          pe_std <- tryCatch(lavaan::parameterEstimates(fit, standardized = TRUE), error = function(e) NULL)
-          df_proc <- processed_data()
-          
-          if (!is.null(pe_std)) {
-            lv_rows <- vapply(lv_vars, function(lv) {
-              meas_sub <- pe_std[pe_std$lhs == lv & pe_std$op == "=~", ]
-              indicators <- meas_sub$rhs
-              k <- length(indicators)
-              
-              loadings <- meas_sub$std.all
-              loadings <- loadings[!is.na(loadings)]
-              
-              alpha_str <- "-"
-              if (length(indicators) >= 2 && all(indicators %in% names(df_proc))) {
-                ind_df <- na.omit(df_proc[, indicators, drop = FALSE])
-                if (nrow(ind_df) > 2) {
-                  cov_mat <- cov(ind_df)
-                  var_sum <- sum(diag(cov_mat))
-                  total_var <- sum(cov_mat)
-                  if (total_var > 0 && var_sum > 0) {
-                    alpha_val <- (k / (k - 1)) * (1 - (var_sum / total_var))
-                    alpha_str <- sprintf("%.3f", alpha_val)
-                  }
-                }
-              }
-              
-              cr_str <- "-"
-              ave_str <- "-"
-              if (length(loadings) > 0) {
-                sum_lambda <- sum(loadings)
-                sum_lambda_sq <- sum(loadings^2)
-                sum_theta <- sum(1 - loadings^2)
-                
-                if ((sum_lambda^2 + sum_theta) > 0) {
-                  cr_val <- (sum_lambda^2) / (sum_lambda^2 + sum_theta)
-                  cr_str <- sprintf("%.3f", cr_val)
-                }
-                if ((sum_lambda_sq + sum_theta) > 0) {
-                  ave_val <- sum_lambda_sq / (sum_lambda_sq + sum_theta)
-                  ave_str <- sprintf("%.3f", ave_val)
-                }
-              }
-              
-              ind_list_str <- paste(indicators, collapse = ", ")
-              sprintf("<tr><td><b>%s</b></td><td>%s</td><td style='text-align:right;'>%d</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td></tr>",
-                      htmltools::htmlEscape(lv), htmltools::htmlEscape(ind_list_str), k, alpha_str, cr_str, ave_str)
-            }, character(1))
-            
-            paste0(
-              "<table class='print-table'>",
-              "<thead><tr><th>Latent Construct</th><th>Indicators</th><th style='text-align:right;'>Count</th><th style='text-align:right;'>Cronbach's &alpha;</th><th style='text-align:right;'>CR (Composite Reliability)</th><th style='text-align:right;'>AVE (Average Variance Extracted)</th></tr></thead>",
-              "<tbody>", paste(lv_rows, collapse = ""), "</tbody></table>"
-            )
-          } else ""
+        rel <- compute_latent_reliability(fit, df_fit)
+        if (!is.null(rel) && nrow(rel) > 0) {
+          num_cell <- function(x) ifelse(is.na(x), "-", sprintf("%.3f", x))
+          lv_rows <- sprintf("<tr><td><b>%s</b></td><td>%s</td><td style='text-align:right;'>%d</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td></tr>",
+                             htmltools::htmlEscape(rel$Latent), htmltools::htmlEscape(rel$Indicators), as.integer(rel$Count),
+                             num_cell(rel$Alpha), num_cell(rel$CR), num_cell(rel$AVE))
+          paste0(
+            "<table class='print-table'>",
+            "<thead><tr><th>Latent Construct</th><th>Indicators</th><th style='text-align:right;'>Count</th><th style='text-align:right;'>Cronbach's &alpha;</th><th style='text-align:right;'>CR (Composite Reliability)</th><th style='text-align:right;'>AVE (Average Variance Extracted)</th></tr></thead>",
+            "<tbody>", paste(lv_rows, collapse = ""), "</tbody></table>"
+          )
         } else ""
       }, error = function(e) "")
 
@@ -2775,8 +3227,8 @@ server <- function(input, output, session) {
 
       payload <- list(
         timestamp            = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
-        analysis_mode        = if (input$analysis_mode == "std") "Standardized" else "Raw",
-        missing_method       = input$missing_method,
+        analysis_mode        = if (identical(model_res$snapshot$settings$analysis_mode %||% input$analysis_mode, "std")) "Standardized" else "Raw",
+        missing_method       = model_res$snapshot$settings$missing_method %||% input$missing_method,
         fit_table_html       = fit_html,
         var_stats_html       = var_stats_html,
         latent_rel_html      = latent_rel_html,
@@ -2792,6 +3244,414 @@ server <- function(input, output, session) {
         title = "Export Error",
         div(class = "alert alert-danger",
             paste("Failed to generate PDF report:", e$message)),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+    })
+  })
+
+  # ----------------- Saved Models, Restore & Results ZIP ----------------
+  # The model store lives in the browser (see structuraStore in the page script); R only asks it to put/get/delete
+  # and receives a summary through input$stored_models. Models travel as JSON strings (see build_model_spec).
+
+  store_info <- reactive({
+    empty <- list(loaded = FALSE, available = FALSE, names = character(0), autosave_label = "",
+                  autosave_columns = character(0))
+    txt <- input$stored_models
+    if (is.null(txt)) return(empty)
+    x <- tryCatch(jsonlite::fromJSON(txt, simplifyVector = FALSE), error = function(e) NULL)
+    if (is.null(x)) return(empty)
+    list(loaded = TRUE, available = isTRUE(x$available), names = as_chr(x$names),
+         autosave_label = as.character((x$autosave_label %||% "")[1]),
+         autosave_columns = as_chr(x$autosave_columns),
+         error = x$error, notice = x$notice, saved_name = x$saved_name)
+  })
+
+  observeEvent(input$stored_models, {
+    info <- store_info()
+    sel <- if (!is.null(info$saved_name) && info$saved_name %in% info$names) info$saved_name else NULL
+    # An empty choice vector is not applied by updateSelectInput, so a blank placeholder stands in for "none saved"
+    updateSelectInput(session, "saved_model_select",
+                      choices = if (length(info$names)) info$names else c("(no saved models)" = ""),
+                      selected = sel)
+    if (!is.null(info$error)) {
+      showNotification(as.character(info$error), type = "error", duration = 8)
+    } else if (!is.null(info$notice)) {
+      showNotification(as.character(info$notice), type = "message", duration = 4)
+    }
+  })
+
+  output$saved_models_status <- renderUI({
+    info <- store_info()
+    if (!isTRUE(info$loaded)) return(NULL)
+    if (!isTRUE(info$available)) {
+      return(div(class = "alert alert-warning", style = "font-size: 12px; padding: 6px 10px; margin-bottom: 8px;",
+                 "Browser storage is unavailable here (private window or blocked site data). ",
+                 "Models cannot be kept in the browser; use Export JSON / Import JSON instead."))
+    }
+    if (nzchar(info$autosave_label)) {
+      div(style = "font-size: 12px; color: #555; margin-bottom: 8px;",
+          paste0("Last successful fit (autosaved): ", info$autosave_label, "  "),
+          actionLink("restore_autosave_link", "Restore it"))
+    } else {
+      div(style = "font-size: 12px; color: #555; margin-bottom: 8px;",
+          "The model is autosaved after every successful fit.")
+    }
+  })
+
+  observeEvent(input$save_model_btn, {
+    tryCatch({
+      nm <- trimws(input$save_model_name %||% "")
+      if (is.null(data())) {
+        showNotification("Load a dataset and define a model before saving.", type = "warning", duration = 5)
+        return()
+      }
+      if (!nzchar(nm)) {
+        showNotification("Enter a name for the model first.", type = "warning", duration = 5)
+        return()
+      }
+      spec <- make_model_spec(processed_data(), name = nm)
+      session$sendCustomMessage("structura_store", list(op = "save", name = nm, json = spec_to_json(spec)))
+    }, error = function(e) {
+      showNotification(paste("Could not save the model:", conditionMessage(e)), type = "error", duration = 8)
+    })
+  })
+
+  observeEvent(input$load_model_btn, {
+    nm <- input$saved_model_select %||% ""
+    if (!nzchar(nm)) {
+      showNotification("There is no saved model to load. Save one first.", type = "warning", duration = 5)
+      return()
+    }
+    session$sendCustomMessage("structura_store", list(op = "get", kind = "named", name = nm))
+  })
+
+  observeEvent(input$delete_model_btn, {
+    nm <- input$saved_model_select %||% ""
+    if (!nzchar(nm)) return()
+    session$sendCustomMessage("structura_store", list(op = "delete", name = nm))
+  })
+
+  observeEvent(input$export_model_json_btn, {
+    tryCatch({
+      if (is.null(data())) {
+        showNotification("Load a dataset and define a model before exporting.", type = "warning", duration = 5)
+        return()
+      }
+      nm <- trimws(input$save_model_name %||% "")
+      spec <- make_model_spec(processed_data(), name = nm)
+      session$sendCustomMessage("structura_download_text", list(
+        stem = "structura2_model", label = nm, ext = "json", stamp = TRUE,
+        mime = "application/json;charset=utf-8", text = spec_to_json(spec)))
+    }, error = function(e) {
+      showNotification(paste("Could not export the model:", conditionMessage(e)), type = "error", duration = 8)
+    })
+  })
+
+  observeEvent(input$model_import_json, {
+    x <- input$model_import_json
+    txt <- as.character(x$text %||% "")
+    if (!nzchar(txt)) {
+      showNotification("The selected file could not be read or is empty.", type = "error", duration = 8)
+      return()
+    }
+    parsed <- parse_model_spec_json(txt)
+    if (!isTRUE(parsed$ok)) {
+      showNotification(parsed$msg, type = "error", duration = 10)
+      return()
+    }
+    start_restore(parsed$spec)
+  })
+
+  observeEvent(input$restore_spec_json, {
+    x <- input$restore_spec_json
+    parsed <- parse_model_spec_json(as.character(x$json %||% ""))
+    if (!isTRUE(parsed$ok)) {
+      showNotification(parsed$msg, type = "error", duration = 10)
+      return()
+    }
+    start_restore(parsed$spec)
+  })
+
+  # Autosave: the spec captured at fit time of every successful fit.
+  # No ignoreInit here: before the first Run the fit reactive can sit in a silent "not ready" state, and with
+  # ignoreInit = TRUE the first real fit would then be swallowed as the "initial" value. The initial value is
+  # never ok, so nothing is saved by it anyway.
+  observeEvent(fit_model_safe(), {
+    res <- fit_model_safe()
+    if (!isTRUE(res$ok)) return()
+    tryCatch({
+      if (is.null(res$snapshot)) stop(res$snapshot_error %||% "the model definition could not be read")
+      session$sendCustomMessage("structura_store", list(op = "autosave", json = spec_to_json(res$snapshot)))
+    }, error = function(e) {
+      showNotification(paste("The model could not be autosaved:", conditionMessage(e)),
+                       type = "warning", duration = 8)
+    })
+  })
+
+  request_autosave_restore <- function() {
+    removeNotification("restore_offer", session = session)
+    session$sendCustomMessage("structura_store", list(op = "get", kind = "autosave"))
+  }
+  observeEvent(input$restore_autosave_link, request_autosave_restore())
+  observeEvent(input$restore_autosave_notif, request_autosave_restore())
+
+  # Offer to restore the autosaved model once, when a dataset with matching columns is loaded
+  offered_key <- reactiveVal("")
+  observe({
+    df <- data(); req(df)
+    info <- store_info()
+    req(isTRUE(info$loaded), isTRUE(info$available), nzchar(info$autosave_label))
+    key <- paste(data_label(), ncol(df), nrow(df), sep = "|")
+    if (identical(isolate(offered_key()), key)) return()
+    if (length(intersect(info$autosave_columns, names(df))) < 2) return()
+    offered_key(key)
+    showNotification(
+      ui = div("A model from a previous session is available (", info$autosave_label, "). ",
+               actionButton("restore_autosave_notif", "Restore it", class = "btn btn-primary btn-xs")),
+      id = "restore_offer", duration = 25, type = "message", session = session)
+  })
+
+  # ---- Staged restore ----
+  # Applying a spec is order-dependent: the log-transform selection changes the available columns, the displayed
+  # columns reshape the measurement table, and the structural matrix is rebuilt from the measurement table. Each
+  # stage therefore waits until the previous one has settled before the next piece is applied; if any stage does
+  # not settle in time the restore is abandoned with a message. The model is not fitted automatically.
+  restore_state <- reactiveVal(NULL)
+
+  # Columns that can be shown after the current log-transform selection (mirrors output$display_column_ui)
+  restore_display_choices <- function(logs) {
+    full <- processed_columns_full()
+    numeric_cols <- vapply(full, is.numeric, logical(1))
+    zero_var <- names(full)[numeric_cols][vapply(full[numeric_cols], function(x) {
+      v <- var(x, na.rm = TRUE); is.na(v) || v == 0
+    }, logical(1))]
+    available <- setdiff(names(full), zero_var)
+    numeric_orig <- names(data())[vapply(data(), is.numeric, logical(1))]
+    list(available = available,
+         default = intersect(c(numeric_orig, if (length(logs)) paste0("log_", logs) else NULL), available))
+  }
+
+  start_restore <- function(spec) {
+    if (is.null(data())) {
+      showNotification("Load a dataset first, then restore the model.", type = "warning", duration = 6)
+      return(invisible(FALSE))
+    }
+    tryCatch({
+      s <- spec$settings
+      df <- data()
+      nums <- names(df)[vapply(df, is.numeric, logical(1))]
+      loggable <- nums[vapply(df[nums], function(x) suppressWarnings(min(x, na.rm = TRUE)) > 0, logical(1))]
+      target_logs <- intersect(s$log_columns, loggable)
+      logs_changed <- !setequal(target_logs, as_chr(input$log_columns))
+      dropped <- setdiff(s$log_columns, target_logs)
+
+      restore_state(list(spec = spec, stage = if (logs_changed) "logs" else "display",
+                         target_logs = target_logs, logs_changed = logs_changed, dropped = dropped,
+                         t0 = Sys.time(), stage_t = Sys.time(), tries = 0L))
+      removeNotification("restore_offer", session = session)
+      showNotification("Restoring the model...", id = "restore_progress", duration = NULL,
+                       closeButton = FALSE, type = "message")
+      # Outputs of the Model tab only report their state while visible
+      updateTabsetPanel(session, "main_tabs", selected = "Model")
+
+      if (!is.null(s$analysis_mode))  updateRadioButtons(session, "analysis_mode", selected = s$analysis_mode)
+      if (!is.null(s$missing_method)) updateSelectInput(session, "missing_method", selected = s$missing_method)
+      if (!is.null(s$layout_style))   updateSelectInput(session, "layout_style", selected = s$layout_style)
+      if (!is.null(s$diagram_std))    updateCheckboxInput(session, "diagram_std", value = s$diagram_std)
+      if (!is.null(s$show_suggested_paths)) updateCheckboxInput(session, "show_suggested_paths", value = s$show_suggested_paths)
+      if (!is.null(s$mi_threshold))   updateNumericInput(session, "mi_threshold", value = s$mi_threshold)
+      if (!is.null(s$epc_threshold))  updateNumericInput(session, "epc_threshold", value = s$epc_threshold)
+      updateTextAreaInput(session, "extra_eq", value = spec$manual_equations)
+      if (logs_changed) updateCheckboxGroupInput(session, "log_columns", selected = target_logs)
+      invisible(TRUE)
+    }, error = function(e) {
+      restore_state(NULL)
+      removeNotification("restore_progress", session = session)
+      showNotification(paste("Could not restore the model:", conditionMessage(e)), type = "error", duration = 10)
+      invisible(FALSE)
+    })
+  }
+
+  observe({
+    st <- restore_state()
+    if (is.null(st)) return()
+    invalidateLater(250, session)
+
+    secs_in_stage <- as.numeric(difftime(Sys.time(), st$stage_t, units = "secs"))
+    go <- function(stage, ...) restore_state(modifyList(st, c(list(stage = stage, stage_t = Sys.time()), list(...))))
+    abort <- function(msg) {
+      restore_state(NULL)
+      removeNotification("restore_progress", session = session)
+      showNotification(msg, type = "error", duration = 12)
+    }
+
+    if (as.numeric(difftime(Sys.time(), st$t0, units = "secs")) > 25) {
+      return(abort("Restoring the model timed out. Reload the data and try again, or rebuild the model manually."))
+    }
+
+    tryCatch({
+      spec <- st$spec
+      if (st$stage == "logs") {
+        cur <- as_chr(input$log_columns)
+        if (setequal(cur, st$target_logs)) {
+          # The display-column list is re-rendered with a new default; wait for it (or give up waiting after 4 s)
+          expected <- restore_display_choices(st$target_logs)$default
+          if (setequal(as_chr(input$display_columns), expected) || secs_in_stage > 4) go("display")
+        }
+      } else if (st$stage == "display") {
+        ch <- restore_display_choices(st$target_logs)
+        wanted <- spec$settings$display_columns
+        target <- intersect(wanted, ch$available)
+        if (!length(target)) target <- as_chr(input$display_columns)
+        if (!setequal(as_chr(input$display_columns), target)) {
+          updateCheckboxGroupInput(session, "display_columns", selected = target)
+        }
+        go("display_wait", target_display = target, dropped = c(st$dropped, setdiff(wanted, ch$available)))
+      } else if (st$stage == "display_wait") {
+        tbl <- input_table_data()
+        tbl_cols <- if (is.null(tbl)) NULL else setdiff(colnames(tbl), c("Latent", "Indicator", "Operator"))
+        if (setequal(as_chr(input$display_columns), st$target_display) && setequal(tbl_cols, st$target_display)) {
+          go("meas")
+        } else if (secs_in_stage > 8) {
+          abort("Could not apply the column selection of the saved model. Reload the data and try again.")
+        }
+      } else if (st$stage == "meas") {
+        res <- spec_to_meas_table(spec, as_chr(input$display_columns), names(processed_data()))
+        input_table_data(res$table)
+        input_table_trigger(input_table_trigger() + 1)
+        go("meas_wait", meas_table = res$table, dropped = c(st$dropped, res$dropped))
+      } else if (st$stage == "meas_wait") {
+        echo <- if (!is.null(input$input_table)) tryCatch(hot_to_r(input$input_table), error = function(e) NULL) else NULL
+        if (!is.null(echo) && identical(as.character(echo$Latent), as.character(st$meas_table$Latent)) &&
+            identical(build_meas_lines(echo), build_meas_lines(st$meas_table))) {
+          go("struct")
+        } else if (secs_in_stage > 8) {
+          abort("Could not apply the measurement model of the saved model. Open the Model tab and try again.")
+        }
+      } else if (st$stage == "struct") {
+        items <- tryCatch(model_items(), error = function(e) NULL)
+        cur <- struct_table_data()
+        # Let the structural matrix finish rebuilding after the measurement change before overwriting it
+        if (!is.null(items) && !is.null(cur) && setequal(cur$Dependent, items) && secs_in_stage > 0.5) {
+          res <- spec_to_struct_table(spec, items)
+          struct_table_data(res$table)
+          struct_table_trigger(struct_table_trigger() + 1)
+          go("struct_wait", struct_key = make_struct_key(res$table),
+             dropped = if (st$tries == 0L) c(st$dropped, res$dropped) else st$dropped)
+        } else if (secs_in_stage > 8) {
+          abort("Could not apply the structural model of the saved model. Open the Model tab and try again.")
+        }
+      } else if (st$stage == "struct_wait") {
+        cur <- struct_table_data()
+        if (!is.null(cur) && identical(make_struct_key(cur), st$struct_key)) {
+          if (secs_in_stage > 0.8) {
+            restore_state(NULL)
+            removeNotification("restore_progress", session = session)
+            msg <- "Model restored. Click Run / Update Model to fit it."
+            skipped <- unique(st$dropped)
+            if (length(skipped)) {
+              msg <- paste0(msg, " Skipped because they are not in the current data: ",
+                            paste(head(skipped, 8), collapse = ", "), if (length(skipped) > 8) ", ..." else "", ".")
+            }
+            n_saved <- spec$data$nrow_used
+            n_now <- tryCatch(nrow(processed_data()), error = function(e) NA_integer_)
+            if (!is.na(n_saved) && !is.na(n_now) && n_saved > 0 && n_saved != n_now) {
+              msg <- paste0(msg, " Note: the saved model was fitted on ", n_saved, " rows; the current data has ", n_now, ".")
+            }
+            showNotification(msg, type = if (length(skipped)) "warning" else "message", duration = 12)
+          }
+        } else if (secs_in_stage > 3 && st$tries < 4L) {
+          # A stale update from the browser overwrote the matrix: apply it again
+          go("struct", tries = st$tries + 1L)
+        } else if (secs_in_stage > 8) {
+          abort("Could not apply the structural model of the saved model. Open the Model tab and try again.")
+        }
+      }
+    }, error = function(e) {
+      if (!inherits(e, "shiny.silent.error")) abort(paste("Could not restore the model:", conditionMessage(e)))
+    })
+  })
+
+  # Messages coming from client-side helpers (ZIP creation, ...)
+  observeEvent(input$client_notice, {
+    x <- input$client_notice
+    type <- as.character(x$type %||% "message")
+    if (!type %in% c("message", "warning", "error")) type <- "message"
+    showNotification(as.character(x$msg %||% ""), type = type, duration = if (type == "error") 10 else 6)
+  })
+
+  # ---- Results ZIP ----
+  observeEvent(input$export_zip_btn, {
+    # Before the first Run the fit reactive can still be in a silent "not ready" state, hence the tryCatch
+    model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
+    if (is.null(model_res) || !isTRUE(model_res$ok) || is.null(model_res$fit)) {
+      showModal(modalDialog(
+        title = "Export Warning",
+        div(class = "alert alert-warning",
+            "Please run and successfully fit a model before downloading the results."),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+      return()
+    }
+    tryCatch({
+      fit <- model_res$fit
+      df_fit <- model_res$fit_data %||% processed_data()
+      files <- list()
+      add <- function(name, text) files[[length(files) + 1]] <<- list(name = name, text = text)
+
+      pe <- tryCatch(lavaan::parameterEstimates(fit, standardized = TRUE),
+                     error = function(e) lavaan::parameterEstimates(fit))
+      add("parameter_estimates.csv", df_to_csv_text(pe))
+
+      fm <- tryCatch(lavaan::fitMeasures(fit), error = function(e) NULL)
+      if (!is.null(fm)) {
+        add("fit_measures.csv", df_to_csv_text(data.frame(measure = names(fm), value = as.numeric(fm),
+                                                          stringsAsFactors = FALSE)))
+      }
+      vs <- tryCatch(compute_var_stats(fit, df_fit), error = function(e) NULL)
+      if (!is.null(vs) && nrow(vs) > 0) add("variable_summary.csv", df_to_csv_text(vs))
+      rel <- tryCatch(compute_latent_reliability(fit, df_fit), error = function(e) NULL)
+      if (!is.null(rel) && nrow(rel) > 0) add("reliability.csv", df_to_csv_text(rel))
+      mi <- tryCatch(mi_table_data(), error = function(e) NULL)
+      if (!is.null(mi) && nrow(mi) > 0) add("modification_indices.csv", df_to_csv_text(mi))
+
+      add("model_syntax.txt", paste(model_res$syntax, collapse = "\n"))
+      if (!is.null(model_res$snapshot)) add("model.json", spec_to_json(model_res$snapshot))
+      summ <- tryCatch(paste(utils::capture.output(summary(fit, fit.measures = TRUE)), collapse = "\n"),
+                       error = function(e) paste("Summary unavailable:", conditionMessage(e)))
+      add("lavaan_summary.txt", summ)
+
+      st <- model_res$snapshot$settings
+      readme <- c(
+        "Structura2 results",
+        "==================",
+        paste0("Data: ", if (nzchar(data_label())) data_label() else "(unnamed)", "  (", nrow(df_fit), " rows used)"),
+        paste0("Analysis mode: ", st$analysis_mode %||% input$analysis_mode,
+               " | Missing data: ", st$missing_method %||% input$missing_method),
+        paste0("lavaan version: ", as.character(utils::packageVersion("lavaan"))),
+        "",
+        "Files",
+        "-----",
+        "parameter_estimates.csv   all parameter estimates (full precision, includes std.all)",
+        "fit_measures.csv          every fit measure reported by lavaan",
+        "variable_summary.csv      valid / missing counts, mean, SD, skewness, kurtosis",
+        "reliability.csv           Cronbach's alpha, CR, AVE per latent construct (if any)",
+        "modification_indices.csv  modification indices (if shown on the Model tab)",
+        "model_syntax.txt          lavaan model syntax",
+        "model.json                the model definition: Saved Models > Import JSON restores it",
+        "lavaan_summary.txt        lavaan summary() output",
+        "path_diagram.svg / .png   the path diagram as displayed (if available)"
+      )
+      add("README.txt", paste(readme, collapse = "\n"))
+
+      session$sendCustomMessage("structura_build_zip", list(files = files))
+    }, error = function(e) {
+      showModal(modalDialog(
+        title = "Export Error",
+        div(class = "alert alert-danger",
+            paste("Failed to prepare the results ZIP:", conditionMessage(e))),
         easyClose = TRUE,
         footer = modalButton("Dismiss")
       ))
