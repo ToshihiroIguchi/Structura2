@@ -3,7 +3,8 @@
 suppressMessages(library(lavaan))
 exprs <- parse("app.R")
 wanted <- c("struct_pred_cols", "build_struct_lines", "make_struct_key", "active_struct_vars",
-            "build_anchor_lines", "fit_is_proper", "candidate_score", "fit_candidate_model",
+            "run_lavaan_sem", "free_cov_pairs", "required_struct_vars", "candidate_structure_check",
+            "check_variable_isolation", "fit_is_proper", "candidate_score", "fit_candidate_model",
             "struct_descendants", "struct_dependents", "struct_edges", "fit_suggestion_model", "fit_cutoff_violations", "get_modification_suggestions", "get_suggested_structural_paths",
             "%||%")
 for (e in exprs) {
@@ -32,54 +33,84 @@ ok(identical(build_struct_lines(base_df), c("m ~ x1", "y ~ x2 + x3 + m")) ||
 ok(make_struct_key(mk(list())) == "EMPTY_PATH", "empty structure key")
 ok(make_struct_key(base_df) == make_struct_key(base_df[nrow(base_df):1, ]), "key independent of row order")
 
-# --- anchors keep the observed-variable set identical
-ctx <- list(data = d, missing_method = "listwise", needs_meanstructure = FALSE,
-            meas_lines = NULL, extra_lines = NULL, anchor_vars = active_struct_vars(base_df),
-            baseline_dvs = struct_dependents(base_df), baseline_edges = struct_edges(base_df), base_fit = NULL)
+# --- candidates are estimated exactly like the main model (same syntax, same options)
+# ctx for a baseline structure: the baseline fit defines the comparable variable set / covariances.
+mk_ctx <- function(dat, df, meas = NULL) {
+  c0 <- list(data = dat, missing_method = "listwise", needs_meanstructure = FALSE,
+             meas_lines = meas, extra_lines = NULL, base_fit = NULL)
+  b <- fit_candidate_model(df, c0)
+  c0$required_vars <- required_struct_vars(df, b)
+  c0$base_ov <- lavNames(b, "ov")
+  c0$base_cov_pairs <- free_cov_pairs(b)
+  c0
+}
+ctx <- mk_ctx(d, base_df)
 fit_base <- fit_candidate_model(base_df, ctx)
 cand_df <- mk(list(c("m", "x1"), c("y", "m")))   # x2 and x3 lose all paths
+main_style <- run_lavaan_sem(paste(build_struct_lines(cand_df), collapse = "\n"), d, "listwise", FALSE)
 fit_cand <- fit_candidate_model(cand_df, ctx)
-ok(setequal(lavNames(fit_cand, "ov"), lavNames(fit_base, "ov")), "candidate keeps baseline observed variables")
-ok(lavInspect(fit_cand, "nobs") == lavInspect(fit_base, "nobs"), "same N across candidates")
-ok(fitMeasures(fit_cand, "df") == fitMeasures(fit_base, "df") + 2,
-   "removing 2 paths adds exactly 2 df (candidate is nested in baseline; exogenous covariances stay free)")
-ok(fitMeasures(fit_cand, "chisq") >= fitMeasures(fit_base, "chisq") - 1e-6, "nested candidate cannot fit better in chisq")
-fit_noanchor <- sem(paste(build_struct_lines(cand_df), collapse = "\n"), data = d, fixed.x = FALSE)
-ok(!setequal(lavNames(fit_noanchor, "ov"), lavNames(fit_base, "ov")), "without anchors the variable set would differ (regression check)")
+ok(abs(AIC(fit_cand) - AIC(main_style)) < 1e-6 && abs(BIC(fit_cand) - BIC(main_style)) < 1e-6,
+   "candidate AIC/BIC equal the main-model fit of the same diagram (no extra syntax)")
+ok(identical(sort(names(coef(fit_cand))), sort(names(coef(main_style)))), "candidate has exactly the main model's parameters")
 
-# --- removing ALL incoming paths of a variable must remove the association (not turn it into a covariance)
-no_m_in <- mk(list(c("y", "m"), c("y", "x2"), c("y", "x3")))      # m loses m~x1; m still predicts y
-anch <- build_anchor_lines(no_m_in, active_struct_vars(base_df), struct_dependents(base_df))
-ok(any(grepl("^m ~~ 0[*]", anch)), "a variable that turned exogenous gets its covariances fixed to 0")
-fit_no_m_in <- fit_candidate_model(no_m_in, ctx)
-ok(AIC(fit_no_m_in) > AIC(fit_base) + 20, "dropping m ~ x1 is penalised (it is no longer disguised as a covariance)")
-exo_only <- build_anchor_lines(cand_df, active_struct_vars(base_df), struct_dependents(base_df))
-ok(any(grepl("^x2 ~~ x3$|^x2 ~~ x1$|^x3 ~~ x1$", exo_only)), "baseline-exogenous variables keep free covariances")
+# --- a variable that loses every path is detected (lavaan drops it, so AIC is not comparable)
+chk_drop <- candidate_structure_check(fit_cand, ctx)
+ok(!chk_drop$vars_ok, "a dropped variable (x2, x3 lost every path) is detected")
+ok(AIC(fit_cand) < AIC(fit_base) - 100, "documents why: the dropped-variable model looks spuriously better")
+ok(is.infinite(candidate_score(list(converged = TRUE, proper = TRUE, aic = 1, bic = 1, vars_ok = FALSE, replaced = FALSE), "AIC")),
+   "a candidate on a different variable set can never win")
+ok(!check_variable_isolation(cand_df, character(0), character(0), struct_pred_cols(cand_df), ctx$required_vars),
+   "required variables must keep a path")
+ok(check_variable_isolation(base_df, character(0), character(0), struct_pred_cols(base_df), ctx$required_vars),
+   "the baseline satisfies the required-variable rule")
+ok(setequal(ctx$required_vars, c("x1", "x2", "x3", "m", "y")), "every observed structural variable is required")
 
-# --- latent variables: an "empty" structural part must not stay equivalent to the saturated one
+# --- a model where every variable has several paths (saturated: 10 free parameters on 4 variables)
+rich_df  <- mk(list(c("m", "x1"), c("m", "x2"), c("y", "m"), c("y", "x1"), c("y", "x2")))
+rich_ctx <- mk_ctx(d, rich_df)
+fit_rich <- fit_candidate_model(rich_df, rich_ctx)
+
+# --- a clean reduction: one path removed, the variable set and covariances are unchanged
+one_df  <- mk(list(c("m", "x1"), c("m", "x2"), c("y", "m"), c("y", "x1")))      # only y ~ x2 removed
+fit_one <- fit_candidate_model(one_df, rich_ctx)
+chk_one <- candidate_structure_check(fit_one, rich_ctx)
+ok(chk_one$vars_ok && !chk_one$replaced, "removing y ~ x2 is a pure reduction")
+ok(fitMeasures(fit_one, "df") == fitMeasures(fit_rich, "df") + 1, "a pure reduction adds exactly 1 df")
+ok(fitMeasures(fit_one, "chisq") >= fitMeasures(fit_rich, "chisq") - 1e-6, "nested candidate cannot fit better in chisq")
+ok(check_variable_isolation(one_df, character(0), character(0), struct_pred_cols(one_df), rich_ctx$required_vars),
+   "removing y ~ x2 keeps every variable in the model")
+
+# --- lavaan frees a covariance instead of a removed path: detected, never optimal
+no_m_in <- mk(list(c("y", "m"), c("y", "x1"), c("y", "x2")))      # m loses both incoming paths and becomes exogenous
+fit_no_m_in <- fit_candidate_model(no_m_in, rich_ctx)
+chk_m <- candidate_structure_check(fit_no_m_in, rich_ctx)
+ok(chk_m$vars_ok && chk_m$replaced && all(c("m ~~ x1", "m ~~ x2") %in% chk_m$added_covs),
+   "m loses all incoming paths -> lavaan frees m ~~ x1 and m ~~ x2 instead (detected)")
+ok(abs(AIC(fit_no_m_in) - AIC(fit_rich)) < 1e-6, "the replaced model is likelihood-equivalent to the baseline (nothing was removed)")
+ok(is.infinite(candidate_score(list(converged = TRUE, proper = TRUE, aic = 1, bic = 1, vars_ok = TRUE, replaced = TRUE), "AIC")),
+   "a replaced candidate can never win")
+
+no_ym <- mk(list(c("m", "x1"), c("m", "x2"), c("y", "x1"), c("y", "x2")))      # y ~ m removed, both stay dependent
+chk_ym <- candidate_structure_check(fit_candidate_model(no_ym, rich_ctx), rich_ctx)
+ok(chk_ym$vars_ok && chk_ym$replaced && "m ~~ y" %in% chk_ym$added_covs,
+   "y ~ m removed between two dependents -> m ~~ y freed (detected)")
+
+# --- latent variables stay in the model through the measurement part
 hs_meas <- c("visual =~ x1 + x2 + x3", "textual =~ x4 + x5 + x6", "speed =~ x7 + x8 + x9")
 lat <- c("visual", "textual", "speed")
 mk_lat <- function(paths) { s <- data.frame(Dependent = lat, Operator = "~", stringsAsFactors = FALSE)
   for (i in lat) s[[i]] <- FALSE; for (p in paths) s[s$Dependent == p[1], p[2]] <- TRUE; s }
 lat_base <- mk_lat(list(c("textual", "visual"), c("speed", "visual"), c("speed", "textual")))
-lat_ctx <- list(data = lavaan::HolzingerSwineford1939, missing_method = "listwise", needs_meanstructure = FALSE,
-                meas_lines = hs_meas, extra_lines = NULL, anchor_vars = active_struct_vars(lat_base),
-                baseline_dvs = struct_dependents(lat_base), baseline_edges = struct_edges(lat_base), base_fit = NULL)
-lat_fit_base  <- fit_candidate_model(lat_base, lat_ctx)
-lat_fit_empty <- fit_candidate_model(mk_lat(list()), lat_ctx)
-ok(AIC(lat_fit_empty) > AIC(lat_fit_base) + 20,
-   "removing every latent path is penalised (CFA with free latent covariances would be a disguised saturated model)")
-
-lat_fit_no_st <- fit_candidate_model(mk_lat(list(c("textual", "visual"), c("speed", "visual"))), lat_ctx)
-ok(abs(AIC(lat_fit_no_st) - AIC(lat_fit_base)) > 1e-3,
-   "dropping speed ~ textual is no longer disguised as a residual covariance (AIC differs from the saturated baseline)")
-ok(fitMeasures(lat_fit_no_st, "df") == fitMeasures(lat_fit_base, "df") + 1, "dropping one latent path adds exactly 1 df")
-
-# --- explicit anchor lines must not switch off the automatic exogenous covariances of the OTHER variables
-cand_one <- mk(list(c("m", "x1"), c("y", "m"), c("y", "x2")))          # only y ~ x3 removed; x1, x2 stay exogenous
-fit_one <- fit_candidate_model(cand_one, ctx)
-ok(fitMeasures(fit_one, "df") == fitMeasures(fit_base, "df") + 1,
-   "losing one exogenous predictor keeps the covariances among the remaining exogenous variables free (df +1)")
+lat_ctx <- mk_ctx(lavaan::HolzingerSwineford1939, lat_base, hs_meas)
+ok(length(lat_ctx$required_vars) == 0, "latent variables are not 'required' (the measurement model keeps them)")
+lat_empty <- fit_candidate_model(mk_lat(list()), lat_ctx)
+chk_lat <- candidate_structure_check(lat_empty, lat_ctx)
+ok(chk_lat$vars_ok && chk_lat$replaced, "removing every latent path -> lavaan frees the latent covariances (detected)")
+lat_no_st <- fit_candidate_model(mk_lat(list(c("textual", "visual"), c("speed", "visual"))), lat_ctx)
+chk_lat2 <- candidate_structure_check(lat_no_st, lat_ctx)
+ok(chk_lat2$replaced && "speed ~~ textual" %in% chk_lat2$added_covs, "dropping speed ~ textual -> speed ~~ textual freed (detected)")
+lat_ok <- fit_candidate_model(mk_lat(list(c("textual", "visual"), c("speed", "textual"))), lat_ctx)
+ok(!candidate_structure_check(lat_ok, lat_ctx)$replaced, "dropping speed ~ visual keeps speed dependent -> pure reduction")
 
 # --- score / improper handling
 ok(is.infinite(candidate_score(list(converged = TRUE, proper = FALSE, aic = 1, bic = 1), "AIC")), "improper -> Inf")

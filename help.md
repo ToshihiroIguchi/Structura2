@@ -212,8 +212,11 @@ Structura2 provides a robust suite of optimization strategies spanning exact com
   Stochastic meta-heuristic capable of escaping local minima by probabilistically accepting temporary score degradations at higher temperatures ($T$). Hyperparameters (Iterations, Initial Temp, Random Seed) can be fine-tuned under *Advanced Algorithm Hyper-Parameters*; the cooling rate is derived from the iteration count and the seed makes runs reproducible.
 
 ### 5.2 Variable Isolation Prevention & Path Locking
-* **Variable Isolation Prevention**:
-  Pruning can inadvertently sever all connections to a variable, isolating it from the system.
+* **How candidates are estimated**:
+  Every candidate is the baseline with some structural paths removed and is estimated with exactly the same lavaan call and default rules as a model you build by hand. The same path diagram therefore always gives the same AIC/BIC, and applying a candidate reproduces the scores shown in the catalogue. Two lavaan defaults matter when a path is removed:
+  - **A variable that loses every path** (as predictor and as dependent variable) is silently dropped by lavaan, so its likelihood is computed on different data and AIC/BIC could not be compared with the baseline. Structura2 therefore always keeps at least one path, in either direction, for every observed variable of your structural model.
+  - **A removed path can be replaced by a covariance.** If a variable becomes exogenous, lavaan frees its covariances with the other exogenous variables; if two variables both stay dependent, lavaan frees their residual covariance (`m ~~ y`). The association is then still in the model and the parameter count does not drop. Such candidates are labelled `[Replaced]`, listed with the covariances lavaan added (column `Added Cov.`), and never ranked as `[Optimal]`. Consequently, a path between two dependent variables (e.g. `y2 ~ y1` when both have other predictors) cannot be pruned by this tool.
+* **Variable Isolation Prevention** (additional, optional constraints):
   - **Dependent Variables**: When checked, the algorithm guarantees the variable retains **at least one incoming path** (in-degree $\ge 1$).
   - **Predictor Variables**: When checked, the algorithm guarantees the variable retains **at least one outgoing path** (out-degree $\ge 1$).
   - Quick **All** / **None** shortcuts enable one-click constraint management.
@@ -232,9 +235,9 @@ During optimization, Structura2 launches an animated progress modal powered by a
 Upon completion, the Step 2 dialog presents an organized catalog of model candidates:
 * **Candidate Ranking Table**:
   Lists models sorted from best to worst criterion score. Columns include:
-  - `Rank` and `Status` (`[Optimal]`, `[Baseline]`, `[Improved]`, or `[Degraded Fit]`).
+  - `Rank` and `Status` (`[Optimal]`, `[Baseline]`, `[Improved]`, `[Equivalent]`, `[Degraded Fit]`, `[Replaced]`, or `[Variable Dropped]`).
   - `Retained Paths`: Explicit listing of structural regressions maintained in that model.
-  - `AIC`, `BIC`, and respective deltas ($\Delta AIC$, $\Delta BIC$).
+  - `AIC`, `BIC`, and respective deltas ($\Delta AIC$, $\Delta BIC$), plus `Added Cov.` (covariances lavaan freed in place of a removed path).
   - Post-computed fit measures: **CFI**, **RMSEA**, and **SRMR**.
 * **Degraded Fit Warning (`[Degraded Fit]`)**:
   If a candidate model achieves a low AIC/BIC purely through extreme parsimony while causing CFI to fall below $0.90$ or RMSEA/SRMR to exceed $0.08$, Structura2 flags it prominently to prevent adopting an ill-fitting specification.
@@ -242,6 +245,7 @@ Upon completion, the Step 2 dialog presents an organized catalog of model candid
   Clicking any candidate row or using the `<` and `>` arrow navigation buttons renders an instant vector path diagram preview of that candidate.
 * **Apply Selected Model to UI**:
   Clicking this button transfers the candidate's exact structural configuration directly back to your main UI and immediately re-fits the model, updating all diagnostic tables and main path diagrams without manual re-entry.
+  After the refit, Structura2 compares the refitted AIC/BIC with the catalogue values and warns if they differ. Applying a `[Replaced]` candidate shows a warning because the removed association is still part of the model.
 
 ---
 

@@ -19,14 +19,11 @@ gen_large <- function(n) {        # correlated predictors (r = .5), weak-to-mode
 
 run_rep <- function(n) {
   d <- gen_large(n)
-  ctx <- list(data = d, missing_method = "listwise", needs_meanstructure = FALSE, meas_lines = NULL, extra_lines = NULL,
-              anchor_vars = active_struct_vars(full_df), baseline_dvs = struct_dependents(full_df),
-              baseline_edges = struct_edges(full_df), base_fit = NULL)
+  ctx <- make_ctx(d, full_df)
   cache <- new.env()
   sc <- function(keep) { key <- paste(as.integer(keep), collapse = ""); if (!is.null(cache[[key]])) return(cache[[key]])
     out <- c(Inf, Inf)
-    if (any(keep)) { fm <- fit_candidate_model(mk(full_paths[keep]), ctx)
-      if (!is.null(fm) && isTRUE(lavInspect(fm, "converged")) && fit_is_proper(fm)) out <- c(AIC(fm), BIC(fm)) }
+    if (any(keep)) out <- cand_scores(mk(full_paths[keep]), ctx)
     cache[[key]] <- out; out }
   S <- function(k, ci) sc(k)[ci]
   grid <- as.matrix(expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE)))
