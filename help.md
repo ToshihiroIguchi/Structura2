@@ -75,10 +75,10 @@ Follow these steps to specify and estimate your first SEM model in under five mi
 4. **Specify Structural Regressions**:
    - In the **Structural Model** table, locate row `Speed`. Check `Visual` and `Textual` to evaluate how visual and textual factors predict cognitive speed.
 5. **Estimate & Review**:
-   - Click the green **Run / Update Model** button.
+   - Click the green **Run** button.
    - Within seconds, the vector **Path Diagram** renders in the right pane, while global fit measures appear in the **Diagnostics** sub-tab.
 6. **Export Findings**:
-   - Click **Save SVG** or **Save PNG** to save publication-grade diagrams, click **Export PDF Report** to produce an A4 summary report ready for distribution, or click **Download Results (ZIP)** to get every result file (and the model definition) in one archive.
+   - Click **Save SVG** or **Save PNG** to save publication-grade diagrams, click **PDF** to produce an A4 summary report ready for distribution, or click **ZIP** to get every result file (and the model definition) in one archive.
 7. **Keep Your Model**:
    - Every successful fit is autosaved in your browser. After a reload, load the same data again and choose **Restore it** (see [Saving & Restoring Models](#46-saving--restoring-models)).
 
@@ -144,7 +144,7 @@ The Measurement Model defines how unobserved latent constructs are manifested by
   - Latent variable names must be valid R identifiers (no spaces or illegal punctuation).
   - Latent variable names cannot duplicate observed column names in your dataset.
   - Latent variable names must be unique.
-  - If a naming conflict occurs, a clear red alert is displayed, and the **Run / Update Model** button is automatically disabled until resolved.
+  - If a naming conflict occurs, a clear red alert is displayed, and the **Run** button is automatically disabled until resolved.
 
 ### 4.2 Structural Model & Correlation Heatmap
 The Structural Model defines linear regressions ($\sim$ operator) among dependent variables (rows) and predictor variables (columns).
@@ -188,7 +188,7 @@ Directly beneath the structural grid, the **Manual Equations** text box allows y
 The **lavaan Syntax** box provides live, read-only transparency. Every change made across the measurement table, structural matrix, or manual text box is instantly parsed into standardized lavaan code, ensuring total reproducibility.
 
 ### 4.6 Saving & Restoring Models
-The **Saved Models** panel (Model tab, above the measurement table) keeps your model definition so you do not have to rebuild it after a reload:
+The **Saved Models** button (Model tab, next to **ZIP**) opens a dialog that keeps your model definition so you do not have to rebuild it after a reload:
 * **Autosave**: after every *successful* fit, the model is saved automatically in this browser. When you load a dataset with matching columns, Structura2 offers **Restore it**; the link also stays available in the panel.
 * **Named models**: type a name and click **Save**; choose a saved model and click **Load** or **Delete**. Up to 20 models are kept.
 * **Export JSON / Import JSON**: writes the current model to a `.json` file (and reads one back). Use this as your durable backup and to move a model to another browser or computer.
@@ -196,7 +196,7 @@ The **Saved Models** panel (Model tab, above the measurement table) keeps your m
 What is saved: the measurement rows, the active structural paths, the manual equations, and the analysis settings (analysis mode, missing-data handling, log-transform and displayed columns, diagram options, modification-index thresholds). **No data values are ever saved** — only variable names — so the same dataset (or one with the same column names) must be loaded first.
 
 Things to know:
-* A restore **does not fit the model**: review the tables, then click **Run / Update Model**.
+* A restore **does not fit the model**: review the tables, then click **Run**.
 * Variables or paths that do not exist in the current data are skipped, and the notification lists them. If the saved model was fitted on a different number of rows (for example, because the Data tab was filtered), you are told as well; the Data-tab row filter itself is not saved.
 * Browser storage belongs to the site you are using. It can be wiped by the browser (private windows, "clear site data", Safari's inactivity cleanup), and sites that share a domain (for example several apps on one `github.io` address) also share it. When storage is unavailable the panel says so; **Export JSON** always works.
 
@@ -204,10 +204,10 @@ Things to know:
 
 ## 5. Automated Model Optimization (Model Pruning)
 
-When formulating an exploratory or complex structural model, theoretical specifications may include extraneous or non-significant links. The **Auto-Optimize Model** engine provides automated, constrained structural path pruning to locate the most parsimonious model that retains excellent empirical fit.
+When formulating an exploratory or complex structural model, theoretical specifications may include extraneous or non-significant links. The **Optimize** engine provides automated, constrained structural path pruning to locate the most parsimonious model that retains excellent empirical fit.
 
 ### 5.1 Step 1: Strategy & Criteria Configuration
-Clicking the cyan **Auto-Optimize Model** button (active whenever structural paths are defined and fitted) opens the Step 1 configuration dialog:
+Clicking the cyan **Optimize** button (active whenever structural paths are defined and fitted) opens the Step 1 configuration dialog:
 
 #### Optimization Criterion
 * **AIC (Akaike Information Criterion)**:
@@ -299,7 +299,7 @@ Located in the **Details** tab, this interactive table displays detailed regress
 * `pvalue`: Two-tailed asymptotic significance level ($p < .001$ formatting supported).
 * `std.all`: Completely standardized solution (variance of both latent and observed variables standardized to $1.0$). Enabled by checking **Include Standardized (std.all)**.
 * **Precision Control**: Use the **Decimals** selector to view `2`, `3`, `4`, or full floating-point precision (`All (Raw)`).
-* **Exporting**: Click **Copy** to place the table onto your clipboard or **CSV** to save directly for statistical reports. Both buttons export **every** row of the table (not only the visible page) and follow the current decimals setting; for full-precision values use **Download Results (ZIP)** (see [7.5](#75-results-zip-download)).
+* **Exporting**: Click **Copy** to place the table onto your clipboard or **CSV** to save directly for statistical reports. Both buttons export **every** row of the table (not only the visible page) and follow the current decimals setting; for full-precision values use **ZIP** (see [7.5](#75-results-zip-download)).
 
 ### 6.4 Comprehensive Model Summary
 The **Model Summary** panel provides complete verbatim text output generated directly by `lavaan::summary()`. It includes optimizer convergence status, number of iterations, log-likelihood values, and degrees of freedom.
@@ -348,7 +348,7 @@ Buttons located immediately above the path diagram provide instant image downloa
   Exports a crisp, double-resolution ($2\times$ scale, 300 DPI equivalent) bitmap (`structura2_path_diagram.png`) with a clean white background, ready for journal submissions and slide presentations.
 
 ### 7.4 Browser-Rendered A4 PDF Analysis Report
-Clicking the **Export PDF Report** button on the Model tab synthesizes your entire analysis session into a standardized A4 document:
+Clicking the **PDF** button on the Model tab synthesizes your entire analysis session into a standardized A4 document:
 * **Header**: Project title, timestamp, estimation mode, and missing data handler.
 * **Section 1 (Model Fit Summary)**: Complete table of global fit statistics ($N$, $\chi^2$, $df$, $p$, CFI, TLI, RMSEA, SRMR, AIC, BIC).
 * **Section 2 (Vector Path Diagram)**: Embedded vector diagram centered on the first page.
@@ -357,7 +357,7 @@ Clicking the **Export PDF Report** button on the Model tab synthesizes your enti
 * **Browser Print Integration**: Automatically opens your browser's native print preview dialog with tailored print CSS styles (`@media print`) configured for clean page breaks. Simply choose "Save as PDF" to produce your publication report.
 
 ### 7.5 Results ZIP Download
-Clicking **Download Results (ZIP)** on the Model tab (after a successful fit) saves `structura2_results_<date>_<time>.zip` containing:
+Clicking **ZIP** on the Model tab (after a successful fit) saves `structura2_results_<date>_<time>.zip` containing:
 
 | File | Content |
 |------|---------|
@@ -413,7 +413,7 @@ When estimating structural equation models, mathematical anomalies in empirical 
 1. **Holistic Model Evaluation**:
    Never accept or reject a structural model based on a single metric. A model with an exemplary RMSEA may still suffer from nonsensical parameter estimates (Heywood cases, negative variances). Always verify that individual parameter signs and magnitudes align with substantive theory.
 2. **Confirmatory vs. Exploratory Separation**:
-   If you use **Auto-Optimize Model** or **Modification Indices** to refine your model, transparently acknowledge in your research report that modifications were exploratory and data-driven. Best practice recommends cross-validating the pruned structure on an independent holdout dataset.
+   If you use **Optimize** or **Modification Indices** to refine your model, transparently acknowledge in your research report that modifications were exploratory and data-driven. Best practice recommends cross-validating the pruned structure on an independent holdout dataset.
 3. **Missing Data Reporting**:
    Always report the proportion of missing data per variable and state the missingness mechanism assumed (MCAR under listwise deletion; MAR under FIML).
 
