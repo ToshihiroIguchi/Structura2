@@ -593,7 +593,8 @@ parse_model_spec_json <- function(txt) {
       diagram_std          = lgl(s$diagram_std),
       show_suggested_paths = lgl(s$show_suggested_paths),
       mi_threshold         = num(s$mi_threshold),
-      epc_threshold        = num(s$epc_threshold)
+      epc_threshold        = num(s$epc_threshold),
+      max_suggestions      = num(s$max_suggestions)
     )
     spec <- list(
       name = as.character((x$name %||% "")[1]),
@@ -897,7 +898,7 @@ get_modification_suggestions <- function(fit, mi_threshold = 6.63, epc_threshold
 # Suggested regression paths mapped onto the structural checkbox matrix by variable NAME.
 # Each cell is NULL or list(mi, epc, std_epc, rank, cyclic). `rank` orders suggestions by MI
 # (1 = strongest); `cyclic` flags paths that would close a feedback loop with existing paths.
-get_suggested_structural_paths <- function(fit, struct_df, mi_threshold = 6.63, epc_threshold = 0) {
+get_suggested_structural_paths <- function(fit, struct_df, mi_threshold = 6.63, epc_threshold = 0, max_paths = Inf) {
   mi_res <- get_modification_suggestions(fit, mi_threshold, epc_threshold)
   if (is.null(mi_res)) return(NULL)
   reg_mi <- mi_res[mi_res$op == "~", , drop = FALSE]
@@ -915,6 +916,7 @@ get_suggested_structural_paths <- function(fit, struct_df, mi_threshold = 6.63, 
     r <- match(row_dep, deps)
     c <- match(col_pred, preds)
     if (is.na(r) || is.na(c)) next
+    if (rank_counter >= max_paths) break
 
     # Exclude already active paths (self-loops are already removed by get_modification_suggestions)
     if (isTRUE(as.logical(struct_df[r, preds[c]]))) next
@@ -1870,7 +1872,9 @@ ui <- fluidPage(
                             div(style = "width: 210px;",
                                 numericInput("mi_threshold", "MI threshold (6.63 = p < .01):", value = 6.63, min = 0, step = 0.5)),
                             div(style = "width: 170px;",
-                                numericInput("epc_threshold", "Min |std.EPC|:", value = 0.1, min = 0, max = 1, step = 0.05))
+                                numericInput("epc_threshold", "Min |std.EPC|:", value = 0.1, min = 0, max = 1, step = 0.05)),
+                            div(style = "width: 170px;",
+                                numericInput("max_suggestions", "Max highlighted paths:", value = 5, min = 1, step = 1))
                         )
                       ),
                       p("Color intensity indicates R² strength (white: low, red: high). ",
@@ -2531,11 +2535,14 @@ server <- function(input, output, session) {
     epc_thr <- input$epc_threshold %||% 0
     if (!is.numeric(mi_thr) || is.na(mi_thr)) mi_thr <- 6.63
     if (!is.numeric(epc_thr) || is.na(epc_thr)) epc_thr <- 0
+    max_sug <- input$max_suggestions %||% 5
+    if (!is.numeric(max_sug) || is.na(max_sug) || max_sug < 1) max_sug <- 5
     # Matching is by variable name against the current table, so paths the user has just ticked
     # (but not yet fitted) are no longer suggested; suggestion_status_ui flags the stale state.
     mat <- isolate(struct_table_data())
     if (!is.null(model_res) && isTRUE(model_res$ok) && !is.null(sug_fit) && !is.null(mat)) {
-      sug <- tryCatch(get_suggested_structural_paths(sug_fit, mat, mi_threshold = mi_thr, epc_threshold = epc_thr),
+      sug <- tryCatch(get_suggested_structural_paths(sug_fit, mat, mi_threshold = mi_thr, epc_threshold = epc_thr,
+                                                    max_paths = max_sug),
                       error = function(e) NULL)
       cached_suggested_matrix(sug)
     } else {
@@ -2751,7 +2758,8 @@ server <- function(input, output, session) {
       diagram_std          = isTRUE(input$diagram_std),
       show_suggested_paths = isTRUE(input$show_suggested_paths),
       mi_threshold         = input$mi_threshold %||% 6.63,
-      epc_threshold        = input$epc_threshold %||% 0.1
+      epc_threshold        = input$epc_threshold %||% 0.1,
+      max_suggestions      = input$max_suggestions %||% 5
     )
   }
 
@@ -3462,6 +3470,7 @@ server <- function(input, output, session) {
       if (!is.null(s$show_suggested_paths)) updateCheckboxInput(session, "show_suggested_paths", value = s$show_suggested_paths)
       if (!is.null(s$mi_threshold))   updateNumericInput(session, "mi_threshold", value = s$mi_threshold)
       if (!is.null(s$epc_threshold))  updateNumericInput(session, "epc_threshold", value = s$epc_threshold)
+      if (!is.null(s$max_suggestions)) updateNumericInput(session, "max_suggestions", value = s$max_suggestions)
       updateTextAreaInput(session, "extra_eq", value = spec$manual_equations)
       if (logs_changed) updateCheckboxGroupInput(session, "log_columns", selected = target_logs)
       invisible(TRUE)
