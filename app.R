@@ -1806,47 +1806,25 @@ ui <- fluidPage(
                                       value = TRUE)),
                        # -------------- Run & Auto-Optimize buttons -------------------
                        div(style = "display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;",
-                           actionButton("run_model", "Run / Update Model",
-                                        class = "btn btn-success"),
+                           actionButton("run_model", "Run",
+                                        class = "btn btn-success",
+                                        title = "Run / update the model (fit it with the current settings)"),
                            shinyjs::hidden(
-                             actionButton("prune_model_btn", "Auto-Optimize Model",
-                                          class = "btn btn-info")
+                             actionButton("prune_model_btn", "Optimize",
+                                          class = "btn btn-info",
+                                          title = "Auto-Optimize Model: search for the most parsimonious structural paths")
                            ),
-                           actionButton("export_pdf_btn", "Export PDF Report",
-                                         class = "btn btn-default"),
-                           actionButton("export_zip_btn", "Download Results (ZIP)",
-                                         class = "btn btn-default")
+                           actionButton("export_pdf_btn", "PDF",
+                                         class = "btn btn-default",
+                                         title = "Export PDF Report"),
+                           actionButton("export_zip_btn", "ZIP",
+                                         class = "btn btn-default",
+                                         title = "Download Results (ZIP): all result files and the model definition"),
+                           # Opens the Saved Models dialog (browser storage + JSON); see saved_models_modal()
+                           actionButton("saved_models_btn", "Saved Models",
+                                        class = "btn btn-default",
+                                        title = "Save, load or delete models kept in this browser; import / export JSON")
                        ),
-                      # ---- Saved Models (browser storage + JSON) --------------
-                      tags$details(
-                        style = "margin-bottom: 10px; border: 1px solid #ddd; padding: 8px 10px; border-radius: 4px; background-color: #fafafa;",
-                        tags$summary(style = "font-weight: 600; cursor: pointer;", "Saved Models"),
-                        div(style = "margin-top: 8px;",
-                            uiOutput("saved_models_status"),
-                            div(style = "display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap;",
-                                div(style = "width: 220px;",
-                                    textInput("save_model_name", "Save current model as:", placeholder = "e.g. 3-factor CFA")),
-                                actionButton("save_model_btn", "Save", class = "btn btn-primary btn-sm",
-                                             style = "margin-bottom: 15px;")),
-                            div(style = "display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap;",
-                                div(style = "width: 220px;",
-                                    selectInput("saved_model_select", "Saved models in this browser:", choices = character(0))),
-                                actionButton("load_model_btn", "Load", class = "btn btn-default btn-sm",
-                                             style = "margin-bottom: 15px;"),
-                                actionButton("delete_model_btn", "Delete", class = "btn btn-default btn-sm",
-                                             style = "margin-bottom: 15px;")),
-                            div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
-                                actionButton("export_model_json_btn", "Export JSON", class = "btn btn-default btn-sm"),
-                                actionButton("import_model_json_btn", "Import JSON", class = "btn btn-default btn-sm",
-                                             onclick = "document.getElementById('model_import_file').click();"),
-                                tags$input(id = "model_import_file", type = "file", accept = ".json,application/json",
-                                           style = "display: none;")),
-                            tags$p(style = "font-size: 11px; color: #666; margin: 8px 0 0 0;",
-                                   "Models are saved by variable names only (never data values) in this browser's storage. ",
-                                   "Storage can be cleared by the browser (private windows, site-data cleanup), so use ",
-                                   tags$b("Export JSON"), " for a durable backup.")
-                        )
-                      ),
                       shinyjs::hidden(
                         div(id = "latent_error_box",
                             class = "alert alert-danger",
@@ -2557,12 +2535,12 @@ server <- function(input, output, session) {
     current <- tryCatch(lavaan_model_str(), error = function(e) NULL)
     if (is.null(model_res) || !isTRUE(model_res$ok) || is.null(model_res$syntax)) {
       return(div(class = "alert alert-info", style = "font-size: 12px; padding: 6px 10px; margin-bottom: 8px;",
-                 "Suggestions appear after the model has been fitted successfully (Run / Update Model)."))
+                 "Suggestions appear after the model has been fitted successfully (Run)."))
     }
     if (!identical(model_res$syntax, current)) {
       return(div(class = "alert alert-warning", style = "font-size: 12px; padding: 6px 10px; margin-bottom: 8px;",
                  "The structure has changed since the last fit. Highlighted suggestions are from the previous fit; ",
-                 "click ", tags$b("Run / Update Model"), " to refresh them."))
+                 "click ", tags$b("Run"), " to refresh them."))
     }
     NULL
   })
@@ -2609,7 +2587,7 @@ server <- function(input, output, session) {
     existing <- trimws(existing); existing <- existing[nzchar(existing)]
     updateTextAreaInput(session, "extra_eq", value = paste(unique(c(existing, new_lines)), collapse = "\n"))
     showNotification(
-      sprintf("Added %d line(s) to Manual Equations. Click Run / Update Model to refit; MI values change after each addition, so add one at a time when possible.", length(new_lines)),
+      sprintf("Added %d line(s) to Manual Equations. Click Run to refit; MI values change after each addition, so add one at a time when possible.", length(new_lines)),
       type = "message", duration = 6)
   })
 
@@ -3289,6 +3267,46 @@ server <- function(input, output, session) {
     }
   })
 
+  # Saved Models dialog. The select input is created fresh on every open, so its choices come from the store summary.
+  saved_models_modal <- function() {
+    info <- store_info()
+    modalDialog(
+      title = "Saved Models",
+      easyClose = TRUE,
+      footer = modalButton("Close"),
+      uiOutput("saved_models_status"),
+      div(style = "display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap;",
+          div(style = "width: 220px;",
+              textInput("save_model_name", "Save current model as:", placeholder = "e.g. 3-factor CFA")),
+          actionButton("save_model_btn", "Save", class = "btn btn-primary btn-sm",
+                       style = "margin-bottom: 15px;")),
+      div(style = "display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap;",
+          div(style = "width: 220px;",
+              selectInput("saved_model_select", "Saved models in this browser:",
+                          choices = if (length(info$names)) info$names else c("(no saved models)" = ""))),
+          actionButton("load_model_btn", "Load", class = "btn btn-default btn-sm",
+                       style = "margin-bottom: 15px;"),
+          actionButton("delete_model_btn", "Delete", class = "btn btn-default btn-sm",
+                       style = "margin-bottom: 15px;")),
+      div(style = "display: flex; gap: 8px; flex-wrap: wrap;",
+          actionButton("export_model_json_btn", "Export JSON", class = "btn btn-default btn-sm"),
+          actionButton("import_model_json_btn", "Import JSON", class = "btn btn-default btn-sm",
+                       onclick = "document.getElementById('model_import_file').click();"),
+          tags$input(id = "model_import_file", type = "file", accept = ".json,application/json",
+                     style = "display: none;")),
+      tags$p(style = "font-size: 11px; color: #666; margin: 8px 0 0 0;",
+             "Models are saved by variable names only (never data values) in this browser's storage. ",
+             "Storage can be cleared by the browser (private windows, site-data cleanup), so use ",
+             tags$b("Export JSON"), " for a durable backup.")
+    )
+  }
+
+  observeEvent(input$saved_models_btn, {
+    tryCatch(showModal(saved_models_modal()), error = function(e) {
+      showNotification(paste("Could not open Saved Models:", conditionMessage(e)), type = "error", duration = 8)
+    })
+  })
+
   output$saved_models_status <- renderUI({
     info <- store_info()
     if (!isTRUE(info$loaded)) return(NULL)
@@ -3358,7 +3376,8 @@ server <- function(input, output, session) {
 
   observeEvent(input$model_import_json, {
     x <- input$model_import_json
-    txt <- as.character(x$text %||% "")
+    removeModal()
+    txt <-as.character(x$text %||% "")
     if (!nzchar(txt)) {
       showNotification("The selected file could not be read or is empty.", type = "error", duration = 8)
       return()
@@ -3373,6 +3392,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$restore_spec_json, {
     x <- input$restore_spec_json
+    removeModal()
     parsed <- parse_model_spec_json(as.character(x$json %||% ""))
     if (!isTRUE(parsed$ok)) {
       showNotification(parsed$msg, type = "error", duration = 10)
@@ -3557,7 +3577,7 @@ server <- function(input, output, session) {
           if (secs_in_stage > 0.8) {
             restore_state(NULL)
             removeNotification("restore_progress", session = session)
-            msg <- "Model restored. Click Run / Update Model to fit it."
+            msg <- "Model restored. Click Run to fit it."
             skipped <- unique(st$dropped)
             if (length(skipped)) {
               msg <- paste0(msg, " Skipped because they are not in the current data: ",
