@@ -396,9 +396,16 @@ build_retained_str <- function(struct_df) {
 # ---------- Helper: Variable Isolation Constraint Validator ----------
 # Verifies that specified dependent variables retain at least one incoming path (in-degree >= 1)
 # and specified predictor variables retain at least one outgoing path (out-degree >= 1).
-check_variable_isolation <- function(s_df, retain_deps, retain_preds, pred_cols) {
+# `required_vars` are variables that must keep at least one path in EITHER direction: lavaan silently drops
+# a variable that has lost every path, which changes the likelihood and makes AIC/BIC incomparable.
+check_variable_isolation <- function(s_df, retain_deps, retain_preds, pred_cols, required_vars = character(0)) {
   if (is.null(s_df) || nrow(s_df) == 0) return(FALSE)
-  
+
+  if (length(required_vars) > 0) {
+    edges <- struct_edges(s_df)
+    if (!all(required_vars %in% c(edges$dep, edges$pred))) return(FALSE)
+  }
+
   if (length(retain_deps) > 0) {
     for (dep in retain_deps) {
       dep_r <- which(s_df$Dependent == dep)
@@ -509,62 +516,51 @@ struct_edges <- function(struct_df) {
   if (length(out)) do.call(rbind, out) else data.frame(dep = character(0), pred = character(0), stringsAsFactors = FALSE)
 }
 
-# Builds the extra lavaan lines that make every candidate a faithful "paths removed" version of the
-# baseline (and keep AIC/BIC comparable):
-#  * Same variable set: a variable that loses all of its paths is pinned with an explicit variance so
-#    lavaan does not silently drop it (otherwise the likelihood is computed on different variables).
-#  * Removing a path must remove the association. A variable that was DEPENDENT in the baseline but has
-#    lost all incoming paths becomes exogenous, and with fixed.x = FALSE lavaan would then free its
-#    covariances with the other exogenous variables, silently re-introducing the very association that was
-#    "removed" (m ~ x1 turns into m ~~ x1 with the same likelihood). Those covariances are fixed to 0.
-#  * The same holds for two variables that both stay dependent: lavaan frees the residual covariance of
-#    dependent variables that have no direct path between them, so dropping the baseline path y ~ m would
-#    otherwise just turn it into m ~~ y (same likelihood). That residual covariance is fixed to 0 as well.
-#  * Variables that were already EXOGENOUS in the baseline keep their free covariances with each other,
-#    even when they lose every path (they are nuisance parameters of the baseline, not paths).
-build_anchor_lines <- function(struct_df, anchor_vars, baseline_dvs = character(0), baseline_edges = NULL) {
-  active <- active_struct_vars(struct_df)
-  cand_dvs <- struct_dependents(struct_df)
-  exo_active <- setdiff(active, cand_dvs)                 # appear only as predictors
-  turned <- intersect(exo_active, baseline_dvs)           # endogenous in baseline, exogenous now
-  base_exo_active <- setdiff(exo_active, turned)
-  lost <- setdiff(anchor_vars, active)
-  exo_lost <- setdiff(lost, baseline_dvs)
+# ---- Candidate comparability helpers ----------------------------------------
+# A candidate is the baseline syntax with some structural paths removed and is estimated with exactly
+# the same lavaan call as the main model (run_lavaan_sem), so the same path diagram always gives the
+# same AIC/BIC. lavaan's defaults are NOT overridden, which has two consequences that are detected here:
+#  * a variable that has lost every path is silently dropped from the model, so its likelihood is
+#    computed on different data and AIC/BIC are no longer comparable with the baseline;
+#  * removing a path can make lavaan free a covariance instead (m ~ x1 turns into m ~~ x1 when m becomes
+#    exogenous; y ~ m turns into m ~~ y when both stay dependent), i.e. the association is NOT removed.
+# Both kinds of candidate are kept in the catalogue for transparency but can never rank as optimal.
 
-  lines <- character(0)
-  # Baseline-dependent variables that are no longer dependent (turned exogenous, or left with no path at
-  # all) must not covary with the other exogenous variables. This also matters for latent variables,
-  # which lavaan correlates automatically even when they take part in no structural path.
-  lost_dv <- intersect(lost, baseline_dvs)
-  zero_cov <- unique(c(turned, lost_dv))
-  pool <- unique(c(exo_active, lost))
-  for (z in zero_cov) {
-    for (e in pool) {
-      if (e != z && (!(e %in% zero_cov) || z < e)) lines <- c(lines, paste0(z, " ~~ 0*", e))
-    }
-  }
-  if (length(lost)) lines <- c(lines, paste0(lost, " ~~ ", lost))
-  if (!is.null(baseline_edges) && nrow(baseline_edges) > 0) {
-    cand_edges <- struct_edges(struct_df)
-    has_cand <- function(a, b) any((cand_edges$dep == a & cand_edges$pred == b) | (cand_edges$dep == b & cand_edges$pred == a))
-    seen_pairs <- character(0)
-    for (k in seq_len(nrow(baseline_edges))) {
-      a <- baseline_edges$dep[k]; b <- baseline_edges$pred[k]
-      key <- paste(sort(c(a, b)), collapse = "|")
-      if (key %in% seen_pairs) next
-      seen_pairs <- c(seen_pairs, key)
-      if (a %in% cand_dvs && b %in% cand_dvs && !has_cand(a, b)) lines <- c(lines, paste0(a, " ~~ 0*", b))
-    }
-  }
-  # Once ANY explicit "~~" line is present lavaan stops freeing the remaining exogenous covariances
-  # automatically, so every pair of baseline-exogenous variables is declared explicitly.
-  free_pool <- unique(c(base_exo_active, exo_lost))
-  if (length(lines) && length(free_pool) > 1) {
-    for (i in seq_len(length(free_pool) - 1)) {
-      for (j in (i + 1):length(free_pool)) lines <- c(lines, paste0(free_pool[i], " ~~ ", free_pool[j]))
-    }
-  }
-  lines
+# Single estimation entry point shared by the main model, the optimizer candidates and the MI helper fit.
+run_lavaan_sem <- function(syntax_str, data, missing_method, needs_meanstructure, ...) {
+  lavaan::sem(syntax_str,
+              data          = data,
+              missing       = missing_method,
+              fixed.x       = FALSE,
+              parser        = "old",
+              meanstructure = needs_meanstructure,
+              ncpus         = 1L,
+              ...)
+}
+
+# Free covariances between two different variables as sorted "a ~~ b" keys.
+free_cov_pairs <- function(fit) {
+  pt <- tryCatch(lavaan::parTable(fit), error = function(e) NULL)
+  if (is.null(pt) || !nrow(pt)) return(character(0))
+  pt <- pt[pt$op == "~~" & pt$lhs != pt$rhs & pt$free > 0, , drop = FALSE]
+  if (!nrow(pt)) return(character(0))
+  unique(vapply(seq_len(nrow(pt)), function(i) paste(sort(c(pt$lhs[i], pt$rhs[i])), collapse = " ~~ "), character(1)))
+}
+
+# Variables the baseline model contains and a candidate must keep: the structural variables that are
+# neither latent nor measurement indicators (those stay in the model through the measurement part).
+required_struct_vars <- function(struct_df, base_fit) {
+  lv  <- tryCatch(lavaan::lavNames(base_fit, "lv"), error = function(e) character(0))
+  ind <- tryCatch(lavaan::lavNames(base_fit, "ov.ind"), error = function(e) character(0))
+  setdiff(active_struct_vars(struct_df), c(lv, ind))
+}
+
+# Structural comparability of a fitted candidate with the baseline described by `ctx`
+# (ctx$base_ov = observed variables, ctx$base_cov_pairs = free covariances of the baseline fit).
+candidate_structure_check <- function(fit, ctx) {
+  vars_ok <- is.null(ctx$base_ov) || setequal(lavaan::lavNames(fit, "ov"), ctx$base_ov)
+  added <- if (is.null(ctx$base_cov_pairs)) character(0) else setdiff(free_cov_pairs(fit), ctx$base_cov_pairs)
+  list(vars_ok = vars_ok, added_covs = added, replaced = length(added) > 0)
 }
 
 # TRUE when the solution is admissible (no negative variances, non-positive-definite matrices, ...).
@@ -581,31 +577,27 @@ fit_cutoff_violations <- function(ms) {
     srmr  = isTRUE(get("srmr") > 0.08))
 }
 
-# Score used for ranking/search. Non-converged or improper (e.g. negative variance) fits never win.
+# Score used for ranking/search. Non-converged or improper (e.g. negative variance) fits never win, and
+# neither do candidates that are not a pure path reduction of the baseline (a variable was dropped, or
+# lavaan replaced a removed path by a covariance).
 candidate_score <- function(rec, criterion) {
   if (is.null(rec) || !isTRUE(rec$converged) || isFALSE(rec$proper)) return(Inf)
+  if (isFALSE(rec$vars_ok) || isTRUE(rec$replaced)) return(Inf)
   s <- if (criterion == "AIC") rec$aic else rec$bic
   if (is.null(s) || is.na(s)) Inf else s
 }
 
-# Fits one candidate structural model. `ctx` carries data, estimation options, measurement lines,
-# extra lines, anchor variables and an optional warm-start fit. Returns NULL when estimation fails.
+# Fits one candidate structural model with the same syntax and options as the main model.
+# `ctx` carries data, estimation options, measurement lines, extra lines and an optional warm-start
+# fit. Returns NULL when estimation fails.
 fit_candidate_model <- function(struct_df, ctx) {
-  all_syntax <- unlist(c(ctx$meas_lines, build_struct_lines(struct_df),
-                         build_anchor_lines(struct_df, ctx$anchor_vars, ctx$baseline_dvs, ctx$baseline_edges), ctx$extra_lines))
+  all_syntax <- unlist(c(ctx$meas_lines, build_struct_lines(struct_df), ctx$extra_lines))
   if (!length(all_syntax)) return(NULL)
   syntax_str <- paste(all_syntax, collapse = "\n")
 
   run_sem <- function(...) {
     tryCatch(
-      lavaan::sem(syntax_str,
-                  data          = ctx$data,
-                  missing       = ctx$missing_method,
-                  fixed.x       = FALSE,
-                  parser        = "old",
-                  meanstructure = ctx$needs_meanstructure,
-                  ncpus         = 1L,
-                  ...),
+      run_lavaan_sem(syntax_str, ctx$data, ctx$missing_method, ctx$needs_meanstructure, ...),
       error = function(e) NULL)
   }
 
@@ -643,13 +635,7 @@ fit_suggestion_model <- function(syntax_lines, unused_vars, anchor_var, ctx) {
   if (!length(unused_vars) || is.null(anchor_var) || !nzchar(anchor_var)) return(NULL)
   syntax_str <- paste(c(syntax_lines, paste0(unused_vars, " ~ 0*", anchor_var)), collapse = "\n")
   fm <- tryCatch(
-    lavaan::sem(syntax_str,
-                data          = ctx$data,
-                missing       = ctx$missing_method,
-                fixed.x       = FALSE,
-                parser        = "old",
-                meanstructure = ctx$needs_meanstructure,
-                ncpus         = 1L),
+    run_lavaan_sem(syntax_str, ctx$data, ctx$missing_method, ctx$needs_meanstructure),
     error = function(e) NULL)
   if (is.null(fm) || !isTRUE(lavaan::lavInspect(fm, "converged"))) NULL else fm
 }
@@ -2292,13 +2278,8 @@ server <- function(input, output, session) {
       needs_meanstructure <- (input$analysis_mode == "raw" || 
                               input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
 
-      fm <- sem(paste(ln, collapse = "\n"),
-                data          = processed_data(),
-                missing       = input$missing_method,
-                fixed.x       = FALSE,
-                parser        = "old",
-                meanstructure = needs_meanstructure,
-                ncpus         = 1L)
+      fm <- run_lavaan_sem(paste(ln, collapse = "\n"), processed_data(),
+                           input$missing_method, needs_meanstructure)
 
       converged <- isTRUE(lavInspect(fm, "converged"))
       pe_std <- NULL
@@ -2929,7 +2910,8 @@ server <- function(input, output, session) {
               tags$b("Variable Isolation Prevention (Keep in Model)", style = "color: #1e293b; font-size: 14px;"),
               span(style = "font-size: 11px; color: #64748b;", "At least one connecting path will be retained")
           ),
-          p("Select variables to keep in the model (at least one connecting path will always be retained).",
+          p("Every variable of your model always keeps at least one path (lavaan would otherwise drop it silently and the scores could no longer be compared). ",
+            "Select variables below to additionally require an incoming path (dependent) or an outgoing path (predictor).",
             style = "font-size: 12px; color: #64748b; margin-bottom: 10px;"),
           fluidRow(
             column(width = 6,
@@ -3105,6 +3087,7 @@ server <- function(input, output, session) {
   opt_running <- reactiveVal(FALSE)
   opt_step <- reactiveVal(0)
   opt_state <- reactiveVal(NULL)
+  pending_prune_check <- reactiveVal(NULL)   # AIC/BIC of an applied candidate, verified after the main refit
 
   finalize_prune_results <- function(st, current_step = 0, stopped_early = FALSE) {
     opt_running(FALSE)
@@ -3157,7 +3140,7 @@ server <- function(input, output, session) {
             # Flag only a NEW violation: a cutoff the baseline met but this candidate breaks. If the
             # baseline already violates a cutoff, every candidate would otherwise be flagged as well.
             if (any(fit_cutoff_violations(ms_k) & !base_violations)) {
-              if (sorted_candidates[[k]]$status != "[Baseline]" && sorted_candidates[[k]]$status != "[Optimal]") {
+              if (!sorted_candidates[[k]]$status %in% c("[Baseline]", "[Optimal]", "[Replaced]", "[Variable Dropped]")) {
                 sorted_candidates[[k]]$status <- "[Degraded Fit]"
               }
             }
@@ -3218,7 +3201,10 @@ server <- function(input, output, session) {
             style = if (stopped_early) "margin: 0; font-size: 13px; color: #92400e;" else "margin: 0; font-size: 13px; color: #334155;"),
           p("Note: the top-ranked model was selected using the same data it is evaluated on, so its fit is optimistic. ",
             "Candidates marked [Equivalent] are within 2 ", res$criterion, " units of the best and cannot be reliably distinguished from it; ",
-            "prefer the one that is theoretically most defensible. [Improper] models (e.g. negative variances) are never ranked first.",
+            "prefer the one that is theoretically most defensible. [Improper] models (e.g. negative variances) are never ranked first. ",
+            "Candidates are estimated with lavaan's default rules, exactly like a model you build by hand. A [Replaced] candidate is one where ",
+            "lavaan frees a covariance in place of a removed path (see Added Cov.), so the association is not actually removed; ",
+            "[Variable Dropped] means a variable lost all of its paths and was left out of the model. Neither can be ranked as optimal.",
             style = "margin: 6px 0 0 0; font-size: 12px; color: #64748b;"),
           if (nzchar(res$fallback_note %||% ""))
             p(res$fallback_note, style = "margin: 6px 0 0 0; font-size: 12px; color: #b45309; font-weight: 600;")
@@ -3397,17 +3383,18 @@ server <- function(input, output, session) {
     sa_T0 <- max(input$sa_temp_init %||% 10.0, 0.2)
     sa_alpha <- (0.1 / sa_T0)^(1 / max(sa_max_iter, 1))
 
-    # Fixing the observed-variable set keeps AIC/BIC comparable across candidates
-    anchor_vars <- active_struct_vars(struct_df)
+    # Candidates are estimated exactly like the main model. They stay comparable with the baseline only if
+    # no variable disappears (required_vars always keep a path) and no removed path is silently replaced
+    # by a covariance (checked after each fit against base_ov / base_cov_pairs).
     ctx <- list(
       data = processed_data(),
       missing_method = input$missing_method,
       needs_meanstructure = needs_meanstructure,
       meas_lines = mlines,
       extra_lines = extra,
-      anchor_vars = anchor_vars,
-      baseline_dvs = struct_dependents(struct_df),
-      baseline_edges = struct_edges(struct_df),
+      required_vars = required_struct_vars(struct_df, base_model$fit),
+      base_ov = lavaan::lavNames(base_model$fit, "ov"),
+      base_cov_pairs = free_cov_pairs(base_model$fit),
       base_fit = base_model$fit
     )
 
@@ -3457,6 +3444,7 @@ server <- function(input, output, session) {
       srmr = as.numeric(base_ms["srmr"]),
       converged = TRUE,
       proper = fit_is_proper(base_model$fit),
+      vars_ok = TRUE, replaced = FALSE, added_covs = character(0),
       status = "[Baseline]"
     )
 
@@ -3500,10 +3488,17 @@ server <- function(input, output, session) {
       d_aic <- c_aic - as.numeric(st$base_ms["aic"])
       d_bic <- c_bic - as.numeric(st$base_ms["bic"])
       proper <- fit_is_proper(fm)
+      chk <- candidate_structure_check(fm, st$ctx)
+      if (!chk$vars_ok) {
+        # Fitted on a different set of variables: its AIC/BIC cannot be compared with the baseline at all
+        c_aic <- c_bic <- d_aic <- d_bic <- NA_real_
+      }
 
       stat <- "[Good]"
-      if ((st$criterion == "AIC" && d_aic < -0.01) || (st$criterion == "BIC" && d_bic < -0.01)) stat <- "[Improved]"
+      if (isTRUE((st$criterion == "AIC" && d_aic < -0.01) || (st$criterion == "BIC" && d_bic < -0.01))) stat <- "[Improved]"
       if (!proper) stat <- "[Improper]"
+      if (chk$replaced) stat <- "[Replaced]"
+      if (!chk$vars_ok) stat <- "[Variable Dropped]"
 
       list(
         removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
@@ -3511,7 +3506,8 @@ server <- function(input, output, session) {
         struct_df = curr_s_df, fit = fm,
         aic = c_aic, bic = c_bic, delta_aic = d_aic, delta_bic = d_bic,
         cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
-        converged = TRUE, proper = proper, status = stat
+        converged = TRUE, proper = proper, status = stat,
+        vars_ok = chk$vars_ok, replaced = chk$replaced, added_covs = chk$added_covs
       )
     }
 
@@ -3547,7 +3543,7 @@ server <- function(input, output, session) {
         test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
 
         # Check variable isolation constraints
-        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) next
+        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) next
 
         rem_vec <- c()
         for (j in seq_along(st$removable_paths)) {
@@ -3609,7 +3605,7 @@ server <- function(input, output, session) {
           }
         }
         # Check variable isolation constraints
-        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) {
+        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) {
           curr_score_step <- Inf
         } else {
           k_str <- make_key_local(test_s_df)
@@ -3642,7 +3638,7 @@ server <- function(input, output, session) {
             rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
           }
         }
-        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) {
+        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) {
           c_score <- Inf
         } else {
           k_str <- make_key_local(test_s_df)
@@ -3756,7 +3752,7 @@ server <- function(input, output, session) {
           }
         }
 
-        if (check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols)) {
+        if (check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) {
           k_str <- make_key_local(test_s_df)
           if (!k_str %in% names(st$candidates_map)) {
             rem_vec <- c()
@@ -3826,6 +3822,7 @@ server <- function(input, output, session) {
         `ΔAIC` = if (is.na(c_item$delta_aic)) "—" else sprintf("%+.2f", c_item$delta_aic),
         `ΔBIC` = if (is.na(c_item$delta_bic)) "—" else sprintf("%+.2f", c_item$delta_bic),
         `Δ vs Best` = if (is.null(c_item$delta_best) || !is.finite(c_item$delta_best)) "—" else sprintf("%.2f", c_item$delta_best),
+        `Added Cov.` = if (length(c_item$added_covs) > 0) paste(c_item$added_covs, collapse = "; ") else "—",
         Weight = if (is.null(c_item$weight) || !is.finite(c_item$weight)) "—" else sprintf("%.3f", c_item$weight),
         CFI = if (is.na(c_item$cfi)) "—" else sprintf("%.3f", c_item$cfi),
         RMSEA = if (is.na(c_item$rmsea)) "—" else sprintf("%.3f", c_item$rmsea),
@@ -3962,6 +3959,16 @@ server <- function(input, output, session) {
       return()
     }
     
+    if (isTRUE(cand$replaced)) {
+      showNotification(
+        paste0("This candidate is not a pure path reduction: lavaan adds ", paste(cand$added_covs, collapse = ", "),
+               " in place of the removed path(s). The association is still in the model."),
+        type = "warning", duration = 10)
+    }
+    # The refit below uses the same syntax and options as the candidate, so its AIC/BIC must match the table.
+    pending_prune_check(if (isTRUE(cand$converged) && isTRUE(cand$vars_ok) && !is.na(cand$aic))
+                          list(aic = cand$aic, bic = cand$bic) else NULL)
+
     # 1. Update structural data frame
     struct_table_data(cand$struct_df)
     
@@ -3976,6 +3983,24 @@ server <- function(input, output, session) {
 
     showNotification("Selected model applied to the structural UI; refitting now...", type = "message", duration = 4)
   })
+
+  # Consistency check after applying a candidate: the main refit must reproduce the scores shown in the
+  # candidate table (same syntax, same options). A mismatch means the table does not describe the applied model.
+  observeEvent(fit_model_safe(), {
+    chk <- isolate(pending_prune_check())
+    if (is.null(chk)) return()
+    pending_prune_check(NULL)
+    res <- fit_model_safe()
+    if (!isTRUE(res$ok) || is.null(res$fit)) return()
+    ms <- tryCatch(lavaan::fitMeasures(res$fit, c("aic", "bic")), error = function(e) NULL)
+    if (is.null(ms) || anyNA(ms)) return()
+    if (abs(ms["aic"] - chk$aic) > 0.01 || abs(ms["bic"] - chk$bic) > 0.01) {
+      showNotification(
+        sprintf("The refitted model differs from the candidate table (AIC %.2f vs %.2f). Treat the table scores for this model with caution.",
+                ms["aic"], chk$aic),
+        type = "warning", duration = 12)
+    }
+  }, ignoreInit = TRUE)
 }
 
 # ---- Run the application ---------------------------------------

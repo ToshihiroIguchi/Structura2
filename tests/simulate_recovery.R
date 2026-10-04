@@ -6,7 +6,8 @@ args <- commandArgs(trailingOnly = TRUE)
 reps <- if (length(args)) as.integer(args[1]) else 40L
 exprs <- parse("app.R")
 wanted <- c("struct_pred_cols", "build_struct_lines", "make_struct_key", "active_struct_vars", "struct_dependents", "struct_edges",
-            "build_anchor_lines", "fit_is_proper", "fit_cutoff_violations", "candidate_score", "fit_candidate_model",
+            "run_lavaan_sem", "free_cov_pairs", "required_struct_vars", "candidate_structure_check",
+            "check_variable_isolation", "fit_is_proper", "fit_cutoff_violations", "candidate_score", "fit_candidate_model",
             "struct_descendants", "fit_suggestion_model", "get_modification_suggestions",
             "get_suggested_structural_paths", "%||%")
 for (e in exprs) if (is.call(e) && identical(e[[1]], as.name("<-")) && as.character(e[[2]]) %in% wanted) eval(e)
@@ -25,6 +26,26 @@ mk <- function(paths) {
   s
 }
 
+# Candidates are estimated like the main model. As in the app, a candidate that drops a variable or in which
+# lavaan frees a covariance in place of a removed path is infeasible (score Inf) and can never be optimal.
+make_ctx <- function(d, base_df) {
+  c0 <- list(data = d, missing_method = "listwise", needs_meanstructure = FALSE, meas_lines = NULL,
+             extra_lines = NULL, base_fit = NULL)
+  b <- fit_candidate_model(base_df, c0)
+  c0$required_vars <- required_struct_vars(base_df, b)
+  c0$base_ov <- lavNames(b, "ov"); c0$base_cov_pairs <- free_cov_pairs(b)
+  c0
+}
+cand_scores <- function(df, ctx) {      # c(AIC, BIC); Inf for infeasible, failed or improper candidates
+  out <- c(Inf, Inf)
+  if (!check_variable_isolation(df, character(0), character(0), struct_pred_cols(df), ctx$required_vars)) return(out)
+  fm <- fit_candidate_model(df, ctx)
+  if (is.null(fm) || !isTRUE(lavInspect(fm, "converged")) || !fit_is_proper(fm)) return(out)
+  chk <- candidate_structure_check(fm, ctx)
+  if (!chk$vars_ok || chk$replaced) return(out)
+  c(AIC(fm), BIC(fm))
+}
+
 # ---------- A. Exhaustive pruning from an over-specified model ----------
 full_paths <- list(c("m","x1"), c("m","x2"), c("m","x3"), c("y","m"), c("y","x1"), c("y","x2"), c("y","x3"))
 true_idx   <- c(1, 2, 4, 7)                      # m~x1, m~x2, y~m, y~x3 are real; the rest are false
@@ -34,17 +55,14 @@ full_df <- mk(full_paths)
 
 run_pruning <- function(n) {
   d <- gen(n)
-  ctx <- list(data = d, missing_method = "listwise", needs_meanstructure = FALSE, meas_lines = NULL,
-              extra_lines = NULL, anchor_vars = active_struct_vars(full_df),
-              baseline_dvs = struct_dependents(full_df), baseline_edges = struct_edges(full_df), base_fit = NULL)
+  ctx <- make_ctx(d, full_df)
   aic <- bic <- rep(Inf, nrow(grid))
   for (g in seq_len(nrow(grid))) {
     keep <- grid[g, ]
     df <- mk(full_paths[keep])
     if (!length(active_struct_vars(df))) next
-    fm <- fit_candidate_model(df, ctx)
-    if (is.null(fm) || !isTRUE(lavInspect(fm, "converged")) || !fit_is_proper(fm)) next
-    aic[g] <- AIC(fm); bic[g] <- BIC(fm)
+    sc <- cand_scores(df, ctx)
+    aic[g] <- sc[1]; bic[g] <- sc[2]
   }
   res <- lapply(list(AIC = aic, BIC = bic), function(sc) {
     keep <- grid[which.min(sc), ]

@@ -16,17 +16,14 @@ path_names <- vapply(full_paths, function(p) paste0(p[2], " -> ", p[1]), "")   #
 
 run_rep <- function(n, gen_fun = gen) {
   d <- gen_fun(n)
-  ctx <- list(data = d, missing_method = "listwise", needs_meanstructure = FALSE, meas_lines = NULL, extra_lines = NULL,
-              anchor_vars = active_struct_vars(full_df), baseline_dvs = struct_dependents(full_df),
-              baseline_edges = struct_edges(full_df), base_fit = NULL)
+  ctx <- make_ctx(d, full_df)
   cache <- new.env()
   sc <- function(keep) {                       # c(AIC, BIC); Inf for empty / failed / improper models
     key <- paste(as.integer(keep), collapse = "")
     if (!is.null(cache[[key]])) return(cache[[key]])
     out <- c(Inf, Inf)
     if (any(keep)) {
-      fm <- fit_candidate_model(mk(full_paths[keep]), ctx)
-      if (!is.null(fm) && isTRUE(lavInspect(fm, "converged")) && fit_is_proper(fm)) out <- c(AIC(fm), BIC(fm))
+      out <- cand_scores(mk(full_paths[keep]), ctx)
     }
     cache[[key]] <- out; out
   }
