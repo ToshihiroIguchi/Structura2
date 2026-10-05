@@ -4156,7 +4156,9 @@ server <- function(input, output, session) {
     criterion <- input$prune_criterion
     strategy <- input$prune_strategy
     total_comb <- 2^M
-    max_comb <- input$max_exhaustive_comb %||% 1024
+    # An empty or invalid threshold field arrives as NA; fall back to the default instead of failing in `if`
+    max_comb <- suppressWarnings(as.numeric(input$max_exhaustive_comb %||% 1024))
+    if (length(max_comb) != 1 || !is.finite(max_comb) || max_comb < 1) max_comb <- 1024
 
     eff_strategy <- strategy
     if (strategy == "adaptive") {
@@ -4164,7 +4166,22 @@ server <- function(input, output, session) {
         eff_strategy <- "exhaustive"
       } else {
         eff_strategy <- "stepwise"
+        showNotification(
+          sprintf("Search space (%s combinations) exceeds the threshold (%s): using Stepwise Search, which does not guarantee the global optimum.",
+                  format(total_comb, big.mark = ",", scientific = FALSE), format(max_comb, big.mark = ",", scientific = FALSE)),
+          type = "message", duration = 8)
       }
+    } else if (strategy == "exhaustive" && total_comb > max_comb) {
+      showModal(modalDialog(
+        title = "Auto-Optimize Warning",
+        div(class = "alert alert-warning",
+            sprintf("Exhaustive Search would need %s combinations (%d removable paths), which exceeds the threshold of %s. ",
+                    format(total_comb, big.mark = ",", scientific = FALSE), M, format(max_comb, big.mark = ",", scientific = FALSE)),
+            "Lock more paths, raise the threshold, or choose another search strategy (e.g. Stepwise or Adaptive)."),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+      return()
     }
 
     base_ms <- lavaan::fitMeasures(base_model$fit, c("aic", "bic", "cfi", "rmsea", "srmr"))
