@@ -592,8 +592,6 @@ parse_model_spec_json <- function(txt) {
       layout_style         = pick(s$layout_style, c("dot_LR", "dot_TB", "neato", "fdp", "circo", "twopi")),
       diagram_std          = lgl(s$diagram_std),
       show_suggested_paths = lgl(s$show_suggested_paths),
-      mi_threshold         = num(s$mi_threshold),
-      epc_threshold        = num(s$epc_threshold),
       max_suggestions      = num(s$max_suggestions)
     )
     spec <- list(
@@ -1505,6 +1503,13 @@ ui <- fluidPage(
             '<pre class=\"print-syntax-box\">' + msg.syntax_text + '</pre>' +
           '</div>';
 
+          if (msg.summary_text && msg.summary_text.trim() !== '') {
+            html += '<div style=\"margin-top: 14px;\">' +
+              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Model Summary (lavaan)</div>' +
+              '<pre class=\"print-syntax-box\">' + msg.summary_text + '</pre>' +
+            '</div>';
+          }
+
           reportDiv.innerHTML = html;
 
           setTimeout(function() {
@@ -1814,16 +1819,23 @@ ui <- fluidPage(
                                           class = "btn btn-info",
                                           title = "Auto-Optimize Model: search for the most parsimonious structural paths")
                            ),
-                           actionButton("export_pdf_btn", "PDF",
-                                         class = "btn btn-default",
-                                         title = "Export PDF Report"),
-                           actionButton("export_zip_btn", "ZIP",
-                                         class = "btn btn-default",
-                                         title = "Download Results (ZIP): all result files and the model definition"),
+                           # PDF / ZIP / Saved Models are shown only when they are meaningful (see the visibility observer)
+                           shinyjs::hidden(
+                             actionButton("export_pdf_btn", "PDF",
+                                          class = "btn btn-default",
+                                          title = "Export PDF Report")
+                           ),
+                           shinyjs::hidden(
+                             actionButton("export_zip_btn", "ZIP",
+                                          class = "btn btn-default",
+                                          title = "Download Results (ZIP): all result files and the model definition")
+                           ),
                            # Opens the Saved Models dialog (browser storage + JSON); see saved_models_modal()
-                           actionButton("saved_models_btn", "Saved Models",
-                                        class = "btn btn-default",
-                                        title = "Save, load or delete models kept in this browser; import / export JSON")
+                           shinyjs::hidden(
+                             actionButton("saved_models_btn", "Saved Models",
+                                          class = "btn btn-default",
+                                          title = "Save, load or delete models kept in this browser; import / export JSON")
+                           )
                        ),
                       shinyjs::hidden(
                         div(id = "latent_error_box",
@@ -1840,20 +1852,17 @@ ui <- fluidPage(
                       tags$hr(),
                       div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; flex-wrap: wrap; gap: 8px;",
                           h4("Structural Model", style = "margin: 0; font-weight: 600;"),
-                          div(style = "margin-bottom: 0;",
-                              checkboxInput("show_suggested_paths", "Highlight suggested paths (by Modification Indices)", value = TRUE)
+                          div(style = "display: flex; align-items: center; gap: 12px; flex-wrap: wrap;",
+                              div(style = "margin-bottom: 0;",
+                                  checkboxInput("show_suggested_paths", "Highlight top N paths by Modification Indices", value = TRUE, width = "auto")),
+                              conditionalPanel(
+                                condition = "input.show_suggested_paths",
+                                div(style = "display: flex; align-items: center; gap: 6px;",
+                                    tags$span("N:", style = "font-weight: 600;"),
+                                    div(style = "margin-bottom: -15px;",
+                                        numericInput("max_suggestions", NULL, value = 5, min = 1, step = 1, width = "70px")))
+                              )
                           )
-                      ),
-                      conditionalPanel(
-                        condition = "input.show_suggested_paths",
-                        div(style = "display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 4px;",
-                            div(style = "width: 210px;",
-                                numericInput("mi_threshold", "MI threshold (6.63 = p < .01):", value = 6.63, min = 0, step = 0.5)),
-                            div(style = "width: 170px;",
-                                numericInput("epc_threshold", "Min |std.EPC|:", value = 0.1, min = 0, max = 1, step = 0.05)),
-                            div(style = "width: 170px;",
-                                numericInput("max_suggestions", "Max highlighted paths:", value = 5, min = 1, step = 1))
-                        )
                       ),
                       p("Color intensity indicates R² strength (white: low, red: high). ",
                         tags$span(style = "color: #2563eb; font-weight: 600;", "Blue border"),
@@ -1864,19 +1873,6 @@ ui <- fluidPage(
                         style = "font-size: 12px; color: #666; margin-bottom: 10px;"),
                       uiOutput("suggestion_status_ui"),
                       rHandsontableOutput("checkbox_matrix"),
-                      tags$details(
-                        style = "margin-top: 10px; border: 1px solid #ddd; padding: 8px 10px; border-radius: 4px; background-color: #fafafa;",
-                        tags$summary(style = "font-weight: 600; cursor: pointer;",
-                                     "Modification Indices (regressions, residual covariances, cross-loadings)"),
-                        div(style = "margin-top: 8px;",
-                            DTOutput("mi_table"),
-                            div(style = "margin-top: 8px;",
-                                actionButton("add_mi_to_extra", "Add selected rows to Manual Equations",
-                                             class = "btn btn-default btn-sm"),
-                                tags$span(style = "font-size: 11px; color: #666; margin-left: 8px;",
-                                          "Regressions (~) can also be toggled in the matrix above."))
-                        )
-                      ),
                       tags$hr(),
                       h4("Manual Equations"),
                       div(style = "margin-top: 10px;",
@@ -1884,6 +1880,7 @@ ui <- fluidPage(
                                         "Additional lavaan syntax (one formula per line):",
                                         value = "",
                                         placeholder = "y1 ~ x1 + x2\nlatent2 =~ y3 + y4",
+                                        width = "100%",
                                         rows = 4,
                                         resize = "vertical")
                       ),
@@ -2509,17 +2506,13 @@ server <- function(input, output, session) {
     model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
     sug_fit <- tryCatch(suggestion_fit(), error = function(e) NULL)
     model_items() # establish dependency so the cache is invalidated when structural items (rows/cols) change shape
-    mi_thr  <- input$mi_threshold %||% 6.63
-    epc_thr <- input$epc_threshold %||% 0
-    if (!is.numeric(mi_thr) || is.na(mi_thr)) mi_thr <- 6.63
-    if (!is.numeric(epc_thr) || is.na(epc_thr)) epc_thr <- 0
     max_sug <- input$max_suggestions %||% 5
     if (!is.numeric(max_sug) || is.na(max_sug) || max_sug < 1) max_sug <- 5
     # Matching is by variable name against the current table, so paths the user has just ticked
     # (but not yet fitted) are no longer suggested; suggestion_status_ui flags the stale state.
     mat <- isolate(struct_table_data())
     if (!is.null(model_res) && isTRUE(model_res$ok) && !is.null(sug_fit) && !is.null(mat)) {
-      sug <- tryCatch(get_suggested_structural_paths(sug_fit, mat, mi_threshold = mi_thr, epc_threshold = epc_thr,
+      sug <- tryCatch(get_suggested_structural_paths(sug_fit, mat, mi_threshold = 0, epc_threshold = 0,
                                                     max_paths = max_sug),
                       error = function(e) NULL)
       cached_suggested_matrix(sug)
@@ -2543,52 +2536,6 @@ server <- function(input, output, session) {
                  "click ", tags$b("Run"), " to refresh them."))
     }
     NULL
-  })
-
-  # Full MI list (regressions, residual covariances, cross-loadings) from the last successful fit
-  mi_table_data <- reactive({
-    if (!isTRUE(input$show_suggested_paths)) return(NULL)
-    sug_fit <- tryCatch(suggestion_fit(), error = function(e) NULL)
-    if (is.null(sug_fit)) return(NULL)
-    mi_thr  <- input$mi_threshold %||% 6.63
-    epc_thr <- input$epc_threshold %||% 0
-    if (!is.numeric(mi_thr) || is.na(mi_thr)) mi_thr <- 6.63
-    if (!is.numeric(epc_thr) || is.na(epc_thr)) epc_thr <- 0
-    res <- tryCatch(get_modification_suggestions(sug_fit, mi_thr, epc_thr), error = function(e) NULL)
-    if (is.null(res)) return(NULL)
-    res <- head(res, 50)
-    data.frame(
-      Syntax = paste(res$lhs, res$op, res$rhs),
-      Type = c("~" = "Regression", "~~" = "Residual covariance", "=~" = "Cross-loading")[res$op],
-      MI = round(res$mi, 2),
-      EPC = round(res$epc, 3),
-      `std.EPC` = if ("sepc.all" %in% names(res)) round(res$sepc.all, 3) else NA_real_,
-      check.names = FALSE, stringsAsFactors = FALSE, row.names = NULL
-    )
-  })
-
-  output$mi_table <- renderDT({
-    tbl <- mi_table_data()
-    validate(need(!is.null(tbl) && nrow(tbl) > 0,
-                  "No modification indices above the current thresholds (or the model has not been fitted yet)."))
-    datatable(tbl, rownames = FALSE, selection = "multiple",
-              options = list(pageLength = 5, dom = "tp", scrollX = TRUE))
-  }, server = FALSE)
-
-  observeEvent(input$add_mi_to_extra, {
-    tbl <- mi_table_data()
-    sel <- input$mi_table_rows_selected
-    if (is.null(tbl) || !length(sel)) {
-      showNotification("Select one or more rows in the Modification Indices table first.", type = "warning", duration = 4)
-      return()
-    }
-    new_lines <- tbl$Syntax[sel]
-    existing <- strsplit(input$extra_eq %||% "", "\\n")[[1]]
-    existing <- trimws(existing); existing <- existing[nzchar(existing)]
-    updateTextAreaInput(session, "extra_eq", value = paste(unique(c(existing, new_lines)), collapse = "\n"))
-    showNotification(
-      sprintf("Added %d line(s) to Manual Equations. Click Run to refit; MI values change after each addition, so add one at a time when possible.", length(new_lines)),
-      type = "message", duration = 6)
   })
 
   output$checkbox_matrix <- renderRHandsontable({
@@ -2735,8 +2682,6 @@ server <- function(input, output, session) {
       layout_style         = input$layout_style %||% "dot_LR",
       diagram_std          = isTRUE(input$diagram_std),
       show_suggested_paths = isTRUE(input$show_suggested_paths),
-      mi_threshold         = input$mi_threshold %||% 6.63,
-      epc_threshold        = input$epc_threshold %||% 0.1,
       max_suggestions      = input$max_suggestions %||% 5
     )
   }
@@ -3221,7 +3166,11 @@ server <- function(input, output, session) {
         param_table_html     = param_html,
         defined_effects_html = defined_effects_html,
         opt_history_html     = opt_history_html,
-        syntax_text          = htmltools::htmlEscape(paste(model_res$syntax, collapse = "\n"))
+        syntax_text          = htmltools::htmlEscape(paste(model_res$syntax, collapse = "\n")),
+        summary_text         = htmltools::htmlEscape(paste(
+          tryCatch(utils::capture.output(print(summary(fit, fit.measures = TRUE))),
+                   error = function(e) "Model summary is not available."),
+          collapse = "\n"))
       )
 
       session$sendCustomMessage("prepare_and_print_pdf_report", payload)
@@ -3488,8 +3437,6 @@ server <- function(input, output, session) {
       if (!is.null(s$layout_style))   updateSelectInput(session, "layout_style", selected = s$layout_style)
       if (!is.null(s$diagram_std))    updateCheckboxInput(session, "diagram_std", value = s$diagram_std)
       if (!is.null(s$show_suggested_paths)) updateCheckboxInput(session, "show_suggested_paths", value = s$show_suggested_paths)
-      if (!is.null(s$mi_threshold))   updateNumericInput(session, "mi_threshold", value = s$mi_threshold)
-      if (!is.null(s$epc_threshold))  updateNumericInput(session, "epc_threshold", value = s$epc_threshold)
       if (!is.null(s$max_suggestions)) updateNumericInput(session, "max_suggestions", value = s$max_suggestions)
       updateTextAreaInput(session, "extra_eq", value = spec$manual_equations)
       if (logs_changed) updateCheckboxGroupInput(session, "log_columns", selected = target_logs)
@@ -3643,8 +3590,6 @@ server <- function(input, output, session) {
       if (!is.null(vs) && nrow(vs) > 0) add("variable_summary.csv", df_to_csv_text(vs))
       rel <- tryCatch(compute_latent_reliability(fit, df_fit), error = function(e) NULL)
       if (!is.null(rel) && nrow(rel) > 0) add("reliability.csv", df_to_csv_text(rel))
-      mi <- tryCatch(mi_table_data(), error = function(e) NULL)
-      if (!is.null(mi) && nrow(mi) > 0) add("modification_indices.csv", df_to_csv_text(mi))
 
       add("model_syntax.txt", paste(model_res$syntax, collapse = "\n"))
       if (!is.null(model_res$snapshot)) add("model.json", spec_to_json(model_res$snapshot))
@@ -3667,7 +3612,6 @@ server <- function(input, output, session) {
         "fit_measures.csv          every fit measure reported by lavaan",
         "variable_summary.csv      valid / missing counts, mean, SD, skewness, kurtosis",
         "reliability.csv           Cronbach's alpha, CR, AVE per latent construct (if any)",
-        "modification_indices.csv  modification indices (if shown on the Model tab)",
         "model_syntax.txt          lavaan model syntax",
         "model.json                the model definition: Saved Models > Import JSON restores it",
         "lavaan_summary.txt        lavaan summary() output",
@@ -3717,6 +3661,15 @@ server <- function(input, output, session) {
     } else {
       shinyjs::hide("prune_model_btn")
     }
+  })
+
+  # PDF / ZIP need a successfully fitted model; Saved Models needs loaded data (models store variable names only)
+  observe({
+    model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
+    shinyjs::toggle("export_pdf_btn", condition = !is.null(model_res) && isTRUE(model_res$ok) && !is.null(model_res$fit))
+    shinyjs::toggle("export_zip_btn", condition = !is.null(model_res) && isTRUE(model_res$ok) && !is.null(model_res$fit))
+    df <- tryCatch(processed_data(), error = function(e) NULL)
+    shinyjs::toggle("saved_models_btn", condition = is.data.frame(df) && ncol(df) > 0)
   })
 
   # Trigger Auto-Optimize Step 1 Modal
