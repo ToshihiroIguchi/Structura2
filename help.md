@@ -1,5 +1,3 @@
-<img src="www/logo.png" width="25%" style="margin-bottom: 15px;" />
-
 # Structura2: User Manual & Reference Guide
 ### *Structural Insights, Simplified.*
 
@@ -158,8 +156,8 @@ The Structural Model defines linear regressions ($\sim$ operator) among dependen
 
 ### 4.3 Suggested Paths via Modification Indices
 Structura2 incorporates automated **Modification Index (MI)** detection to recommend exploratory paths for model refinement:
-* **Thresholds**: Identifies unselected structural paths where the expected univariate $\chi^2$ drop exceeds the **MI threshold** (default **$6.63$**, $p < .01$ for $1$ degree of freedom) *and* the absolute standardized expected parameter change reaches the **|std.EPC| threshold** (default $0.1$). Both are adjustable in the UI.
-* **Ranking and Cycles**: The strongest suggestion (rank #1) gets a thicker border; paths that would close a feedback loop with existing paths are drawn in orange. A collapsible **Modification Indices** table also lists residual covariances (`~~`) and cross-loadings (`=~`), which can be appended to Manual Equations.
+* **Top N Candidates**: Unselected structural paths are ranked by their expected univariate $\chi^2$ drop (MI), and the top **N** are highlighted (**Number of highlighted paths**, default $5$). No threshold is applied, so judge each candidate by its theoretical plausibility.
+* **Ranking and Cycles**: The strongest suggestion (rank #1) gets a thicker border; paths that would close a feedback loop with existing paths are drawn in orange.
 * **Blue Border Highlighting**: When enabled via the **Highlight suggested paths** checkbox, potential paths display a prominent blue border.
 * **Informative Tooltip**: Hovering your cursor over a highlighted cell displays:
   - **MI**: Expected decrease in model $\chi^2$ test statistic if this path were freely estimated.
@@ -193,7 +191,7 @@ The **Saved Models** button (Model tab, next to **ZIP**) opens a dialog that kee
 * **Named models**: type a name and click **Save**; choose a saved model and click **Load** or **Delete**. Up to 20 models are kept.
 * **Export JSON / Import JSON**: writes the current model to a `.json` file (and reads one back). Use this as your durable backup and to move a model to another browser or computer.
 
-What is saved: the measurement rows, the active structural paths, the manual equations, and the analysis settings (analysis mode, missing-data handling, log-transform and displayed columns, diagram options, modification-index thresholds). **No data values are ever saved** — only variable names — so the same dataset (or one with the same column names) must be loaded first.
+What is saved: the measurement rows, the active structural paths, the manual equations, and the analysis settings (analysis mode, missing-data handling, log-transform and displayed columns, diagram options, number of highlighted paths). **No data values are ever saved** — only variable names — so the same dataset (or one with the same column names) must be loaded first.
 
 Things to know:
 * A restore **does not fit the model**: review the tables, then click **Run**.
@@ -365,7 +363,6 @@ Clicking **ZIP** on the Model tab (after a successful fit) saves `structura2_res
 | `fit_measures.csv` | Every fit measure reported by lavaan |
 | `variable_summary.csv` | Valid / missing counts, mean, SD, skewness, kurtosis |
 | `reliability.csv` | Cronbach's $\alpha$, CR, AVE per latent construct (only if the model has latent variables) |
-| `modification_indices.csv` | Modification indices (only if *Highlight suggested paths* is enabled) |
 | `model_syntax.txt` | The lavaan syntax that was fitted |
 | `model.json` | The model definition; import it via **Saved Models → Import JSON** to restore the model |
 | `lavaan_summary.txt` | Verbatim `lavaan::summary()` output |
