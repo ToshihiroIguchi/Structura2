@@ -377,29 +377,39 @@ The files describe the model **as it was fitted** (data and settings captured wh
 
 When estimating structural equation models, mathematical anomalies in empirical covariance matrices can cause estimation warnings or failures. Structura2 catches these issues gracefully:
 
-### 1. "Sample covariance matrix is not positive-definite"
-* **Meaning**: The sample covariance matrix cannot be inverted because one or more eigenvalues are zero or negative.
+### 1. "These variables are exactly linearly dependent: ..."
+* **Meaning**: One variable is an exact copy or an exact sum of others, so the covariance matrix cannot be inverted. Structura2 names the variables involved before estimation starts.
 * **Common Causes**:
-  - Near-perfect collinearity ($r > 0.95$) between two observed variables.
-  - Linear combination dependencies (e.g., including subscale items alongside their computed total score in the same model).
-  - Sample size is smaller than the number of observed indicators ($N < p$).
-* **Fix**: In the **Filtered** tab, remove redundant variables. Look at the correlation heatmap in the Structural Model to spot dark-red pairs.
+  - A duplicated column, or a total score included together with the items it sums.
+* **Fix**: Remove one of the listed variables in **Filtered > Display columns**.
 
-### 2. "Model did not converge: Estimation algorithm could not find a stable solution"
+### 2. "Too few rows: the model uses p variables but only N complete rows are available"
+* **Meaning**: Fewer complete rows than variables ($N < p$), so the covariance matrix is singular.
+* **Fix**: Use more data, remove variables from the model, or choose a missing-data method such as FIML.
+
+### 3. "The model is not identified (df < 0)"
+* **Meaning**: The model estimates more parameters than the $p(p+1)/2$ distinct variances and covariances in the data. Structura2 reports the shortfall and lists likely candidates (residual covariances, factors with few indicators).
+* **Common Causes**:
+  - A factor with only one or two indicators and no other factor to anchor it.
+  - Too many residual covariances (`~~`) or feedback loops.
+* **Fix**: Remove at least the reported number of free parameters, or add indicators. If standard errors cannot be computed even though $df \ge 0$, the model is also not identified; simplify it the same way.
+
+### 4. "Results are shown but may be unreliable"
+* **Meaning**: The model was estimated, but the solution should be treated with caution.
+* **Typical messages**:
+  - *Negative variance (Heywood case)*: usually too few indicators per factor or a small sample.
+  - *Factors are indistinguishable*: two factors correlate at about 1; merge them into one factor.
+  - *Highly correlated predictors* ($|r| \ge 0.95$): coefficients and standard errors become unstable. Combine the variables as indicators of one latent factor, or keep only one.
+* **Note**: High correlation alone is not an error. Indicators of the same factor are expected to correlate.
+
+### 5. "Model did not converge: Estimation algorithm could not find a stable solution"
 * **Meaning**: The numerical optimization routine reached its iteration ceiling before finding a gradient minimum.
 * **Common Causes**:
   - Vastly differing variable variances (e.g., mixing income in tens of thousands with age in tens).
   - Problematic starting values in complex reciprocal feedback loops.
 * **Fix**: Switch **Analysis mode** to `Standardized (scaled)` in the **Filtered** tab. If running in Raw mode, apply a `log10` transformation to high-magnitude variables.
 
-### 3. "Model identification problem / Insufficient degrees of freedom ($df < 0$)"
-* **Meaning**: You are attempting to estimate more parameters (loadings, regressions, variances) than the unique elements available in the covariance matrix ($p(p+1)/2$).
-* **Common Causes**:
-  - Defining a single-indicator latent factor without fixing its error variance.
-  - Saturated or over-parameterized feedback structures.
-* **Fix**: Ensure latent factors have at least three indicators, or introduce equality constraints using the **Manual Equations** box.
-
-### 4. "Latent variable names cannot be the same as observed variables"
+### 6. "Latent variable names cannot be the same as observed variables"
 * **Meaning**: In lavaan syntax, construct names must be distinct from manifest column headers.
 * **Fix**: Rename the latent variable in the **Measurement Model** table (e.g., use `F_Math` instead of `Math`).
 
