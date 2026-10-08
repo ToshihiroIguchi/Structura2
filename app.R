@@ -3015,7 +3015,9 @@ server <- function(input, output, session) {
 
       list(ok = converged,
            identified = identified,
-           ident_df = if (!identified) fit_identification(fm)$df else NA_real_,
+           # Only a NEGATIVE df is a df violation to mark in red; no standard errors with df >= 0 is reported by the
+           # message box alone (p, NFI and CFI can still be computed there)
+           ident_df = if (!identified && isTRUE(fit_identification(fm)$df < 0)) fit_identification(fm)$df else NA_real_,
            fail_kind = if (converged) "" else "convergence",
            msg_title = if (!identified) "The model is not identified. Results are shown for inspection only." else NULL,
            msg_level = if (!identified) "error" else NULL,
@@ -3113,7 +3115,7 @@ server <- function(input, output, session) {
              gfi = .90, agfi = .90, nfi = .90, cfi = .90)
     # Not identified: lavaan's values are shown as they are; the ones that cannot be computed (p, NFI, CFI)
     # and the df are red
-    unident <- isFALSE(model$identified)
+    unident <- isFALSE(model$identified) && is.finite(model$ident_df)
     fmt <- function(idx, v) {
       ok <- switch(idx,
                    pvalue = v >= thr["pvalue"],
@@ -3283,7 +3285,7 @@ server <- function(input, output, session) {
                  cached_params       = if (std_for_plot) model$pe_std else model$pe_raw,
                  cached_fit_measures = model$fit_measures,
                  # Not identified: the incalculable values (p, NFI, CFI) and the df are drawn in red
-                 ident_df            = if (isFALSE(model$identified)) model$ident_df else NULL),
+                 ident_df            = if (isFALSE(model$identified) && is.finite(model$ident_df)) model$ident_df else NULL),
       error = function(e) e)
     if (inherits(dot_code, "error")) {
       session$sendCustomMessage("update_sem_plot", list(
