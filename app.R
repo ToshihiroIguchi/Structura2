@@ -827,6 +827,13 @@ diagnose_fit_inputs <- function(syntax_str, data, missing_method, needs_meanstru
                             meanstructure = isTRUE(needs_meanstructure), auto.var = TRUE,
                             auto.cov.lv.x = TRUE, auto.cov.y = TRUE, int.ov.free = TRUE,
                             auto.fix.first = TRUE, auto.fix.single = TRUE)
+    # Variables used by the model but absent from the data: name them (lavaan's own wording varies by version)
+    absent <- setdiff(lavaan::lavNames(pt, "ov"), names(data))
+    if (length(absent) > 0) {
+      return(sprintf(
+        "These variables are used in the model but not found in the data: %s. Check the spelling in Manual Equations (names are case-sensitive), or select the variable in Filtered > Display columns.",
+        fmt_var_list(absent)))
+    }
     ov <- intersect(lavaan::lavNames(pt, "ov"), names(data))
     p <- length(ov)
     if (p == 0) return(msgs)
@@ -1108,6 +1115,12 @@ ui <- fluidPage(
 .shiny-modal .modal-body    { padding: 20px !important; }
 .shiny-modal .modal-footer  { padding: 10px !important; }
 .alert-box { background:#fff3cd;border:1px solid #ffeeba;border-radius:6px;padding:10px;margin-bottom:10px; }
+.alert-box.alert-box-error { background:#f8d7da;border-color:#f5c6cb;color:#721c24; }
+.alert-box.alert-box-warning { background:#fff3cd;border-color:#ffeeba;color:#856404; }
+.alert-box.alert-box-info { background:#e9ecef;border-color:#ced4da;color:#495057; }
+/* A validate() message from an htmlwidget (DT) is absolutely positioned and overlaps the next element; keep it in the flow */
+.htmlwidgets-error { position: static !important; height: auto !important; padding: 4px 0 8px; }
+.html-widget-output[style*='visibility: hidden'] { height: 0 !important; overflow: hidden; }
 #fit_alert { white-space: pre-wrap; }
 #lavaan_model { white-space: pre; }
 #approx_eq    { white-space: pre-wrap; }
@@ -2046,16 +2059,17 @@ ui <- fluidPage(
 
                # ---------- Right column (outputs) -----------------
                column(width = 5,
+                      # ---------- Fit message (above the tabs so it is visible on every tab) ----------
+                      shinyjs::hidden(
+                        div(id = "fit_alert_box",
+                            textOutput("fit_alert"),
+                            class = "alert-box")
+                      ),
                       # ---------- Tabset for outputs ---------------
                       tabsetPanel(id = "right_tabs", type = "tabs",
 
                                   # ----- Diagnostics tab ---------------------
                                   tabPanel("Diagnostics",
-                                           shinyjs::hidden(
-                                             div(id = "fit_alert_box",
-                                                 textOutput("fit_alert"),
-                                                 class = "alert-box")
-                                           ),
                                            h4("Fit Indices"),
                                            DTOutput("fit_indices")),
 
@@ -2877,6 +2891,7 @@ server <- function(input, output, session) {
       msg <- if (input$run_model > 0) "Define a model to proceed." else ""
       return(list(ok = FALSE,
                   msg_friendly = msg,
+                  msg_level = "info",
                   fit = NULL,
                   syntax = NULL,
                   pe_std = NULL,
@@ -2972,10 +2987,16 @@ server <- function(input, output, session) {
   }, ignoreNULL = FALSE)  # Initial auto-execution
 
   output$fit_alert <- renderText({
-    msg <- fit_model_safe()$msg_friendly
+    model <- fit_model_safe()
+    msg <- model$msg_friendly
     if (nzchar(msg)) {
+      level <- model$msg_level %||% if (isTRUE(model$ok)) "warning" else "error"
+      for (lv in c("error", "warning", "info")) {
+        if (identical(lv, level)) shinyjs::addClass("fit_alert_box", paste0("alert-box-", lv))
+        else shinyjs::removeClass("fit_alert_box", paste0("alert-box-", lv))
+      }
       shinyjs::show("fit_alert_box")
-      msg
+      if (identical(level, "error")) paste0("Model could not be estimated.\n", msg) else msg
     } else {
       shinyjs::hide("fit_alert_box")
       ""
@@ -2984,9 +3005,14 @@ server <- function(input, output, session) {
   # The box starts hidden; Shiny would never render a hidden output, so it could never reveal itself
   outputOptions(output, "fit_alert", suspendWhenHidden = FALSE)
 
+  # Short placeholder for panels that cannot show results; the full text is in the message box above the tabs
+  unavailable_msg <- function(model) {
+    if (nzchar(model$msg_friendly) && !identical(model$msg_level, "info")) "Not available. See the message above." else ""
+  }
+
   output$fit_indices <- renderDT({
     model <- fit_model_safe()
-    validate(need(model$ok, model$msg_friendly))
+    validate(need(model$ok, unavailable_msg(model)))
     ms <- model$fit_measures
     if (is.null(ms)) {
       fit <- model$fit
@@ -3022,7 +3048,7 @@ server <- function(input, output, session) {
     if (input$analysis_mode == "std")
       return("— Hidden in Standardized mode —")
     model <- fit_model_safe()
-    validate(need(model$ok, model$msg_friendly))
+    validate(need(model$ok, unavailable_msg(model)))
     if (!is.null(model$equations)) {
       paste(model$equations, collapse = "\n")
     } else {
@@ -3126,8 +3152,10 @@ server <- function(input, output, session) {
     # If the model check fails or not run yet
     if (!model$ok) {
       session$sendCustomMessage("update_sem_plot", list(
-        error = TRUE,
-        message = htmltools::htmlEscape(model$msg_friendly)
+        error = FALSE,
+        message = if (nzchar(model$msg_friendly) && !identical(model$msg_level, "info"))
+          "No path diagram: the model could not be estimated. See the message above."
+        else "Define a model to view the path diagram."
       ))
       return()
     }
