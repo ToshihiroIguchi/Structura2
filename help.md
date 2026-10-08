@@ -263,7 +263,7 @@ Upon completion, the Step 2 dialog presents an organized catalog of model candid
   After the refit, Structura2 compares the refitted AIC/BIC with the catalogue values and warns if they differ. Applying a `[Replaced]` candidate shows a warning because the removed association is still part of the model. A `[Not Identified]` candidate cannot be applied.
 
 ### 5.5 Optimizing a Model That Is Not Identified
-A model with $df < 0$, or one whose standard errors cannot be computed (typically a feedback loop such as `x ~ y` and `y ~ x`), still converges but its fit is meaningless: it fits "perfectly" and would otherwise win on AIC/BIC.
+A model with $df < 0$, or one whose standard errors cannot be computed (typically a feedback loop such as `x ~ y` and `y ~ x`), is shown with its violation marked in red (section 8). Its fit is meaningless: it fits "perfectly" and would otherwise win on AIC/BIC.
 * **Start**: Optimize accepts such a model. The Step 1 dialog says that it is not identified.
 * **Search**: *Exhaustive* (and *Adaptive* when it switches to exhaustive) evaluates every combination, so identified candidates simply rank. *Stepwise* and *Simulated Annealing* first remove paths one by one (a *repair phase*, shown in the progress text) until the model is identified, then search from there. *Regularized SEM* needs an identified starting model and is not available.
 * **Ranking**: Models that are not identified (`[Not Identified]`, including the starting model) show no AIC/BIC and are never ranked. Because the starting model has no score, $\Delta AIC$/$\Delta BIC$ against it are not shown and the live chart has no baseline line; compare candidates with `Δ vs Best` and `Weight`.
@@ -394,12 +394,16 @@ When estimating structural equation models, mathematical anomalies in empirical 
 * **Meaning**: Fewer complete rows than variables ($N < p$), so the covariance matrix is singular.
 * **Fix**: Use more data, remove variables from the model, or choose a missing-data method such as FIML.
 
-### 3. "The model is not identified (df < 0)"
-* **Meaning**: The model estimates more parameters than the $p(p+1)/2$ distinct variances and covariances in the data. Structura2 reports the shortfall and lists likely candidates (residual covariances, factors with few indicators).
+### 3. "The model is not identified. Results are shown for inspection only."
+* **Meaning**: The model estimates more parameters than the $p(p+1)/2$ distinct variances and covariances in the data ($df < 0$), or its standard errors cannot be computed. lavaan still returns estimates, so Structura2 **shows them** (diagram, Equations, Parameter Estimates, Model Summary) but marks the violation in red:
+  - A red message box above the tabs, with the number of parameters to remove and likely candidates (residual covariances, factors with few indicators).
+  - In the path diagram and the **Fit Indices** table, the values that cannot be computed ($p$-value, NFI, CFI) are shown as red `NA`, together with the red $df$ (e.g. `p = NA (df = -1)`). Other values are shown exactly as lavaan reports them, but **they are not meaningful**: with $df < 0$ the model reproduces the data perfectly, so RMSEA and SRMR become 0 and GFI becomes 1.
+  - A red note on the **Details** tab; the ZIP `README.txt` and the PDF report carry a warning as well.
+  - The model is not autosaved as "Last successful fit", and Modification-Index suggestions are not shown.
 * **Common Causes**:
   - A factor with only one or two indicators and no other factor to anchor it.
   - Too many residual covariances (`~~`) or feedback loops.
-* **Fix**: Remove at least the reported number of free parameters, or add indicators. If standard errors cannot be computed even though $df \ge 0$, the model is also not identified; simplify it the same way.
+* **Fix**: Remove at least the reported number of free parameters, or add indicators. If standard errors cannot be computed even though $df \ge 0$, the model is also not identified; simplify it the same way. For models built in the structural matrix, **Optimize** can remove paths automatically (section 5.5).
 
 ### 4. "Results are shown but may be unreliable"
 * **Meaning**: The model was estimated, but the solution should be treated with caution.
