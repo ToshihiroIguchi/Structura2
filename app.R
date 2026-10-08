@@ -813,6 +813,120 @@ run_lavaan_sem <- function(syntax_str, data, missing_method, needs_meanstructure
               ...)
 }
 
+# ---- Beginner-oriented diagnostics ----
+# Principle: block only what is mathematically impossible (errors); report "estimated but unreliable"
+# situations as warnings. Detection uses lavInspect() values and linear algebra, never lavaan warning text.
+fmt_var_list <- function(x) paste(x, collapse = ", ")
+
+# Checks run BEFORE estimation. Returns a character vector of blocking messages (empty = OK).
+diagnose_fit_inputs <- function(syntax_str, data, missing_method, needs_meanstructure) {
+  msgs <- character(0)
+  tryCatch({
+    # The parameter table is built without touching the data, so it works even when estimation would fail
+    pt <- lavaan::lavaanify(syntax_str, model.type = "sem", fixed.x = FALSE,
+                            meanstructure = isTRUE(needs_meanstructure), auto.var = TRUE,
+                            auto.cov.lv.x = TRUE, auto.cov.y = TRUE, int.ov.free = TRUE,
+                            auto.fix.first = TRUE, auto.fix.single = TRUE)
+    ov <- intersect(lavaan::lavNames(pt, "ov"), names(data))
+    p <- length(ov)
+    if (p == 0) return(msgs)
+    X <- data[, ov, drop = FALSE]
+    num <- vapply(X, is.numeric, logical(1))
+    X <- X[, num, drop = FALSE]
+    n_used <- if (identical(missing_method, "listwise")) sum(stats::complete.cases(X)) else nrow(X)
+
+    if (n_used < p) {
+      msgs <- c(msgs, sprintf(
+        "Too few rows: the model uses %d variables but only %d complete rows are available. Remove variables from the model, or use a larger data set (or a missing-data method such as FIML).",
+        p, n_used))
+    } else if (ncol(X) >= 2) {
+      # Exact linear dependency: smallest eigenvalue of the correlation matrix is ~0
+      Xc <- stats::na.omit(X)
+      sds <- vapply(Xc, stats::sd, numeric(1))
+      Xc <- Xc[, !is.na(sds) & sds > 1e-12, drop = FALSE]
+      if (nrow(Xc) > 1 && ncol(Xc) >= 2) {
+        eg <- eigen(stats::cor(Xc), symmetric = TRUE)
+        if (min(eg$values) < 1e-8) {
+          v <- eg$vectors[, which.min(eg$values)]
+          culprits <- colnames(Xc)[abs(v) > 0.1]
+          msgs <- c(msgs, sprintf(
+            "These variables are exactly linearly dependent: %s. This happens when a column is duplicated or is a total/sum of other columns. Remove one of them from the model (Filtered tab > Display columns).",
+            fmt_var_list(culprits)))
+        }
+      }
+    }
+
+    if (length(msgs) == 0) {
+      npar <- max(pt$free)
+      n_info <- p * (p + 1) / 2 + if (isTRUE(needs_meanstructure)) p else 0
+      df <- n_info - npar
+      if (is.finite(df) && df < 0) {
+        few <- character(0)
+        for (lv in lavaan::lavNames(pt, "lv")) {
+          k <- sum(pt$op == "=~" & pt$lhs == lv)
+          if (k < 3) few <- c(few, sprintf("%s (%d indicator%s)", lv, k, if (k == 1) "" else "s"))
+        }
+        covs <- pt$op == "~~" & pt$lhs != pt$rhs & pt$free > 0
+        cov_txt <- if (any(covs)) paste0(pt$lhs[covs], " ~~ ", pt$rhs[covs]) else character(0)
+        msgs <- c(msgs, paste0(
+          sprintf("The model is not identified: it estimates %d parameters but the data supply only %d pieces of information (df = %d). Remove at least %d free parameter(s).",
+                  npar, n_info, as.integer(df), as.integer(-df)),
+          if (length(cov_txt)) paste0(" Candidates: residual covariances (", fmt_var_list(cov_txt), ") or paths."),
+          if (length(few)) paste0(" Factors with few indicators: ", fmt_var_list(few), ". Add indicators or simplify the model.")))
+      }
+    }
+  }, error = function(e) NULL)
+  msgs
+}
+
+# Checks run AFTER a converged fit. Returns list(errors, warnings) of character vectors.
+diagnose_fit_results <- function(fit, data) {
+  errs <- character(0); warns <- character(0)
+  tryCatch({
+    pe <- lavaan::parameterEstimates(fit)
+    free_rows <- pe[pe$op != ":=" & !is.na(pe$est), , drop = FALSE]
+    if (any(is.na(free_rows$se))) {
+      errs <- c(errs, "The model is not identified: standard errors could not be computed. Typical causes are a factor with too few indicators, feedback loops (a ~ b and b ~ a), or too many free covariances. Simplify the model or add constraints.")
+    } else if (!fit_is_proper(fit)) {
+      th <- tryCatch(lavaan::lavInspect(fit, "est"), error = function(e) NULL)
+      neg <- character(0)
+      if (!is.null(th)) {
+        for (m in c("theta", "psi")) {
+          if (!is.null(th[[m]]) && is.matrix(th[[m]])) {
+            d <- diag(th[[m]]); neg <- c(neg, names(d)[!is.na(d) & d < 0])
+          }
+        }
+      }
+      if (length(neg)) {
+        warns <- c(warns, sprintf("Negative variance estimated for: %s (Heywood case). Results are not interpretable. Common causes: a factor with few indicators or a small sample.", fmt_var_list(unique(neg))))
+      } else {
+        cl <- tryCatch(lavaan::lavInspect(fit, "cor.lv"), error = function(e) NULL)
+        pairs <- character(0)
+        if (is.matrix(cl) && nrow(cl) >= 2) {
+          for (i in seq_len(nrow(cl) - 1)) for (j in (i + 1):ncol(cl))
+            if (!is.na(cl[i, j]) && abs(cl[i, j]) >= 0.99) pairs <- c(pairs, paste(rownames(cl)[i], "and", colnames(cl)[j]))
+        }
+        warns <- c(warns, if (length(pairs))
+          sprintf("Factors are indistinguishable: %s (correlation ~ 1). Merge them into one factor.", fmt_var_list(pairs))
+        else "The solution is improper (a covariance matrix is not positive definite). Treat the results with caution.")
+      }
+    }
+    # Highly correlated predictors of the same dependent variable
+    reg <- pe[pe$op == "~", , drop = FALSE]
+    for (dv in unique(reg$lhs)) {
+      preds <- intersect(reg$rhs[reg$lhs == dv], names(data))
+      preds <- preds[vapply(data[preds], is.numeric, logical(1))]
+      if (length(preds) < 2) next
+      cm <- suppressWarnings(stats::cor(data[, preds, drop = FALSE], use = "pairwise.complete.obs"))
+      for (i in seq_len(nrow(cm) - 1)) for (j in (i + 1):ncol(cm))
+        if (!is.na(cm[i, j]) && abs(cm[i, j]) >= 0.95)
+          warns <- c(warns, sprintf("%1$s and %2$s are highly correlated (r = %4$.3f) and both predict %3$s, so their coefficients and standard errors are unstable. Combine them as indicators of one latent factor, or keep only one.",
+                                    preds[i], preds[j], dv, cm[i, j]))
+    }
+  }, error = function(e) NULL)
+  list(errors = errs, warnings = unique(warns))
+}
+
 # Free covariances between two different variables as sorted "a ~~ b" keys.
 free_cov_pairs <- function(fit) {
   pt <- tryCatch(lavaan::parTable(fit), error = function(e) NULL)
@@ -994,6 +1108,7 @@ ui <- fluidPage(
 .shiny-modal .modal-body    { padding: 20px !important; }
 .shiny-modal .modal-footer  { padding: 10px !important; }
 .alert-box { background:#fff3cd;border:1px solid #ffeeba;border-radius:6px;padding:10px;margin-bottom:10px; }
+#fit_alert { white-space: pre-wrap; }
 #lavaan_model { white-space: pre; }
 #approx_eq    { white-space: pre-wrap; }
 
@@ -2776,10 +2891,23 @@ server <- function(input, output, session) {
 
       snapshot_error <- NULL
       df_fit <- processed_data()
-      fm <- run_lavaan_sem(paste(ln, collapse = "\n"), df_fit,
+      syntax_chr <- paste(ln, collapse = "\n")
+
+      # Impossible situations are reported before estimation, naming the variables involved
+      pre_errs <- diagnose_fit_inputs(syntax_chr, df_fit, input$missing_method, needs_meanstructure)
+      if (length(pre_errs) > 0) {
+        return(list(ok = FALSE,
+                    msg_friendly = paste(pre_errs, collapse = "\n\n"),
+                    fit = NULL, syntax = NULL, pe_std = NULL, pe_raw = NULL,
+                    fit_measures = NULL, equations = NULL))
+      }
+
+      fm <- run_lavaan_sem(syntax_chr, df_fit,
                            input$missing_method, needs_meanstructure)
 
       converged <- isTRUE(lavInspect(fm, "converged"))
+      post <- if (converged) diagnose_fit_results(fm, df_fit) else list(errors = character(0), warnings = character(0))
+      if (length(post$errors) > 0) converged <- FALSE
       pe_std <- NULL
       pe_raw <- NULL
       fit_meas <- NULL
@@ -2795,9 +2923,14 @@ server <- function(input, output, session) {
       }
 
       list(ok = converged,
-           msg_friendly = if (converged)
-             "" else
-               "Model did not converge. Check for variables with correlation = 1 and remove or combine them.",
+           msg_friendly = if (length(post$errors) > 0)
+             paste(post$errors, collapse = "\n\n")
+           else if (converged)
+             (if (length(post$warnings) > 0)
+               paste0("Results are shown but may be unreliable:\n- ", paste(post$warnings, collapse = "\n- "))
+              else "")
+           else
+             "Model did not converge. Check for variables with correlation = 1 and remove or combine them.",
            fit = fm,
            syntax = ln,
            pe_std = pe_std,
@@ -2823,8 +2956,6 @@ server <- function(input, output, session) {
         friendly_msg <- "Model did not converge: The estimation algorithm could not find a stable solution. Try: (1) Check for perfect correlations between variables, (2) Simplify the model structure, or (3) Use different starting values."
       } else if (grepl("identification|identified", error_msg, ignore.case = TRUE)) {
         friendly_msg <- "Model identification problem: The model is under-identified (too few constraints). Try: (1) Add more observed variables, (2) Reduce the number of parameters, or (3) Add equality constraints."
-      } else if (grepl("degrees of freedom", error_msg, ignore.case = TRUE)) {
-        friendly_msg <- "Insufficient degrees of freedom: The model has too many parameters for the available data. Try: (1) Reduce model complexity, (2) Add more variables, or (3) Use a simpler model structure."
       } else {
         friendly_msg <- paste0("Estimation failed: ", error_msg, ". Try: (1) Check for perfect correlations between variables, (2) Ensure sufficient sample size, or (3) Simplify the model structure.")
       }
@@ -2850,6 +2981,8 @@ server <- function(input, output, session) {
       ""
     }
   })
+  # The box starts hidden; Shiny would never render a hidden output, so it could never reveal itself
+  outputOptions(output, "fit_alert", suspendWhenHidden = FALSE)
 
   output$fit_indices <- renderDT({
     model <- fit_model_safe()
