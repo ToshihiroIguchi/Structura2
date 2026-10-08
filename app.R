@@ -167,7 +167,8 @@ semDiagram <- function(
     twopi_compact     = TRUE,
     cached_params     = NULL,
     cached_fit_measures = NULL,
-    cached_n_obs      = NULL) {
+    cached_n_obs      = NULL,
+    ident_df          = NULL) {
 
   engine <- match.arg(engine, c("dot","neato","fdp","circo","twopi"))
 
@@ -225,8 +226,11 @@ semDiagram <- function(
   vals <- abs(edge_rows[[scale_col]]); vals <- vals[!is.na(vals)]
   max_abs <- if (standardized) 1 else (if (length(vals) == 0 || !is.finite(max(vals))) 1 else max(vals))
 
+  # Not identified (ident_df given): the p-value, NFI and CFI cannot be computed. They are drawn in red as NA
+  # (instead of gray) together with the df, so the violation is visible; other values stay as lavaan reports them.
+  unidentified <- !is.null(ident_df)
   colorize_thresh <- function(v, thr, invert = FALSE) {
-    if (is.na(v)) "gray50"
+    if (is.na(v)) (if (unidentified) "red" else "gray50")
     else if (invert) {
       if (v > thr) "red" else "gray20"
     } else {
@@ -237,8 +241,14 @@ semDiagram <- function(
   fit_block <- if (show_fit) {
     paste0(
       sprintf("N = %d | ", n_obs),
-      sprintf("<font color='%s'>p = %.3f</font> | ",
-              colorize_thresh(fit_measures["pvalue"], 0.05), fit_measures["pvalue"]),
+      if (unidentified) {
+        sprintf("<font color='red'>p = %s (df = %s)</font> | ",
+                if (is.na(fit_measures["pvalue"])) "NA" else sprintf("%.3f", fit_measures["pvalue"]),
+                format(ident_df))
+      } else {
+        sprintf("<font color='%s'>p = %.3f</font> | ",
+                colorize_thresh(fit_measures["pvalue"], 0.05), fit_measures["pvalue"])
+      },
       sprintf("<font color='%s'>SRMR = %.3f</font> | ",
               colorize_thresh(fit_measures["srmr"], 0.08, invert = TRUE), fit_measures["srmr"]),
       sprintf("<font color='%s'>RMSEA = %.3f</font> | ",
@@ -832,13 +842,12 @@ optimize_tip <- function(struct_df) {
   else NULL
 }
 
-# Decides whether Auto-Optimize can start from a fit_model_safe() result. A model that fails only because
-# it is not identified (df < 0 / no standard errors) still converges, so it is a valid starting point.
+# Decides whether Auto-Optimize can start from a fit_model_safe() result. A model that is not identified
+# (df < 0 / no standard errors) is a flagged result (ok = TRUE, identified = FALSE) and a valid starting point:
+# removing paths is often what makes it identified.
 optimization_baseline <- function(model) {
   if (isTRUE(model$ok) && !is.null(model$fit))
-    return(list(usable = TRUE, fit = model$fit, identified = TRUE, msg = ""))
-  if (identical(model$fail_kind, "identification") && !is.null(model$opt_fit))
-    return(list(usable = TRUE, fit = model$opt_fit, identified = FALSE, msg = model$msg_friendly))
+    return(list(usable = TRUE, fit = model$fit, identified = !isFALSE(model$identified), msg = ""))
   list(usable = FALSE, fit = NULL, identified = FALSE, msg = model$msg_friendly %||% "")
 }
 
@@ -917,13 +926,14 @@ diagnose_fit_inputs <- function(syntax_str, data, missing_method, needs_meanstru
   msgs
 }
 
-# Checks run AFTER a converged fit. Returns list(errors, warnings) of character vectors.
+# Checks run AFTER a converged fit. Returns list(errors, warnings, ident): `ident` is the not-identified
+# message (NULL when identified). An unidentified fit is still shown, so it is not an error.
 diagnose_fit_results <- function(fit, data) {
-  errs <- character(0); warns <- character(0)
+  errs <- character(0); warns <- character(0); ident_msg <- NULL
   tryCatch({
     pe <- lavaan::parameterEstimates(fit)
     if (!fit_identification(fit)$identified) {
-      errs <- c(errs, "The model is not identified: standard errors could not be computed. Typical causes are a factor with too few indicators, feedback loops (a ~ b and b ~ a), or too many free covariances. Simplify the model or add constraints.")
+      ident_msg <- "The model is not identified: standard errors could not be computed. Typical causes are a factor with too few indicators, feedback loops (a ~ b and b ~ a), or too many free covariances. Simplify the model or add constraints."
     } else if (!fit_is_proper(fit)) {
       th <- tryCatch(lavaan::lavInspect(fit, "est"), error = function(e) NULL)
       neg <- character(0)
@@ -961,7 +971,7 @@ diagnose_fit_results <- function(fit, data) {
                                     preds[i], preds[j], dv, cm[i, j]))
     }
   }, error = function(e) NULL)
-  list(errors = errs, warnings = unique(warns))
+  list(errors = errs, warnings = unique(warns), ident = ident_msg)
 }
 
 # Free covariances between two different variables as sorted "a ~~ b" keys.
@@ -1668,6 +1678,7 @@ ui <- fluidPage(
               '<div><b>Mode:</b> ' + msg.analysis_mode + ' | <b>Missing:</b> ' + msg.missing_method + '</div>' +
             '</div>' +
           '</div>' +
+          (msg.warning_html || '') +
           '<div class=\"print-avoid-break\">' +
             '<div class=\"print-section-title\">' + (sectionIdx++) + '. Model Fit Summary & Diagnostics</div>' +
             msg.fit_table_html +
@@ -2177,6 +2188,7 @@ ui <- fluidPage(
                      )
                  )
              ),
+             uiOutput("ident_note"),
              DTOutput("param_tbl"),
              tags$hr(),
              h4("Model Summary"),
@@ -2719,6 +2731,8 @@ server <- function(input, output, session) {
     if (!isTRUE(input$show_suggested_paths)) return(NULL)
     model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
     if (is.null(model_res) || !isTRUE(model_res$ok) || is.null(model_res$fit)) return(NULL)
+    # Modification indices of an unidentified fit are not meaningful
+    if (isFALSE(model_res$identified)) return(NULL)
     items <- tryCatch(model_items(), error = function(e) character(0))
     df <- tryCatch(processed_data(), error = function(e) NULL)
     if (is.null(df)) return(model_res$fit)
@@ -2942,7 +2956,7 @@ server <- function(input, output, session) {
       return(list(ok = FALSE,
                   msg_friendly = msg,
                   msg_level = "info",
-                  fail_kind = "empty", opt_fit = NULL,
+                  fail_kind = "empty",
                   fit = NULL,
                   syntax = NULL,
                   pe_std = NULL,
@@ -2959,23 +2973,17 @@ server <- function(input, output, session) {
       df_fit <- processed_data()
       syntax_chr <- paste(ln, collapse = "\n")
 
-      # Impossible situations are reported before estimation, naming the variables involved
+      # Impossible situations are reported before estimation, naming the variables involved.
+      # df < 0 is NOT one of them: lavaan still estimates, and the result is shown flagged as not identified.
       pre_errs <- diagnose_fit_inputs(syntax_chr, df_fit, input$missing_method, needs_meanstructure)
-      if (length(pre_errs) > 0) {
-        pre_kind <- attr(pre_errs, "kind") %||% "data"
-        # df < 0 still converges, so Auto-Optimize can start from it and remove paths until it is identified
-        opt_fm <- NULL
-        if (identical(pre_kind, "identification")) {
-          opt_fm <- tryCatch(suppressWarnings(run_lavaan_sem(syntax_chr, df_fit, input$missing_method, needs_meanstructure)),
-                             error = function(e) NULL)
-          if (!is.null(opt_fm) && !isTRUE(lavInspect(opt_fm, "converged"))) opt_fm <- NULL
-        }
+      pre_kind <- attr(pre_errs, "kind") %||% ""
+      if (length(pre_errs) > 0 && !identical(pre_kind, "identification")) {
         return(list(ok = FALSE,
-                    msg_friendly = paste(c(pre_errs, if (!is.null(opt_fm)) optimize_tip(struct_table_data())), collapse = "\n\n"),
-                    fail_kind = pre_kind, opt_fit = opt_fm,
-                    fit = NULL,
-                    syntax = if (!is.null(opt_fm)) ln else NULL,
-                    pe_std = NULL, pe_raw = NULL,
+                    msg_friendly = paste(pre_errs, collapse = "
+
+"),
+                    fail_kind = "data",
+                    fit = NULL, syntax = NULL, pe_std = NULL, pe_raw = NULL,
                     fit_measures = NULL, equations = NULL))
       }
 
@@ -2983,8 +2991,12 @@ server <- function(input, output, session) {
                            input$missing_method, needs_meanstructure)
 
       converged <- isTRUE(lavInspect(fm, "converged"))
-      post <- if (converged) diagnose_fit_results(fm, df_fit) else list(errors = character(0), warnings = character(0))
-      if (length(post$errors) > 0) converged <- FALSE
+      post <- if (converged) diagnose_fit_results(fm, df_fit) else list(errors = character(0), warnings = character(0), ident = NULL)
+      # Not identified: df < 0 (pre-check) or no standard errors (post-check); one message is enough
+      ident_msg <- if (length(pre_errs) > 0) paste(pre_errs, collapse = "
+
+") else post$ident
+      identified <- !converged || is.null(ident_msg)
       pe_std <- NULL
       pe_raw <- NULL
       fit_meas <- NULL
@@ -2998,18 +3010,29 @@ server <- function(input, output, session) {
         )
         eqs <- tryCatch(lavaan_to_equations(fm, cached_pe = pe_raw), error = function(e) character(0))
       }
+      other_warnings <- if (length(post$warnings) > 0) paste0("- ", paste(post$warnings, collapse = "
+- ")) else NULL
 
       list(ok = converged,
-           fail_kind = if (converged) "" else if (length(post$errors) > 0) "identification" else "convergence",
-           opt_fit = if (length(post$errors) > 0) fm else NULL,
-           msg_friendly = if (length(post$errors) > 0)
-             paste(c(post$errors, optimize_tip(struct_table_data())), collapse = "\n\n")
+           identified = identified,
+           ident_df = if (!identified) fit_identification(fm)$df else NA_real_,
+           fail_kind = if (converged) "" else "convergence",
+           msg_title = if (!identified) "The model is not identified. Results are shown for inspection only." else NULL,
+           msg_level = if (!identified) "error" else NULL,
+           msg_friendly = if (!identified)
+             paste(c(ident_msg, optimize_tip(struct_table_data()),
+                     if (!is.null(other_warnings)) paste0("Other warnings:
+", other_warnings)), collapse = "
+
+")
            else if (converged)
-             (if (length(post$warnings) > 0)
-               paste0("Results are shown but may be unreliable:\n- ", paste(post$warnings, collapse = "\n- "))
+             (if (!is.null(other_warnings))
+               paste0("Results are shown but may be unreliable:
+", other_warnings)
               else "")
            else
-             "Model did not converge. Check for variables with correlation = 1 and remove or combine them.",
+             paste(c(pre_errs, "Model did not converge. Check for variables with correlation = 1 and remove or combine them."),
+                   collapse = "\n\n"),
            fit = fm,
            syntax = ln,
            pe_std = pe_std,
@@ -3041,7 +3064,7 @@ server <- function(input, output, session) {
       
       list(ok = FALSE,
            msg_friendly = paste0(friendly_msg, "\n\nTechnical details: ", error_msg),
-           fail_kind = "error", opt_fit = NULL,
+           fail_kind = "error",
            fit = NULL,
            syntax = NULL,
            pe_std = NULL,
@@ -3061,7 +3084,7 @@ server <- function(input, output, session) {
         else shinyjs::removeClass("fit_alert_box", paste0("alert-box-", lv))
       }
       shinyjs::show("fit_alert_box")
-      if (identical(level, "error")) paste0("Model could not be estimated.\n", msg) else msg
+      if (identical(level, "error")) paste0(model$msg_title %||% "Model could not be estimated.", "\n", msg) else msg
     } else {
       shinyjs::hide("fit_alert_box")
       ""
@@ -3088,6 +3111,9 @@ server <- function(input, output, session) {
     names(vals) <- c("pvalue","srmr","rmsea","aic","bic","gfi","agfi","nfi","cfi")
     thr <- c(pvalue = .05, srmr = .08, rmsea = .08,
              gfi = .90, agfi = .90, nfi = .90, cfi = .90)
+    # Not identified: lavaan's values are shown as they are; the ones that cannot be computed (p, NFI, CFI)
+    # and the df are red
+    unident <- isFALSE(model$identified)
     fmt <- function(idx, v) {
       ok <- switch(idx,
                    pvalue = v >= thr["pvalue"],
@@ -3097,13 +3123,17 @@ server <- function(input, output, session) {
                    agfi   = v >= thr["agfi"],
                    nfi    = v >= thr["nfi"],
                    cfi    = v >= thr["cfi"], TRUE)
-      if (is.na(v)) "NA"
+      if (is.na(v)) (if (unident) '<span style="color:red;">NA</span>' else "NA")
       else if (!ok) sprintf('<span style="color:red;">%.3f</span>', v)
       else sprintf('%.3f', v)
     }
     html_vals <- mapply(fmt, names(vals), vals, USE.NAMES = FALSE)
     tbl <- as.data.frame(t(html_vals), stringsAsFactors = FALSE)
     colnames(tbl) <- toupper(names(vals))
+    if (unident) {
+      df_txt <- if (is.finite(model$ident_df)) format(model$ident_df) else "NA"
+      tbl <- cbind(DF = sprintf('<span style="color:red;font-weight:bold;">%s</span>', df_txt), tbl)
+    }
     datatable(tbl, escape = FALSE, rownames = FALSE,
               options = list(dom = 't'))
   })
@@ -3119,6 +3149,15 @@ server <- function(input, output, session) {
     } else {
       paste(lavaan_to_equations(model$fit), collapse = "\n")
     }
+  })
+
+  # Details tab: the message box sits on the Model tab, so a not-identified model is flagged here as well
+  output$ident_note <- renderUI({
+    model <- tryCatch(fit_model_safe(), error = function(e) NULL)
+    if (is.null(model) || !isFALSE(model$identified)) return(NULL)
+    df_txt <- if (is.finite(model$ident_df)) sprintf(" (df = %s)", format(model$ident_df)) else ""
+    div(style = "color: #b91c1c; font-weight: 600; font-size: 13px; margin-bottom: 8px;",
+        paste0("The model is not identified", df_txt, ": standard errors and fit indices are unavailable or unreliable."))
   })
 
   output$fit_summary <- renderPrint({
@@ -3242,7 +3281,9 @@ server <- function(input, output, session) {
                  layout              = rank,
                  engine              = eng,
                  cached_params       = if (std_for_plot) model$pe_std else model$pe_raw,
-                 cached_fit_measures = model$fit_measures),
+                 cached_fit_measures = model$fit_measures,
+                 # Not identified: the incalculable values (p, NFI, CFI) and the df are drawn in red
+                 ident_df            = if (isFALSE(model$identified)) model$ident_df else NULL),
       error = function(e) e)
     if (inherits(dot_code, "error")) {
       session$sendCustomMessage("update_sem_plot", list(
@@ -3298,23 +3339,25 @@ server <- function(input, output, session) {
       max_cond_str <- if (!is.na(max_cond_index)) sprintf("%.1f", max_cond_index) else "-"
 
       # Build Fit & Diagnostics HTML Table
-      n_obs_val <- if (!is.na(ms["nobs"])) as.integer(ms["nobs"]) else 0L
-      chisq_val <- if (!is.na(ms["chisq"])) ms["chisq"] else 0
-      df_val    <- if (!is.na(ms["df"])) as.integer(ms["df"]) else 0L
-      pval_val  <- if (!is.na(ms["pvalue"])) ms["pvalue"] else 0
-      cfi_val   <- if (!is.na(ms["cfi"])) ms["cfi"] else 0
-      tli_val   <- if (!is.na(ms["tli"])) ms["tli"] else 0
-      rmsea_val <- if (!is.na(ms["rmsea"])) ms["rmsea"] else 0
-      srmr_val  <- if (!is.na(ms["srmr"])) ms["srmr"] else 0
-      aic_val   <- if (!is.na(ms["aic"])) ms["aic"] else 0
-      bic_val   <- if (!is.na(ms["bic"])) ms["bic"] else 0
+      # fitMeasures() has no "nobs" measure, so N comes from lavInspect(). Values that cannot be computed are
+      # shown as NA (red) instead of being turned into 0, which would look like a perfect fit.
+      n_obs_val <- tryCatch(sum(lavaan::lavInspect(fit, "nobs")), error = function(e) NA_real_)
+      na_cell <- "<span style='color:#b91c1c;font-weight:600;'>NA</span>"
+      num_cell <- function(v, fmt) if (is.na(v)) na_cell else sprintf(fmt, v)
+      unident_pdf <- isFALSE(model_res$identified)
+      df_cell <- if (is.na(ms["df"])) na_cell else if (unident_pdf)
+        sprintf("<span style='color:#b91c1c;font-weight:600;'>%d</span>", as.integer(ms["df"]))
+      else sprintf("%d", as.integer(ms["df"]))
 
       fit_html <- paste0(
         "<table class='print-table'>",
         "<thead><tr><th>N</th><th>Chi-square</th><th>df</th><th>p-value</th><th>CFI</th><th>TLI</th><th>RMSEA</th><th>SRMR</th><th>AIC</th><th>BIC</th><th>Cond. No.</th><th>Max Cond. Index</th></tr></thead>",
         "<tbody><tr>",
-        sprintf("<td>%d</td><td>%.2f</td><td>%d</td><td>%.3f</td><td>%.3f</td><td>%.3f</td><td>%.3f</td><td>%.3f</td><td>%.1f</td><td>%.1f</td><td>%s</td><td>%s</td>",
-                n_obs_val, chisq_val, df_val, pval_val, cfi_val, tli_val, rmsea_val, srmr_val, aic_val, bic_val, cond_num_str, max_cond_str),
+        paste0("<td>", num_cell(n_obs_val, "%d"), "</td><td>", num_cell(ms["chisq"], "%.2f"), "</td><td>", df_cell, "</td><td>",
+               num_cell(ms["pvalue"], "%.3f"), "</td><td>", num_cell(ms["cfi"], "%.3f"), "</td><td>",
+               num_cell(ms["tli"], "%.3f"), "</td><td>", num_cell(ms["rmsea"], "%.3f"), "</td><td>",
+               num_cell(ms["srmr"], "%.3f"), "</td><td>", num_cell(ms["aic"], "%.1f"), "</td><td>",
+               num_cell(ms["bic"], "%.1f"), "</td><td>", cond_num_str, "</td><td>", max_cond_str, "</td>"),
         "</tr></tbody></table>"
       )
 
@@ -3447,6 +3490,11 @@ server <- function(input, output, session) {
         timestamp            = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
         analysis_mode        = if (identical(model_res$snapshot$settings$analysis_mode %||% input$analysis_mode, "std")) "Standardized" else "Raw",
         missing_method       = model_res$snapshot$settings$missing_method %||% input$missing_method,
+        warning_html         = if (isFALSE(model_res$identified)) paste0(
+          "<div style='border:2px solid #b91c1c; color:#b91c1c; padding:8px 12px; margin:10px 0; font-weight:600;'>",
+          "The model is NOT IDENTIFIED",
+          if (is.finite(model_res$ident_df)) paste0(" (df = ", format(model_res$ident_df), ")") else "",
+          ": estimates are for inspection only; standard errors and fit indices are unavailable or unreliable.</div>") else "",
         fit_table_html       = fit_html,
         var_stats_html       = var_stats_html,
         latent_rel_html      = latent_rel_html,
@@ -3643,7 +3691,8 @@ server <- function(input, output, session) {
   # never ok, so nothing is saved by it anyway.
   observeEvent(fit_model_safe(), {
     res <- fit_model_safe()
-    if (!isTRUE(res$ok)) return()
+    # An unidentified fit is not a "successful fit": "Last successful fit" must never point at it
+    if (!isTRUE(res$ok) || isFALSE(res$identified)) return()
     tryCatch({
       if (is.null(res$snapshot)) stop(res$snapshot_error %||% "the model definition could not be read")
       session$sendCustomMessage("structura_store", list(op = "autosave", json = spec_to_json(res$snapshot)))
@@ -3886,6 +3935,11 @@ server <- function(input, output, session) {
 
       st <- model_res$snapshot$settings
       readme <- c(
+        if (isFALSE(model_res$identified)) c(
+          paste0("WARNING: the model is NOT IDENTIFIED",
+                 if (is.finite(model_res$ident_df)) paste0(" (df = ", format(model_res$ident_df), ")") else "",
+                 ". Estimates are for inspection only; standard errors and fit indices are unavailable or unreliable."),
+          ""),
         "Structura2 results",
         "==================",
         paste0("Data: ", if (nzchar(data_label())) data_label() else "(unnamed)", "  (", nrow(df_fit), " rows used)"),
