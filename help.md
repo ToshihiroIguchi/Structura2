@@ -409,7 +409,14 @@ When estimating structural equation models, mathematical anomalies in empirical 
   - Problematic starting values in complex reciprocal feedback loops.
 * **Fix**: Switch **Analysis mode** to `Standardized (scaled)` in the **Filtered** tab. If running in Raw mode, apply a `log10` transformation to high-magnitude variables.
 
-### 6. "Latent variable names cannot be the same as observed variables"
+### 6. "These variables are used in the model but not found in the data: ..."
+* **Meaning**: The model refers to a name that is not a column of the (filtered) data.
+* **Common Causes**:
+  - A typo in **Manual Equations** (variable names are case-sensitive).
+  - The variable was unchecked in **Filtered > Display columns** or excluded as a constant column.
+* **Fix**: Correct the name, or select the variable again in the **Filtered** tab.
+
+### 7. "Latent variable names cannot be the same as observed variables"
 * **Meaning**: In lavaan syntax, construct names must be distinct from manifest column headers.
 * **Fix**: Rename the latent variable in the **Measurement Model** table (e.g., use `F_Math` instead of `Math`).
 
