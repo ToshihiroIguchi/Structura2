@@ -104,7 +104,10 @@ library(shiny)
 library(shinyjs)
 library(DT)
 library(rhandsontable)
-library(markdown)
+# In the static site the Help tab is pre-rendered to help.html at build time (export_shinylive.R), so
+# markdown (and litedown/xfun) are not needed at startup. library(markdown) stays visible to ShinyLive's
+# dependency scan so that the packages are still bundled (they are then deferred, not mounted).
+if (!file.exists("help.html")) library(markdown)
 report_startup_stage("libs_attached")
 
 # Parser bypass block to guarantee dependency packaging during Shinylive build.
@@ -2000,7 +2003,12 @@ ui <- fluidPage(
              verbatimTextOutput("fit_summary")),
 
     # ---------------- Help tab -----------------------------------
-    tabPanel("Help", includeMarkdown("help.md"))
+    tabPanel("Help", if (file.exists("help.html")) {
+      HTML(paste(readLines("help.html", encoding = "UTF-8", warn = FALSE), collapse = "
+"))
+    } else {
+      includeMarkdown("help.md")
+    })
   ), # end tabsetPanel
   div(id = "structura-print-report")
   ) # end div (structura-main-app)
