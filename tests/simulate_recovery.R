@@ -33,12 +33,13 @@ make_ctx <- function(d, base_df) {
              extra_lines = NULL, base_fit = NULL)
   b <- fit_candidate_model(base_df, c0)
   c0$required_vars <- required_struct_vars(base_df, b)
+  c0$base_deps <- unique(struct_edges(base_df)$dep)
   c0$base_ov <- lavNames(b, "ov"); c0$base_cov_pairs <- free_cov_pairs(b)
   c0
 }
 cand_scores <- function(df, ctx) {      # c(AIC, BIC); Inf for infeasible, failed or improper candidates
   out <- c(Inf, Inf)
-  if (!check_variable_isolation(df, character(0), character(0), struct_pred_cols(df), ctx$required_vars)) return(out)
+  if (!check_variable_isolation(df, ctx$base_deps, character(0), struct_pred_cols(df), ctx$required_vars)) return(out)
   fm <- fit_candidate_model(df, ctx)
   if (is.null(fm) || !isTRUE(lavInspect(fm, "converged")) || !fit_is_proper(fm)) return(out)
   chk <- candidate_structure_check(fm, ctx)

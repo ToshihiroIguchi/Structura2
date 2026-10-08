@@ -435,6 +435,7 @@ build_retained_str <- function(struct_df) {
 # ---------- Helper: Variable Isolation Constraint Validator ----------
 # Verifies that specified dependent variables retain at least one incoming path (in-degree >= 1)
 # and specified predictor variables retain at least one outgoing path (out-degree >= 1).
+# The app always passes every baseline dependent variable as `retain_deps`.
 # `required_vars` are variables that must keep at least one path in EITHER direction: lavaan silently drops
 # a variable that has lost every path, which changes the likelihood and makes AIC/BIC incomparable.
 check_variable_isolation <- function(s_df, retain_deps, retain_preds, pred_cols, required_vars = character(0)) {
@@ -3797,8 +3798,6 @@ server <- function(input, output, session) {
     }
     prune_lock_table_data(lock_df)
 
-    active_deps <- if (length(active_row_indices) > 0) struct_df$Dependent[active_row_indices] else character(0)
-    active_deps <- unique(active_deps[nzchar(active_deps)])
     active_preds <- active_pred_cols
 
     showModal(modalDialog(
@@ -3812,21 +3811,12 @@ server <- function(input, output, session) {
               tags$b("Variable Isolation Prevention (Keep in Model)", style = "color: #1e293b; font-size: 14px;"),
               span(style = "font-size: 11px; color: #64748b;", "At least one connecting path will be retained")
           ),
-          p("Every variable of your model always keeps at least one path (lavaan would otherwise drop it silently and the scores could no longer be compared). ",
-            "Select variables below to additionally require an incoming path (dependent) or an outgoing path (predictor).",
+          p("Every variable of your model always keeps at least one path (lavaan would otherwise drop it silently and the scores could no longer be compared), ",
+            "and every dependent variable always keeps at least one incoming path (otherwise it would become exogenous and lavaan would replace the paths with covariances). ",
+            "Select predictor variables below to additionally require an outgoing path.",
             style = "font-size: 12px; color: #64748b; margin-bottom: 10px;"),
           fluidRow(
-            column(width = 6,
-                   div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;",
-                       tags$label("Dependent Variables:", style = "font-size: 12px; font-weight: 600; margin: 0; color: #334155;"),
-                       div(actionLink("retain_deps_all", "All", style = "font-size: 11px; margin-right: 6px; cursor: pointer;"),
-                           actionLink("retain_deps_none", "None", style = "font-size: 11px; cursor: pointer;"))
-                   ),
-                   div(style = "max-height: 110px; overflow-y: auto; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 4px; padding: 6px 10px;",
-                       checkboxGroupInput("prune_retain_deps", label = NULL, choices = active_deps, selected = character(0))
-                   )
-            ),
-            column(width = 6,
+            column(width = 12,
                    div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;",
                        tags$label("Predictor Variables:", style = "font-size: 12px; font-weight: 600; margin: 0; color: #334155;"),
                        div(actionLink("retain_preds_all", "All", style = "font-size: 11px; margin-right: 6px; cursor: pointer;"),
@@ -3967,15 +3957,7 @@ server <- function(input, output, session) {
     prune_lock_table_data(tbl)
   })
 
-  # Observers for Variable Isolation All / None quick select links
-  observeEvent(input$retain_deps_all, {
-    lock_df <- prune_lock_table_data(); req(lock_df)
-    active_deps <- unique(lock_df$Dependent[nzchar(lock_df$Dependent)])
-    updateCheckboxGroupInput(session, "prune_retain_deps", selected = active_deps)
-  })
-  observeEvent(input$retain_deps_none, {
-    updateCheckboxGroupInput(session, "prune_retain_deps", selected = character(0))
-  })
+  # Observers for Variable Isolation All / None quick select links (predictors only; dependents are always retained)
   observeEvent(input$retain_preds_all, {
     lock_df <- prune_lock_table_data(); req(lock_df)
     active_preds <- setdiff(names(lock_df), c("Dependent", "Operator"))
@@ -4052,7 +4034,6 @@ server <- function(input, output, session) {
     }
     
     iso_parts <- c()
-    if (length(st$retain_deps) > 0) iso_parts <- c(iso_parts, paste0("Dep: ", paste(st$retain_deps, collapse = ", ")))
     if (length(st$retain_preds) > 0) iso_parts <- c(iso_parts, paste0("Pred: ", paste(st$retain_preds, collapse = ", ")))
     isolation_summary <- if (length(iso_parts) > 0) paste(iso_parts, collapse = " | ") else ""
 
@@ -4199,7 +4180,9 @@ server <- function(input, output, session) {
       return()
     }
 
-    retain_deps <- input$prune_retain_deps %||% character(0)
+    # Every dependent variable of the baseline always keeps an incoming path: losing all of them makes it
+    # exogenous and lavaan replaces the paths with covariances, so such candidates are never comparable.
+    retain_deps <- unique(struct_edges(struct_df)$dep)
     retain_preds <- input$prune_retain_preds %||% character(0)
 
     if (!check_variable_isolation(struct_df, retain_deps, retain_preds, pred_cols)) {

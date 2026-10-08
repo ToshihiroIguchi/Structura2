@@ -64,6 +64,9 @@ ok(!check_variable_isolation(cand_df, character(0), character(0), struct_pred_co
 ok(check_variable_isolation(base_df, character(0), character(0), struct_pred_cols(base_df), ctx$required_vars),
    "the baseline satisfies the required-variable rule")
 ok(setequal(ctx$required_vars, c("x1", "x2", "x3", "m", "y")), "every observed structural variable is required")
+base_deps <- unique(struct_edges(base_df)$dep)
+ok(check_variable_isolation(base_df, base_deps, character(0), struct_pred_cols(base_df), ctx$required_vars),
+   "the baseline keeps an incoming path for every dependent variable")
 
 # --- a model where every variable has several paths (saturated: 10 free parameters on 4 variables)
 rich_df  <- mk(list(c("m", "x1"), c("m", "x2"), c("y", "m"), c("y", "x1"), c("y", "x2")))
@@ -79,6 +82,12 @@ ok(fitMeasures(fit_one, "df") == fitMeasures(fit_rich, "df") + 1, "a pure reduct
 ok(fitMeasures(fit_one, "chisq") >= fitMeasures(fit_rich, "chisq") - 1e-6, "nested candidate cannot fit better in chisq")
 ok(check_variable_isolation(one_df, character(0), character(0), struct_pred_cols(one_df), rich_ctx$required_vars),
    "removing y ~ x2 keeps every variable in the model")
+rich_deps <- unique(struct_edges(rich_df)$dep)
+ok(check_variable_isolation(one_df, rich_deps, character(0), struct_pred_cols(one_df), rich_ctx$required_vars),
+   "removing y ~ x2 keeps an incoming path for every dependent variable")
+ok(!check_variable_isolation(mk(list(c("y", "m"), c("y", "x1"), c("y", "x2"))), rich_deps, character(0),
+                             struct_pred_cols(rich_df), rich_ctx$required_vars),
+   "removing every incoming path of m violates the dependent-variable constraint")
 
 # --- lavaan frees a covariance instead of a removed path: detected, never optimal
 no_m_in <- mk(list(c("y", "m"), c("y", "x1"), c("y", "x2")))      # m loses both incoming paths and becomes exogenous
