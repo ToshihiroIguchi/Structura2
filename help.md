@@ -205,7 +205,7 @@ Things to know:
 When formulating an exploratory or complex structural model, theoretical specifications may include extraneous or non-significant links. The **Optimize** engine provides automated, constrained structural path pruning to locate the most parsimonious model that retains excellent empirical fit.
 
 ### 5.1 Step 1: Strategy & Criteria Configuration
-Clicking the cyan **Optimize** button (active whenever structural paths are defined and fitted) opens the Step 1 configuration dialog:
+Clicking the cyan **Optimize** button (active whenever structural paths are defined and the model could be fitted) opens the Step 1 configuration dialog. The model may also be **not identified** (for example a feedback loop, $df < 0$): the button stays available, because removing paths is often exactly what makes such a model identified (see section 5.5). Data problems (a variable missing from the data, exactly dependent variables, too few rows) still block the button.
 
 #### Optimization Criterion
 * **AIC (Akaike Information Criterion)**:
@@ -250,7 +250,7 @@ During optimization, Structura2 launches an animated progress modal powered by a
 Upon completion, the Step 2 dialog presents an organized catalog of model candidates:
 * **Candidate Ranking Table**:
   Lists models sorted from best to worst criterion score. Columns include:
-  - `Rank` and `Status` (`[Optimal]`, `[Baseline]`, `[Improved]`, `[Equivalent]`, `[Degraded Fit]`, `[Replaced]`, or `[Variable Dropped]`).
+  - `Rank` and `Status` (`[Optimal]`, `[Baseline]`, `[Improved]`, `[Equivalent]`, `[Degraded Fit]`, `[Replaced]`, `[Variable Dropped]`, or `[Not Identified]`).
   - `Retained Paths`: Explicit listing of structural regressions maintained in that model.
   - `AIC`, `BIC`, and respective deltas ($\Delta AIC$, $\Delta BIC$), plus `Added Cov.` (covariances lavaan freed in place of a removed path).
   - Post-computed fit measures: **CFI**, **RMSEA**, and **SRMR**.
@@ -260,7 +260,14 @@ Upon completion, the Step 2 dialog presents an organized catalog of model candid
   Clicking any candidate row or using the `<` and `>` arrow navigation buttons renders an instant vector path diagram preview of that candidate.
 * **Apply Selected Model to UI**:
   Clicking this button transfers the candidate's exact structural configuration directly back to your main UI and immediately re-fits the model, updating all diagnostic tables and main path diagrams without manual re-entry.
-  After the refit, Structura2 compares the refitted AIC/BIC with the catalogue values and warns if they differ. Applying a `[Replaced]` candidate shows a warning because the removed association is still part of the model.
+  After the refit, Structura2 compares the refitted AIC/BIC with the catalogue values and warns if they differ. Applying a `[Replaced]` candidate shows a warning because the removed association is still part of the model. A `[Not Identified]` candidate cannot be applied.
+
+### 5.5 Optimizing a Model That Is Not Identified
+A model with $df < 0$, or one whose standard errors cannot be computed (typically a feedback loop such as `x ~ y` and `y ~ x`), still converges but its fit is meaningless: it fits "perfectly" and would otherwise win on AIC/BIC.
+* **Start**: Optimize accepts such a model. The Step 1 dialog says that it is not identified.
+* **Search**: *Exhaustive* (and *Adaptive* when it switches to exhaustive) evaluates every combination, so identified candidates simply rank. *Stepwise* and *Simulated Annealing* first remove paths one by one (a *repair phase*, shown in the progress text) until the model is identified, then search from there. *Regularized SEM* needs an identified starting model and is not available.
+* **Ranking**: Models that are not identified (`[Not Identified]`, including the starting model) show no AIC/BIC and are never ranked. Because the starting model has no score, $\Delta AIC$/$\Delta BIC$ against it are not shown and the live chart has no baseline line; compare candidates with `Δ vs Best` and `Weight`.
+* **Nothing found**: If no identified model is reachable (locked paths, or the rule that every variable keeps a path), the catalogue says so. Unlock paths or simplify the model and run again.
 
 ---
 
