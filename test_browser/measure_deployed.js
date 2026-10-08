@@ -55,7 +55,7 @@ function printRun(label, m) {
   const cold = [];
   for (let i = 0; i < COLD_RUNS; i++) {
     // A fresh browser per cold run = empty HTTP cache, no service worker
-    const browser = await puppeteer.launch({ executablePath: EDGE, headless: true, args: ['--no-sandbox'] });
+    const browser = await puppeteer.launch({ executablePath: EDGE, headless: true, args: ['--no-sandbox'], protocolTimeout: 900000 });
     const m = await measureOnce(browser, { cacheEnabled: false });
     printRun(`cold #${i + 1}`, m);
     cold.push(m);
@@ -63,7 +63,7 @@ function printRun(label, m) {
   }
 
   // Warm: same profile, second visit (HTTP cache + service worker)
-  const browser = await puppeteer.launch({ executablePath: EDGE, headless: true, args: ['--no-sandbox'] });
+  const browser = await puppeteer.launch({ executablePath: EDGE, headless: true, args: ['--no-sandbox'], protocolTimeout: 900000 });
   await measureOnce(browser, { cacheEnabled: true });
   const warm = await measureOnce(browser, { cacheEnabled: true });
   printRun('warm', warm);
