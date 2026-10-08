@@ -818,9 +818,36 @@ run_lavaan_sem <- function(syntax_str, data, missing_method, needs_meanstructure
 # situations as warnings. Detection uses lavInspect() values and linear algebra, never lavaan warning text.
 fmt_var_list <- function(x) paste(x, collapse = ", ")
 
-# Checks run BEFORE estimation. Returns a character vector of blocking messages (empty = OK).
+# TRUE when the structural matrix has at least one active path (what Auto-Optimize works on)
+has_active_struct_path <- function(struct_df) {
+  if (is.null(struct_df) || nrow(struct_df) == 0 || ncol(struct_df) < 3) return(FALSE)
+  m <- struct_df[, 3:ncol(struct_df), drop = FALSE]
+  any(vapply(m, function(col) any(as.logical(col), na.rm = TRUE), logical(1)))
+}
+
+# One-line pointer shown under an identification error when the model has structural paths to prune
+optimize_tip <- function(struct_df) {
+  if (has_active_struct_path(struct_df))
+    "Tip: Optimize (next to Run) can remove structural paths automatically until the model is identified."
+  else NULL
+}
+
+# Decides whether Auto-Optimize can start from a fit_model_safe() result. A model that fails only because
+# it is not identified (df < 0 / no standard errors) still converges, so it is a valid starting point.
+optimization_baseline <- function(model) {
+  if (isTRUE(model$ok) && !is.null(model$fit))
+    return(list(usable = TRUE, fit = model$fit, identified = TRUE, msg = ""))
+  if (identical(model$fail_kind, "identification") && !is.null(model$opt_fit))
+    return(list(usable = TRUE, fit = model$opt_fit, identified = FALSE, msg = model$msg_friendly))
+  list(usable = FALSE, fit = NULL, identified = FALSE, msg = model$msg_friendly %||% "")
+}
+
+# Checks run BEFORE estimation. Returns a character vector of blocking messages (empty = OK) with an
+# attribute `kind`: "data" (missing variable, too few rows, linear dependency: nothing can be estimated) or
+# "identification" (df < 0: estimable, and Auto-Optimize can search for an identified submodel).
 diagnose_fit_inputs <- function(syntax_str, data, missing_method, needs_meanstructure) {
   msgs <- character(0)
+  kind <- ""
   tryCatch({
     # The parameter table is built without touching the data, so it works even when estimation would fail
     pt <- lavaan::lavaanify(syntax_str, model.type = "sem", fixed.x = FALSE,
@@ -830,19 +857,20 @@ diagnose_fit_inputs <- function(syntax_str, data, missing_method, needs_meanstru
     # Variables used by the model but absent from the data: name them (lavaan's own wording varies by version)
     absent <- setdiff(lavaan::lavNames(pt, "ov"), names(data))
     if (length(absent) > 0) {
-      return(sprintf(
+      return(structure(sprintf(
         "These variables are used in the model but not found in the data: %s. Check the spelling in Manual Equations (names are case-sensitive), or select the variable in Filtered > Display columns.",
-        fmt_var_list(absent)))
+        fmt_var_list(absent)), kind = "data"))
     }
     ov <- intersect(lavaan::lavNames(pt, "ov"), names(data))
     p <- length(ov)
-    if (p == 0) return(msgs)
+    if (p == 0) return(structure(msgs, kind = ""))
     X <- data[, ov, drop = FALSE]
     num <- vapply(X, is.numeric, logical(1))
     X <- X[, num, drop = FALSE]
     n_used <- if (identical(missing_method, "listwise")) sum(stats::complete.cases(X)) else nrow(X)
 
     if (n_used < p) {
+      kind <- "data"
       msgs <- c(msgs, sprintf(
         "Too few rows: the model uses %d variables but only %d complete rows are available. Remove variables from the model, or use a larger data set (or a missing-data method such as FIML).",
         p, n_used))
@@ -856,6 +884,7 @@ diagnose_fit_inputs <- function(syntax_str, data, missing_method, needs_meanstru
         if (min(eg$values) < 1e-8) {
           v <- eg$vectors[, which.min(eg$values)]
           culprits <- colnames(Xc)[abs(v) > 0.1]
+          kind <- "data"
           msgs <- c(msgs, sprintf(
             "These variables are exactly linearly dependent: %s. This happens when a column is duplicated or is a total/sum of other columns. Remove one of them from the model (Filtered tab > Display columns).",
             fmt_var_list(culprits)))
@@ -875,6 +904,7 @@ diagnose_fit_inputs <- function(syntax_str, data, missing_method, needs_meanstru
         }
         covs <- pt$op == "~~" & pt$lhs != pt$rhs & pt$free > 0
         cov_txt <- if (any(covs)) paste0(pt$lhs[covs], " ~~ ", pt$rhs[covs]) else character(0)
+        kind <- "identification"
         msgs <- c(msgs, paste0(
           sprintf("The model is not identified: it estimates %d parameters but the data supply only %d pieces of information (df = %d). Remove at least %d free parameter(s).",
                   npar, n_info, as.integer(df), as.integer(-df)),
@@ -883,6 +913,7 @@ diagnose_fit_inputs <- function(syntax_str, data, missing_method, needs_meanstru
       }
     }
   }, error = function(e) NULL)
+  attr(msgs, "kind") <- kind
   msgs
 }
 
@@ -891,8 +922,7 @@ diagnose_fit_results <- function(fit, data) {
   errs <- character(0); warns <- character(0)
   tryCatch({
     pe <- lavaan::parameterEstimates(fit)
-    free_rows <- pe[pe$op != ":=" & !is.na(pe$est), , drop = FALSE]
-    if (any(is.na(free_rows$se))) {
+    if (!fit_identification(fit)$identified) {
       errs <- c(errs, "The model is not identified: standard errors could not be computed. Typical causes are a factor with too few indicators, feedback loops (a ~ b and b ~ a), or too many free covariances. Simplify the model or add constraints.")
     } else if (!fit_is_proper(fit)) {
       th <- tryCatch(lavaan::lavInspect(fit, "est"), error = function(e) NULL)
@@ -965,6 +995,21 @@ fit_is_proper <- function(fit) {
   tryCatch(isTRUE(suppressWarnings(lavaan::lavInspect(fit, "post.check"))), error = function(e) TRUE)
 }
 
+# Identification of a fitted model. A model with df < 0 converges and even reports (meaningless) AIC/BIC,
+# but its standard errors cannot be computed, so "identified" needs df >= 0 AND an invertible information
+# matrix (lavInspect(fit, "vcov") is not a matrix when the standard errors failed).
+# `deficit` is how far the model is from being identified: the number of parameters to remove when df < 0
+# (0.5 when only the standard errors fail), used to steer the repair phase of the optimizer.
+fit_identification <- function(fit) {
+  converged <- tryCatch(isTRUE(lavaan::lavInspect(fit, "converged")), error = function(e) FALSE)
+  if (!converged) return(list(identified = FALSE, df = NA_real_, deficit = Inf))
+  df <- tryCatch(as.numeric(lavaan::fitMeasures(fit, "df")), error = function(e) NA_real_)
+  vc <- tryCatch(suppressWarnings(lavaan::lavInspect(fit, "vcov")), error = function(e) NULL)
+  se_ok <- is.matrix(vc) && !anyNA(vc)
+  deficit <- (if (isTRUE(df < 0)) -df else 0) + (if (!se_ok && isTRUE(df >= 0)) 0.5 else 0)
+  list(identified = isTRUE(df >= 0) && se_ok, df = df, deficit = deficit)
+}
+
 # Which conventional fit cutoffs (CFI < .90, RMSEA > .08, SRMR > .08) a set of fit measures violates.
 fit_cutoff_violations <- function(ms) {
   get <- function(nm) if (nm %in% names(ms)) as.numeric(ms[nm]) else NA_real_
@@ -979,6 +1024,8 @@ fit_cutoff_violations <- function(ms) {
 candidate_score <- function(rec, criterion) {
   if (is.null(rec) || !isTRUE(rec$converged) || isFALSE(rec$proper)) return(Inf)
   if (isFALSE(rec$vars_ok) || isTRUE(rec$replaced)) return(Inf)
+  # An unidentified model fits "perfectly" (df < 0) and would otherwise win on AIC/BIC
+  if (isFALSE(rec$identified)) return(Inf)
   s <- if (criterion == "AIC") rec$aic else rec$bic
   if (is.null(s) || is.na(s)) Inf else s
 }
@@ -1803,15 +1850,18 @@ ui <- fluidPage(
             ctx.fillText(gVal.toFixed(1), 5, gy + 3);
           }
           
-          var baseY = padTop + (1 - (msg.baseScore - minVal) / valRange) * graphH;
-          ctx.setLineDash([4, 4]);
-          ctx.strokeStyle = '#64748b';
-          ctx.beginPath();
-          ctx.moveTo(padLeft, baseY);
-          ctx.lineTo(w - padRight, baseY);
-          ctx.stroke();
-          ctx.setLineDash([]);
-          ctx.fillText('Baseline', w - 50, baseY - 4);
+          // No baseline line when the starting model has no score (it is not identified)
+          if (typeof msg.baseScore === 'number' && isFinite(msg.baseScore)) {
+            var baseY = padTop + (1 - (msg.baseScore - minVal) / valRange) * graphH;
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = '#64748b';
+            ctx.beginPath();
+            ctx.moveTo(padLeft, baseY);
+            ctx.lineTo(w - padRight, baseY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillText('Baseline', w - 50, baseY - 4);
+          }
           
           var maxSteps = msg.maxIter || 80;
           
@@ -2892,6 +2942,7 @@ server <- function(input, output, session) {
       return(list(ok = FALSE,
                   msg_friendly = msg,
                   msg_level = "info",
+                  fail_kind = "empty", opt_fit = NULL,
                   fit = NULL,
                   syntax = NULL,
                   pe_std = NULL,
@@ -2911,9 +2962,20 @@ server <- function(input, output, session) {
       # Impossible situations are reported before estimation, naming the variables involved
       pre_errs <- diagnose_fit_inputs(syntax_chr, df_fit, input$missing_method, needs_meanstructure)
       if (length(pre_errs) > 0) {
+        pre_kind <- attr(pre_errs, "kind") %||% "data"
+        # df < 0 still converges, so Auto-Optimize can start from it and remove paths until it is identified
+        opt_fm <- NULL
+        if (identical(pre_kind, "identification")) {
+          opt_fm <- tryCatch(suppressWarnings(run_lavaan_sem(syntax_chr, df_fit, input$missing_method, needs_meanstructure)),
+                             error = function(e) NULL)
+          if (!is.null(opt_fm) && !isTRUE(lavInspect(opt_fm, "converged"))) opt_fm <- NULL
+        }
         return(list(ok = FALSE,
-                    msg_friendly = paste(pre_errs, collapse = "\n\n"),
-                    fit = NULL, syntax = NULL, pe_std = NULL, pe_raw = NULL,
+                    msg_friendly = paste(c(pre_errs, if (!is.null(opt_fm)) optimize_tip(struct_table_data())), collapse = "\n\n"),
+                    fail_kind = pre_kind, opt_fit = opt_fm,
+                    fit = NULL,
+                    syntax = if (!is.null(opt_fm)) ln else NULL,
+                    pe_std = NULL, pe_raw = NULL,
                     fit_measures = NULL, equations = NULL))
       }
 
@@ -2938,8 +3000,10 @@ server <- function(input, output, session) {
       }
 
       list(ok = converged,
+           fail_kind = if (converged) "" else if (length(post$errors) > 0) "identification" else "convergence",
+           opt_fit = if (length(post$errors) > 0) fm else NULL,
            msg_friendly = if (length(post$errors) > 0)
-             paste(post$errors, collapse = "\n\n")
+             paste(c(post$errors, optimize_tip(struct_table_data())), collapse = "\n\n")
            else if (converged)
              (if (length(post$warnings) > 0)
                paste0("Results are shown but may be unreliable:\n- ", paste(post$warnings, collapse = "\n- "))
@@ -2977,6 +3041,7 @@ server <- function(input, output, session) {
       
       list(ok = FALSE,
            msg_friendly = paste0(friendly_msg, "\n\nTechnical details: ", error_msg),
+           fail_kind = "error", opt_fit = NULL,
            fit = NULL,
            syntax = NULL,
            pe_std = NULL,
@@ -3350,13 +3415,13 @@ server <- function(input, output, session) {
             }
           }
           
-          base_score <- if (!is.null(baseline_cand)) {
-            if (crit == "AIC") sprintf("%.2f", baseline_cand$aic) else sprintf("%.2f", baseline_cand$bic)
-          } else "-"
-          
-          opt_score <- if (!is.null(optimal_cand)) {
-            if (crit == "AIC") sprintf("%.2f", optimal_cand$aic) else sprintf("%.2f", optimal_cand$bic)
-          } else "-"
+          # AIC/BIC are NA for models that are not identified (e.g. the starting model of an optimization)
+          score_txt <- function(cand) {
+            v <- if (is.null(cand)) NA_real_ else if (crit == "AIC") cand$aic else cand$bic
+            if (is.finite(v)) sprintf("%.2f", v) else "n/a (not identified)"
+          }
+          base_score <- score_txt(baseline_cand)
+          opt_score <- score_txt(optimal_cand)
           
           # removed_str lists the pruned paths as "dep ~ pred; dep ~ pred" (or the baseline label)
           pruned_paths_count <- if (!is.null(optimal_cand) && !is.null(optimal_cand$removed_str) &&
@@ -3861,20 +3926,13 @@ server <- function(input, output, session) {
 
   # Dynamic visibility toggle for Auto-Optimize button based on structural path selection, model convergence, and syntax synchronization
   observe({
-    struct_df <- struct_table_data()
-    has_active_path <- FALSE
-    if (!is.null(struct_df) && nrow(struct_df) > 0 && ncol(struct_df) >= 3) {
-      pred_cols <- names(struct_df)[3:ncol(struct_df)]
-      if (length(pred_cols) > 0) {
-        matrix_vals <- struct_df[, pred_cols, drop = FALSE]
-        has_active_path <- any(sapply(matrix_vals, function(col) any(as.logical(col), na.rm = TRUE)))
-      }
-    }
-    
+    has_active_path <- has_active_struct_path(struct_table_data())
+
     model_res <- fit_model_safe()
     current_syntax <- lavaan_model_str()
+    # A model that only fails identification (df < 0) can still be optimized: removing paths may fix it
     is_model_ready <- !is.null(model_res) &&
-                      isTRUE(model_res$ok) &&
+                      isTRUE(optimization_baseline(model_res)$usable) &&
                       !is.null(model_res$syntax) &&
                       identical(model_res$syntax, current_syntax)
     
@@ -3909,17 +3967,27 @@ server <- function(input, output, session) {
     }
 
     base_model <- fit_model_safe()
+    base_info <- optimization_baseline(base_model)
 
-    if (!isTRUE(base_model$ok)) {
+    if (!isTRUE(base_info$usable)) {
       showModal(modalDialog(
         title = "Auto-Optimize Warning",
         div(class = "alert alert-warning",
-            paste0("Could not fit baseline model for optimization: ", base_model$msg_friendly)),
+            paste0("Could not fit baseline model for optimization: ", base_info$msg)),
         easyClose = TRUE,
         footer = modalButton("Dismiss")
       ))
       return()
     }
+    base_unidentified_info <- if (!isTRUE(base_info$identified)) {
+      base_df <- fit_identification(base_info$fit)$df
+      div(style = "background-color: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 10px 14px; margin-bottom: 15px; font-size: 13px; color: #1e3a8a;",
+          tags$b("The current model is not identified"),
+          paste0(if (is.finite(base_df) && base_df < 0) sprintf(" (df = %d)", as.integer(base_df)) else "",
+                 ". Paths are removed first until the model is identified, then the best model is searched. "),
+          "Models that are not identified are never ranked. Locked paths are never removed, and every variable keeps ",
+          "at least one path, so lock fewer paths if no identified model can be found.")
+    } else NULL
 
     # Initialize lock table data (filtered to active rows and active predictor columns)
     pred_cols <- names(struct_df)[3:ncol(struct_df)]
@@ -3966,6 +4034,7 @@ server <- function(input, output, session) {
       size = "l",
       div(
         style = "padding: 10px;",
+        base_unidentified_info,
         div(
           style = "background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 12px; margin-bottom: 15px;",
           div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;",
@@ -4184,8 +4253,9 @@ server <- function(input, output, session) {
             sorted_candidates[[k]]$srmr <- as.numeric(ms_k["srmr"])
             # Flag only a NEW violation: a cutoff the baseline met but this candidate breaks. If the
             # baseline already violates a cutoff, every candidate would otherwise be flagged as well.
-            if (any(fit_cutoff_violations(ms_k) & !base_violations)) {
-              if (!sorted_candidates[[k]]$status %in% c("[Baseline]", "[Optimal]", "[Replaced]", "[Variable Dropped]")) {
+            # (no baseline fit measures exist when the start was not identified, so nothing can be "new")
+            if (isTRUE(st$base_identified %||% TRUE) && any(fit_cutoff_violations(ms_k) & !base_violations)) {
+              if (!sorted_candidates[[k]]$status %in% c("[Baseline]", "[Optimal]", "[Replaced]", "[Variable Dropped]", "[Not Identified]")) {
                 sorted_candidates[[k]]$status <- "[Degraded Fit]"
               }
             }
@@ -4208,6 +4278,9 @@ server <- function(input, output, session) {
       max_steps = st$max_steps,
       ctx = st$ctx,
       fallback_note = st$fallback_note %||% "",
+      base_identified = isTRUE(st$base_identified %||% TRUE),
+      repair_note = st$repair_note %||% "",
+      any_identified = any(is.finite(scores)),
       message = "Success"
     )
     
@@ -4248,11 +4321,20 @@ server <- function(input, output, session) {
             "prefer the one that is theoretically most defensible. [Improper] models (e.g. negative variances) are never ranked first. ",
             "Candidates are estimated with lavaan's default rules, exactly like a model you build by hand. A [Replaced] candidate is one where ",
             "lavaan frees a covariance in place of a removed path (see Added Cov.), so the association is not actually removed; ",
-            "[Variable Dropped] means a variable lost all of its paths and was left out of the model. Neither can be ranked as optimal.",
+            "[Variable Dropped] means a variable lost all of its paths and was left out of the model. Neither can be ranked as optimal. ",
+            "[Not Identified] models (df < 0 or no standard errors) show no AIC/BIC and are never ranked.",
             style = "margin: 6px 0 0 0; font-size: 12px; color: #64748b;"),
           if (nzchar(res$fallback_note %||% ""))
             p(res$fallback_note, style = "margin: 6px 0 0 0; font-size: 12px; color: #b45309; font-weight: 600;")
         ),
+        if (!res$any_identified)
+          div(class = "alert alert-warning", style = "font-size: 13px;",
+              "No identified model was found. ",
+              if (nzchar(res$repair_note)) res$repair_note
+              else "Unlock paths or simplify the model (every variable keeps at least one path), then run the optimization again."),
+        if (!res$base_identified && res$any_identified)
+          p("The starting model was not identified, so ΔAIC/ΔBIC against it are not shown; compare candidates with \"Δ vs Best\" and Weight.",
+            style = "margin: 0 0 8px 0; font-size: 12px; color: #1e3a8a;"),
         DTOutput("prune_candidates_table"),
         tags$hr(style = "margin: 15px 0;"),
         div(
@@ -4293,11 +4375,25 @@ server <- function(input, output, session) {
   # 2. Run Candidate Search & Display Step 2 Modal via Stepwise Stepper Engine
   observeEvent(input$run_prune_explore, {
     base_model <- fit_model_safe()
-    if (!isTRUE(base_model$ok)) {
+    base_info <- optimization_baseline(base_model)
+    if (!isTRUE(base_info$usable)) {
       showModal(modalDialog(
         title = "Auto-Optimize Warning",
         div(class = "alert alert-warning",
-            paste0("Could not fit baseline model for optimization: ", base_model$msg_friendly)),
+            paste0("Could not fit baseline model for optimization: ", base_info$msg)),
+        easyClose = TRUE,
+        footer = modalButton("Dismiss")
+      ))
+      return()
+    }
+    base_fit <- base_info$fit
+    base_identified <- isTRUE(base_info$identified)
+    if (!base_identified && identical(input$prune_strategy, "regsem")) {
+      showModal(modalDialog(
+        title = "Auto-Optimize Warning",
+        div(class = "alert alert-warning",
+            "Regularized SEM needs an identified starting model, but the current model is not identified. ",
+            "Choose Adaptive, Stepwise, Exhaustive or Simulated Annealing: they remove paths until the model is identified."),
         easyClose = TRUE,
         footer = modalButton("Dismiss")
       ))
@@ -4388,7 +4484,12 @@ server <- function(input, output, session) {
       return()
     }
 
-    base_ms <- lavaan::fitMeasures(base_model$fit, c("aic", "bic", "cfi", "rmsea", "srmr"))
+    # An unidentified start has no meaningful AIC/BIC: there is no baseline score to compare candidates with
+    base_ms <- if (base_identified) {
+      lavaan::fitMeasures(base_fit, c("aic", "bic", "cfi", "rmsea", "srmr"))
+    } else {
+      c(aic = NA_real_, bic = NA_real_, cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_)
+    }
     base_score <- if (criterion == "AIC") as.numeric(base_ms["aic"]) else as.numeric(base_ms["bic"])
 
     meas_syntax <- hot_to_r(input$input_table)
@@ -4455,17 +4556,19 @@ server <- function(input, output, session) {
       needs_meanstructure = needs_meanstructure,
       meas_lines = mlines,
       extra_lines = extra,
-      required_vars = required_struct_vars(struct_df, base_model$fit),
-      base_ov = lavaan::lavNames(base_model$fit, "ov"),
-      base_cov_pairs = free_cov_pairs(base_model$fit),
-      base_fit = base_model$fit
+      required_vars = required_struct_vars(struct_df, base_fit),
+      base_ov = lavaan::lavNames(base_fit, "ov"),
+      base_cov_pairs = free_cov_pairs(base_fit),
+      base_fit = base_fit
     )
+    base_ident <- fit_identification(base_fit)
 
     state_obj <- list(
       eff_strategy = eff_strategy,
       criterion = criterion,
       ctx = ctx,
-      base_fit = base_model$fit,
+      base_fit = base_fit,
+      base_identified = base_identified,
       base_ms = base_ms,
       base_score = base_score,
       removable_paths = removable_paths,
@@ -4476,7 +4579,7 @@ server <- function(input, output, session) {
       grid_matrix = grid_matrix,
       candidates_map = list(),
       scores_hist = numeric(0),
-      best_scores_hist = base_score,
+      best_scores_hist = if (is.finite(base_score)) base_score else numeric(0),
       curr_vec = rep(TRUE, M),
       curr_df = struct_df,
       T_val = sa_T0,
@@ -4489,7 +4592,15 @@ server <- function(input, output, session) {
       regsem_type = input$regsem_type %||% "lasso",
       regsem_n_lambda = regsem_n_lambda,
       retain_deps = retain_deps,
-      retain_preds = retain_preds
+      retain_preds = retain_preds,
+      # Repair phase: remove paths until the model is identified (Stepwise and SA only; Exhaustive
+      # enumerates every combination, so the identified ones simply rank)
+      repair = !base_identified && eff_strategy %in% c("stepwise", "sa"),
+      repair_df = struct_df,
+      repair_deficit = base_ident$deficit,
+      repair_idx = 1L,
+      repair_best = NULL,
+      repair_ticks = 0L
     )
 
     base_key <- make_struct_key(struct_df)
@@ -4497,16 +4608,17 @@ server <- function(input, output, session) {
       removed_str = "None (Baseline Model)",
       retained_str = build_retained_str(struct_df),
       struct_df = struct_df,
-      fit = base_model$fit,
+      fit = base_fit,
       aic = as.numeric(base_ms["aic"]),
       bic = as.numeric(base_ms["bic"]),
-      delta_aic = 0.0,
-      delta_bic = 0.0,
+      delta_aic = if (base_identified) 0.0 else NA_real_,
+      delta_bic = if (base_identified) 0.0 else NA_real_,
       cfi = as.numeric(base_ms["cfi"]),
       rmsea = as.numeric(base_ms["rmsea"]),
       srmr = as.numeric(base_ms["srmr"]),
       converged = TRUE,
-      proper = fit_is_proper(base_model$fit),
+      proper = fit_is_proper(base_fit),
+      identified = base_identified, deficit = base_ident$deficit,
       vars_ok = TRUE, replaced = FALSE, added_covs = character(0),
       status = "[Baseline]"
     )
@@ -4542,7 +4654,8 @@ server <- function(input, output, session) {
           struct_df = curr_s_df, fit = NULL,
           aic = NA_real_, bic = NA_real_, delta_aic = NA_real_, delta_bic = NA_real_,
           cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
-          converged = FALSE, proper = FALSE, status = "[Non-converged]"
+          converged = FALSE, proper = FALSE, identified = FALSE, deficit = Inf, raw_aic = NA_real_,
+          status = "[Non-converged]"
         ))
       }
       # Ultra-fast score extraction using stats::AIC and stats::BIC (skips baseline model fitting)
@@ -4552,14 +4665,18 @@ server <- function(input, output, session) {
       d_bic <- c_bic - as.numeric(st$base_ms["bic"])
       proper <- fit_is_proper(fm)
       chk <- candidate_structure_check(fm, st$ctx)
-      if (!chk$vars_ok) {
-        # Fitted on a different set of variables: its AIC/BIC cannot be compared with the baseline at all
+      ident <- fit_identification(fm)
+      raw_aic <- c_aic   # kept for the repair phase, which still has to compare unidentified fits
+      if (!chk$vars_ok || !ident$identified) {
+        # Fitted on a different set of variables, or not identified: its AIC/BIC are meaningless and
+        # cannot be compared with the baseline at all
         c_aic <- c_bic <- d_aic <- d_bic <- NA_real_
       }
 
       stat <- "[Good]"
       if (isTRUE((st$criterion == "AIC" && d_aic < -0.01) || (st$criterion == "BIC" && d_bic < -0.01))) stat <- "[Improved]"
       if (!proper) stat <- "[Improper]"
+      if (!ident$identified) stat <- "[Not Identified]"
       if (chk$replaced) stat <- "[Replaced]"
       if (!chk$vars_ok) stat <- "[Variable Dropped]"
 
@@ -4570,6 +4687,7 @@ server <- function(input, output, session) {
         aic = c_aic, bic = c_bic, delta_aic = d_aic, delta_bic = d_bic,
         cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
         converged = TRUE, proper = proper, status = stat,
+        identified = ident$identified, deficit = ident$deficit, raw_aic = raw_aic,
         vars_ok = chk$vars_ok, replaced = chk$replaced, added_covs = chk$added_covs
       )
     }
@@ -4578,9 +4696,99 @@ server <- function(input, output, session) {
     score_of <- function(rec) candidate_score(rec, st$criterion)
 
     curr_score_step <- st$base_score
-    best_curr <- if (length(st$best_scores_hist) > 0) tail(st$best_scores_hist, 1) else st$base_score
+    # Without a baseline score (unidentified start) nothing has been achieved yet
+    best_curr <- if (length(st$best_scores_hist) > 0) tail(st$best_scores_hist, 1)
+                 else if (is.finite(st$base_score)) st$base_score else Inf
 
     step_advance <- 1L
+
+    removed_label <- function(df) {
+      rem_vec <- c()
+      for (jp in st$removable_paths) {
+        if (!isTRUE(as.logical(df[df$Dependent == jp$dep, jp$pred]))) rem_vec <- c(rem_vec, paste0(jp$dep, " ~ ", jp$pred))
+      }
+      paste(rem_vec, collapse = "; ")
+    }
+
+    if (isTRUE(st$repair)) {
+      # Repair phase (unidentified start, Stepwise/SA): remove one path per sweep until the model is identified.
+      # One uncached candidate fit per tick, like the stepwise sweep. The removal that leaves the smallest
+      # identification deficit (ties: lowest raw AIC) is adopted at the end of each sweep.
+      st$repair_ticks <- st$repair_ticks + 1L
+      evaluated <- FALSE
+      while (!evaluated && st$repair_idx <= length(st$removable_paths)) {
+        rp <- st$removable_paths[[st$repair_idx]]
+        st$repair_idx <- st$repair_idx + 1L
+        if (!isTRUE(as.logical(st$repair_df[st$repair_df$Dependent == rp$dep, rp$pred]))) next
+        test_s_df <- st$repair_df
+        test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) next
+
+        k_str <- make_key_local(test_s_df)
+        if (!k_str %in% names(st$candidates_map)) {
+          st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, removed_label(test_s_df))
+          evaluated <- TRUE   # only a real model fit consumes the tick; cached candidates are free
+        }
+        rec <- st$candidates_map[[k_str]]
+        # Only fits that converged and keep the variables/paths comparable can be walked through
+        if (isTRUE(rec$converged) && !isFALSE(rec$vars_ok) && !isTRUE(rec$replaced)) {
+          cand_def <- rec$deficit
+          cand_aic <- if (is.finite(rec$raw_aic %||% NA_real_)) rec$raw_aic else Inf
+          best <- st$repair_best
+          if (is.null(best) || cand_def < best$deficit - 1e-9 ||
+              (abs(cand_def - best$deficit) <= 1e-9 && cand_aic < best$raw_aic)) {
+            st$repair_best <- list(df = test_s_df, deficit = cand_def, raw_aic = cand_aic,
+                                   identified = is.finite(score_of(rec)))
+          }
+        }
+      }
+
+      if (st$repair_idx > length(st$removable_paths)) {
+        # Sweep finished
+        best <- st$repair_best
+        if (is.null(best) || st$repair_ticks > st$M * (st$M + 1) / 2 + st$M) {
+          st$repair_note <- paste0("Removing paths could not make the model identified: the locked paths and the rule that ",
+                                   "every variable keeps a path leave no identified submodel. Unlock paths or simplify the model.")
+          finalize_prune_results(st, current_step = isolate(opt_step()), stopped_early = FALSE)
+          return()
+        }
+        st$repair_df <- best$df
+        st$repair_deficit <- best$deficit
+        st$repair_idx <- 1L
+        st$repair_best <- NULL
+        if (isTRUE(best$identified)) {
+          # Identified: continue with the chosen strategy from this model
+          st$repair <- FALSE
+          st$curr_df <- best$df
+          st$curr_vec <- vapply(st$removable_paths, function(rp) {
+            isTRUE(as.logical(best$df[best$df$Dependent == rp$dep, rp$pred]))
+          }, logical(1))
+          # The repaired model is the first scored model: it is the best found so far
+          s0 <- score_of(st$candidates_map[[make_key_local(best$df)]])
+          if (is.finite(s0)) {
+            st$scores_hist <- c(st$scores_hist, s0)
+            st$best_scores_hist <- c(st$best_scores_hist, s0)
+          }
+        }
+      }
+
+      if (!isTRUE(isolate(opt_running()))) return()
+      opt_state(st)
+      n_removed <- sum(!vapply(st$removable_paths, function(rp) {
+        isTRUE(as.logical(st$repair_df[st$repair_df$Dependent == rp$dep, rp$pred]))
+      }, logical(1)))
+      session$sendCustomMessage("update_optimization_live_chart", list(
+        step = isolate(opt_step()),
+        maxIter = st$max_steps,
+        scores = st$scores_hist,
+        best_scores = st$best_scores_hist,
+        baseScore = NULL,
+        detail = if (isTRUE(st$repair))
+          sprintf("Repairing identification: %d path(s) removed so far (remaining deficit %.1f)", n_removed, st$repair_deficit)
+        else "Identified model reached. Searching for the best model..."
+      ))
+      return()   # repair ticks do not use up the strategy's step budget
+    }
 
     if (st$eff_strategy == "stepwise") {
       # Backward elimination, one candidate fit per tick so Stop/Cancel stay responsive in the
@@ -4849,11 +5057,17 @@ server <- function(input, output, session) {
     opt_state(st)
 
     cur_step_display <- min(step + step_advance, st$max_steps)
-    detail_msg <- sprintf(
-      "Step %d / %d | Current %s: %.2f | Best: %.2f (Δ %+.2f)",
-      cur_step_display, st$max_steps, st$criterion,
-      curr_score_step, best_curr, best_curr - st$base_score
-    )
+    fmt_score <- function(x) if (is.finite(x)) sprintf("%.2f", x) else "-"
+    detail_msg <- if (is.finite(st$base_score)) {
+      sprintf(
+        "Step %d / %d | Current %s: %.2f | Best: %.2f (Δ %+.2f)",
+        cur_step_display, st$max_steps, st$criterion,
+        curr_score_step, best_curr, best_curr - st$base_score
+      )
+    } else {
+      sprintf("Step %d / %d | Current %s: %s | Best: %s",
+              cur_step_display, st$max_steps, st$criterion, fmt_score(curr_score_step), fmt_score(best_curr))
+    }
 
     session$sendCustomMessage("update_optimization_live_chart", list(
       step = cur_step_display,
@@ -4878,7 +5092,7 @@ server <- function(input, output, session) {
       ret_str <- if (is.null(c_item$retained_str)) build_retained_str(c_item$struct_df) else c_item$retained_str
       data.frame(
         Rank = i,
-        Status = c_item$status,
+        Status = if (identical(c_item$status, "[Baseline]") && isFALSE(c_item$identified)) "[Baseline] [Not Identified]" else c_item$status,
         `Retained Paths` = ret_str,
         AIC = if (is.na(c_item$aic)) "—" else sprintf("%.2f", c_item$aic),
         BIC = if (is.na(c_item$bic)) "—" else sprintf("%.2f", c_item$bic),
@@ -5022,6 +5236,11 @@ server <- function(input, output, session) {
       return()
     }
     
+    if (isFALSE(cand$identified)) {
+      showNotification("This candidate is not identified (df < 0 or no standard errors). Select an identified candidate.",
+                       type = "warning", duration = 8)
+      return()
+    }
     if (isTRUE(cand$replaced)) {
       showNotification(
         paste0("This candidate is not a pure path reduction: lavaan adds ", paste(cand$added_covs, collapse = ", "),
