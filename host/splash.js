@@ -12,7 +12,7 @@
     { id: 'worker',        pct: 8,   doing: 'Downloading R runtime (WebAssembly)...',  tau: 3 },
     { id: 'runtime',       pct: 25,  doing: 'Loading R packages...',                   tau: 6 },
     { id: 'app_start',     pct: 60,  doing: 'Starting Structura2...',                  tau: 1 },
-    { id: 'libs_attached', pct: 66,  doing: 'Loading SEM engine (lavaan)...',          tau: 3 },
+    { id: 'libs_attached', pct: 66,  doing: 'Building interface...',                  tau: 1 },
     { id: 'ui_built',      pct: 88,  doing: 'Preparing interface...',                  tau: 2 },
     { id: 'session_start', pct: 95,  doing: 'Finalizing...',                           tau: 1 },
     { id: 'ready',         pct: 100, doing: 'Ready!',                                  tau: 1 }
@@ -21,7 +21,7 @@
   var CHECKLIST = [
     { label: 'Download R runtime',       doneAt: 'runtime' },
     { label: 'Load R packages',          doneAt: 'app_start' },
-    { label: 'Load SEM engine (lavaan)', doneAt: 'ui_built' },
+    { label: 'Build interface',          doneAt: 'ui_built' },
     { label: 'Start interface',          doneAt: 'ready' }
   ];
 

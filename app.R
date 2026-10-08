@@ -67,13 +67,47 @@ tryCatch({
   }
 }, error = function(e) NULL)
 
+# ---- WebR: Skip the sass Shared Library --------------------------
+# shiny requires bslib, which imports sass. Loading sass dyn.load()s its 2.3 MB libsass module,
+# which costs about 7 seconds of startup in WebR. sass only uses native code to compile Sass
+# (C_compile_data / C_compile_file), and this app uses the default Bootstrap 3 theme only, so
+# Sass is never compiled. A copy of the installed sass package without libs/ and with its native
+# routines removed from Meta/nsInfo.rds is put first on .libPaths(); R code and exports are
+# unchanged. No-op outside WebR or when anything unexpected happens.
+skip_sass_native_library <- function() {
+  tryCatch({
+    if (!grepl("emscripten", R.version$platform, fixed = TRUE)) return(invisible(FALSE))
+    if ("sass" %in% loadedNamespaces()) return(invisible(FALSE))
+    # Name built dynamically so ShinyLive does not treat sass as an app dependency.
+    src <- system.file(package = paste0("sa", "ss"))
+    if (!nzchar(src)) return(invisible(FALSE))
+    lib <- file.path(tempdir(), "structura_lib")
+    dst <- file.path(lib, "sass")
+    dir.create(dst, recursive = TRUE, showWarnings = FALSE)
+    for (f in setdiff(list.files(src, all.files = TRUE, no.. = TRUE), "libs")) {
+      file.copy(file.path(src, f), dst, recursive = TRUE)
+    }
+    ns_info_file <- file.path(dst, "Meta", "nsInfo.rds")
+    ns_info <- readRDS(ns_info_file)
+    ns_info$dynlibs <- NULL
+    ns_info$nativeRoutines <- list()
+    saveRDS(ns_info, ns_info_file)
+    .libPaths(c(lib, .libPaths()))
+    invisible(TRUE)
+  }, error = function(e) invisible(FALSE))
+}
+skip_sass_native_library()
+
 # ---- Libraries --------------------------------------------------
 
 library(shiny)
 library(shinyjs)
 library(DT)
 library(rhandsontable)
-library(markdown)
+# In the static site the Help tab is pre-rendered to help.html at build time (export_shinylive.R), so
+# markdown (and litedown/xfun) are not needed at startup. library(markdown) stays visible to ShinyLive's
+# dependency scan so that the packages are still bundled (they are then deferred, not mounted).
+if (!file.exists("help.html")) library(markdown)
 report_startup_stage("libs_attached")
 
 # Parser bypass block to guarantee dependency packaging during Shinylive build.
@@ -83,22 +117,27 @@ if (FALSE) {
   library(lavaan)
 }
 
-# Patch the lavaan option cache to prevent NA bounds crashes during estimation checks
-tryCatch({
-  env <- lavaan:::lavaan_cache_env
-  for (chk_name in c("opt_check", "opt.check")) {
-    if (exists(chk_name, envir = env)) {
-      opt_check <- get(chk_name, envir = env)
-      if (!is.null(opt_check$ncpus) && !is.null(opt_check$ncpus$nm)) {
-        bounds <- opt_check$ncpus$nm$bounds
-        if (any(is.na(bounds))) {
-          opt_check$ncpus$nm$bounds[is.na(bounds)] <- 1L
-          assign(chk_name, opt_check, envir = env)
+# Patch the lavaan option cache to prevent NA bounds crashes during estimation checks.
+# This forces the lavaan namespace to load, so it is called from the server right after the
+# Load Data dialog is shown (see the session-start observer) instead of at app start; this keeps
+# lavaan out of the critical path to the first paint.
+patch_lavaan_option_cache <- function() {
+  tryCatch({
+    env <- lavaan:::lavaan_cache_env
+    for (chk_name in c("opt_check", "opt.check")) {
+      if (exists(chk_name, envir = env)) {
+        opt_check <- get(chk_name, envir = env)
+        if (!is.null(opt_check$ncpus) && !is.null(opt_check$ncpus$nm)) {
+          bounds <- opt_check$ncpus$nm$bounds
+          if (any(is.na(bounds))) {
+            opt_check$ncpus$nm$bounds[is.na(bounds)] <- 1L
+            assign(chk_name, opt_check, envir = env)
+          }
         }
       }
     }
-  }
-}, error = function(e) NULL)
+  }, error = function(e) NULL)
+}
 
 # ---- Inlined Utilities (from utils.R) ----------------------------
 
@@ -1964,7 +2003,12 @@ ui <- fluidPage(
              verbatimTextOutput("fit_summary")),
 
     # ---------------- Help tab -----------------------------------
-    tabPanel("Help", includeMarkdown("help.md"))
+    tabPanel("Help", if (file.exists("help.html")) {
+      HTML(paste(readLines("help.html", encoding = "UTF-8", warn = FALSE), collapse = "
+"))
+    } else {
+      includeMarkdown("help.md")
+    })
   ), # end tabsetPanel
   div(id = "structura-print-report")
   ) # end div (structura-main-app)
@@ -1982,10 +2026,6 @@ server <- function(input, output, session) {
   # Session-start sequence triggered on Shiny session connection
   observeEvent(TRUE, {
     tryCatch({
-      # Attach lavaan explicitly (direct call to bypass WebR VFS bugs)
-      library(lavaan)
-      report_startup_stage("lavaan_loaded")
-
       # Complete the progress bar and transition out successfully
       runjs("if (window.parent) { window.parent.postMessage({ type: 'structura-ready' }, '*'); }")
       runjs("if (window.finishStructuraPreload) { window.finishStructuraPreload(true); } else { $('#structura-preload-container').hide(); }")
@@ -2008,6 +2048,26 @@ server <- function(input, output, session) {
           footer    = NULL
         )
       )
+
+      # Attach lavaan only after the dialog has been sent to the browser. R is single-threaded,
+      # so any click made while lavaan loads is queued and handled once the engine is ready.
+      lavaan_nid <- showNotification("Loading SEM engine (lavaan)...", duration = NULL,
+                                     closeButton = FALSE, session = session)
+      session$onFlushed(function() {
+        tryCatch({
+          # Attach lavaan explicitly (direct call to bypass WebR VFS bugs)
+          library(lavaan)
+          patch_lavaan_option_cache()
+          report_startup_stage("lavaan_loaded")
+          removeNotification(lavaan_nid, session = session)
+        }, error = function(e) {
+          removeNotification(lavaan_nid, session = session)
+          showNotification(
+            paste("Could not load the SEM engine (lavaan):", conditionMessage(e),
+                  "Please reload the page."),
+            type = "error", duration = NULL, session = session)
+        })
+      }, once = TRUE)
     }, error = function(e) {
       err_msg <- gsub("'", "\\'", e$message, fixed = TRUE)
       err_msg <- gsub("\n", " ", err_msg, fixed = TRUE)
