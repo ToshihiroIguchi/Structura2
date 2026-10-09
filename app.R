@@ -1079,10 +1079,10 @@ struct_descendants <- function(struct_df, from) {
 # ---- Helper: Diagnostic fit used to generate suggestions ------------
 # lavaan only evaluates modification indices for variables that already take part in the model's
 # regressions/loadings, so a variable with no structural path yet can never be suggested. This refits the
-# current syntax with each unused variable attached as an exogenous predictor through a fixed-zero
-# regression (`anchor ~ 0*v`), which leaves every estimate of the real model unchanged but makes lavaan
-# score all paths into/out of v. (The reverse direction, `v ~ 0*anchor`, does not work: lavaan then
-# reports no MI for paths from v.) `anchor_var` should be an observed endogenous variable of the model.
+# current syntax with each unused variable attached through a fixed-zero regression (`v ~ 0*anchor`),
+# which leaves every estimate of the real model unchanged but makes lavaan score all paths into/out of v.
+# (The reverse direction, `anchor ~ 0*v`, does not work: lavaan then reports almost no MI for v.)
+# `anchor_var` should be an observed endogenous variable of the model.
 # The result is for diagnostics only and is never shown as the user's model.
 fit_suggestion_model <- function(syntax_lines, unused_vars, anchor_var, ctx) {
   if (!length(unused_vars) || is.null(anchor_var) || !nzchar(anchor_var)) return(NULL)
@@ -1582,6 +1582,8 @@ ui <- fluidPage(
         function write(o) {
           try { window.localStorage.setItem(KEY, JSON.stringify(o)); return true; } catch (e) { return false; }
         }
+        // Own-property test: a model named 'constructor' must not match Object.prototype members
+        function has(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
         function label(spec) {
           if (!spec) return '';
           var dn = (spec.data && spec.data.name) ? spec.data.name : 'unknown data';
@@ -1610,7 +1612,7 @@ ui <- fluidPage(
             if (!write(o)) publish({ error: 'Could not write to browser storage (it may be full or blocked).' }); else publish();
           } else if (msg.op === 'save') {
             var m = JSON.parse(msg.json); m.name = msg.name; m.saved_at = stamp;
-            if (!(msg.name in o.models) && Object.keys(o.models).length >= MAX_MODELS) {
+            if (!has(o.models, msg.name) && Object.keys(o.models).length >= MAX_MODELS) {
               publish({ error: 'At most ' + MAX_MODELS + ' models can be kept. Delete one first, or use Export JSON.' }); return;
             }
             o.models[msg.name] = m;
@@ -1619,7 +1621,7 @@ ui <- fluidPage(
             delete o.models[msg.name];
             write(o); publish({ notice: 'Deleted \"' + msg.name + '\".' });
           } else if (msg.op === 'get') {
-            var spec = msg.kind === 'autosave' ? o.autosave : o.models[msg.name];
+            var spec = msg.kind === 'autosave' ? o.autosave : (has(o.models, msg.name) ? o.models[msg.name] : null);
             if (!spec) publish({ error: 'That saved model was not found in this browser.' });
             else respond(spec, msg.kind === 'autosave' ? 'autosave' : msg.name);
           }
@@ -1713,7 +1715,7 @@ ui <- fluidPage(
               '<div class=\"meta\" style=\"margin-top: 3px;\">Structural Insights, Simplified</div>' +
             '</div>' +
             '<div class=\"meta\" style=\"text-align: right;\">' +
-              '<div><b>Generated:</b> ' + msg.timestamp + '</div>' +
+              '<div><b>Generated:</b> ' + new Date().toLocaleString() + '</div>' +
               '<div><b>Mode:</b> ' + msg.analysis_mode + ' | <b>Missing:</b> ' + msg.missing_method + '</div>' +
             '</div>' +
           '</div>' +
@@ -1931,10 +1933,12 @@ ui <- fluidPage(
           
           var maxSteps = msg.maxIter || 80;
           
+          // R sends Inf/NA as null, which isNaN()/isFinite() treat as 0: only real numbers are drawn
+          var isNum = function(v) { return typeof v === 'number' && isFinite(v); };
           if (scores.length > 0) {
             ctx.fillStyle = '#64748b';
             for (var i = 0; i < scores.length; i++) {
-              if (isNaN(scores[i]) || !isFinite(scores[i])) continue;
+              if (!isNum(scores[i])) continue;
               var sx = padLeft + ((i + 1) / maxSteps) * graphW;
               var sy = padTop + (1 - (scores[i] - minVal) / valRange) * graphH;
               ctx.beginPath();
@@ -1947,21 +1951,24 @@ ui <- fluidPage(
             ctx.strokeStyle = '#3b82f6';
             ctx.lineWidth = 2.5;
             ctx.beginPath();
+            var started = false, lastIdx = -1;
             for (var j = 0; j < bestScores.length; j++) {
-              if (isNaN(bestScores[j]) || !isFinite(bestScores[j])) continue;
+              if (!isNum(bestScores[j])) continue;
               var bx = padLeft + (j / maxSteps) * graphW;
               var by = padTop + (1 - (bestScores[j] - minVal) / valRange) * graphH;
-              if (j === 0) ctx.moveTo(bx, by); else ctx.lineTo(bx, by);
+              if (!started) { ctx.moveTo(bx, by); started = true; } else ctx.lineTo(bx, by);
+              lastIdx = j;
             }
             ctx.stroke();
-            
-            var lastIdx = bestScores.length - 1;
-            var currX = padLeft + (lastIdx / maxSteps) * graphW;
-            var currY = padTop + (1 - (bestScores[lastIdx] - minVal) / valRange) * graphH;
-            ctx.fillStyle = '#60a5fa';
-            ctx.beginPath();
-            ctx.arc(currX, currY, 5, 0, 2 * Math.PI);
-            ctx.fill();
+
+            if (lastIdx >= 0) {
+              var currX = padLeft + (lastIdx / maxSteps) * graphW;
+              var currY = padTop + (1 - (bestScores[lastIdx] - minVal) / valRange) * graphH;
+              ctx.fillStyle = '#60a5fa';
+              ctx.beginPath();
+              ctx.arc(currX, currY, 5, 0, 2 * Math.PI);
+              ctx.fill();
+            }
           }
           
           ctx.fillStyle = '#94a3b8';
@@ -2586,8 +2593,9 @@ server <- function(input, output, session) {
     input_table_trigger(input_table_trigger() + 1)
   })
 
-  observeEvent(input$display_columns, ignoreNULL = TRUE, {
-    inds <- input$display_columns
+  observeEvent(input$display_columns, ignoreNULL = FALSE, {
+    if (is.null(input$display_columns) && !isTRUE(display_columns_seen())) return()   # control not rendered yet
+    inds <- as.character(input$display_columns)
     df <- if (!is.null(input$input_table)) hot_to_r(input$input_table) else input_table_data()
     if (!is.null(df)) {
       current_inds <- setdiff(colnames(df), c("Latent", "Indicator", "Operator"))
@@ -2719,9 +2727,17 @@ server <- function(input, output, session) {
   struct_table_data <- reactiveVal(NULL)
   struct_table_trigger <- reactiveVal(0)
 
+  # TRUE once the Display columns control has reported a selection. Afterwards a NULL value means the user
+  # unchecked every column (an empty model), not "not rendered yet" (where all columns are used).
+  display_columns_seen <- reactiveVal(FALSE)
+  observeEvent(input$display_columns, {
+    if (!isTRUE(display_columns_seen())) display_columns_seen(TRUE)
+  }, ignoreNULL = TRUE)
+
   model_items <- reactive({
     df <- processed_data(); req(df)
-    deps <- as.character(input$display_columns %||% names(df))
+    deps <- if (isTRUE(display_columns_seen())) as.character(input$display_columns)
+            else as.character(input$display_columns %||% names(df))
     meas <- input_table_data(); req(meas)
     vars <- setdiff(names(meas), c("Latent", "Indicator", "Operator"))
     convs <- character(0)
@@ -3503,12 +3519,15 @@ server <- function(input, output, session) {
 
       # Build Auto-Optimization History Details
       opt_history_html <- tryCatch({
+        # Only an optimization whose result was applied, and whose syntax is still the one that was fitted
         res <- prune_results()
-        if (!is.null(res) && !is.null(res$candidates) && length(res$candidates) > 0) {
+        applied <- applied_prune_info()
+        if (!is.null(res) && !is.null(res$candidates) && length(res$candidates) > 0 &&
+            !is.null(applied) && identical(model_res$syntax, applied$expected_syntax)) {
           strat <- res$strategy_used %||% "Unknown"
           crit  <- res$criterion %||% "AIC"
           baseline_cand <- NULL
-          optimal_cand  <- res$candidates[[1]]
+          optimal_cand  <- applied$cand
           for (cand in res$candidates) {
             if (isTRUE(cand$status == "[Baseline]")) {
               baseline_cand <- cand; break
@@ -4032,6 +4051,7 @@ server <- function(input, output, session) {
   # ----------------- Auto-Optimize Model Server Observers ---------------
   prune_lock_table_data <- reactiveVal(NULL)
   prune_results <- reactiveVal(NULL)
+  applied_prune_info <- reactiveVal(NULL)   # candidate applied to the UI + the syntax it should produce (PDF history)
   selected_prune_cand <- reactiveVal(NULL)
   selected_prune_idx <- reactiveVal(1)
 
@@ -5361,6 +5381,11 @@ server <- function(input, output, session) {
     # The refit below uses the same syntax and options as the candidate, so its AIC/BIC must match the table.
     pending_prune_check(if (isTRUE(cand$converged) && isTRUE(cand$vars_ok) && !is.na(cand$aic))
                           list(aic = cand$aic, bic = cand$bic) else NULL)
+
+    ctx_applied <- isolate(prune_results())$ctx
+    applied_prune_info(list(
+      cand = cand,
+      expected_syntax = unlist(c(ctx_applied$meas_lines, build_struct_lines(cand$struct_df), ctx_applied$extra_lines))))
 
     # 1. Update structural data frame
     struct_table_data(cand$struct_df)
