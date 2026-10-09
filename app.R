@@ -1163,36 +1163,8 @@ ui <- fluidPage(
   useShinyjs(),
   tags$head(
     tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
+    tags$link(rel = "stylesheet", href = "style.css"),
     tags$style(HTML("
-#app-logo { position: absolute; top: 8px; right: 16px; }
-.modal-header { background: #f8f9fa; }
-.modal-title  { font-weight: bold; }
-.htDimmed { background-color: #d9d9d9 !important; color: #777 !important; }
-.shiny-modal .modal-content { border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
-.shiny-modal .modal-body    { padding: 20px !important; }
-.shiny-modal .modal-footer  { padding: 10px !important; }
-.alert-box { background:#fff3cd;border:1px solid #ffeeba;border-radius:6px;padding:10px;margin-bottom:10px; }
-.alert-box.alert-box-error { background:#f8d7da;border-color:#f5c6cb;color:#721c24; }
-.alert-box.alert-box-warning { background:#fff3cd;border-color:#ffeeba;color:#856404; }
-.alert-box.alert-box-info { background:#e9ecef;border-color:#ced4da;color:#495057; }
-/* A validate() message from an htmlwidget (DT) is absolutely positioned and overlaps the next element; keep it in the flow */
-.htmlwidgets-error { position: static !important; height: auto !important; padding: 4px 0 8px; }
-.html-widget-output[style*='visibility: hidden'] { height: 0 !important; overflow: hidden; }
-#fit_alert { white-space: pre-wrap; }
-#lavaan_model { white-space: pre; }
-#approx_eq    { white-space: pre-wrap; }
-
-/* Results of the previous fit are dimmed while a new fit is running */
-.structura-stale { opacity: 0.35; pointer-events: none; transition: opacity 0.15s; }
-.structura-busy-spinner {
-  border: 3px solid rgba(100,116,139,0.25);
-  border-left-color: #2563eb;
-  width: 28px; height: 28px;
-  border-radius: 50%;
-  animation: structura-spin 1s linear infinite;
-  margin: 0 auto 10px auto;
-}
-
 /* Custom elegant splash preloader styles */
 #structura-preload-container {
   position: fixed;
@@ -1240,105 +1212,6 @@ ui <- fluidPage(
 }
 .structura-embedded #structura-preload-container { display: none !important; }
 
-/* Print Report Styling */
-#structura-print-report {
-  display: none;
-}
-
-@media print {
-  body * {
-    visibility: hidden;
-  }
-  #structura-print-report, #structura-print-report * {
-    visibility: visible;
-  }
-  #structura-print-report {
-    display: block !important;
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 100%;
-    color: #1e293b;
-    background: #ffffff;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  }
-  @page {
-    size: A4 portrait;
-    margin: 15mm 12mm 15mm 12mm;
-  }
-  .print-page-break {
-    page-break-before: always;
-  }
-  .print-avoid-break {
-    page-break-inside: avoid;
-  }
-  .print-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin-bottom: 16px;
-    font-size: 11px;
-  }
-  .print-table th, .print-table td {
-    border: 1px solid #cbd5e1;
-    padding: 5px 8px;
-    text-align: left;
-  }
-  .print-table th {
-    background-color: #f1f5f9 !important;
-    font-weight: 600;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-  }
-  .print-header {
-    border-bottom: 2px solid #2563eb;
-    padding-bottom: 8px;
-    margin-bottom: 16px;
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-end;
-  }
-  .print-header h1 {
-    font-size: 20px;
-    font-weight: bold;
-    color: #0f172a;
-    margin: 0;
-  }
-  .print-header .meta {
-    font-size: 11px;
-    color: #64748b;
-  }
-  .print-section-title {
-    font-size: 14px;
-    font-weight: bold;
-    color: #1e293b;
-    border-bottom: 1px solid #e2e8f0;
-    padding-bottom: 4px;
-    margin-top: 14px;
-    margin-bottom: 8px;
-  }
-  .print-diagram-box {
-    text-align: center;
-    max-height: 480px;
-    overflow: hidden;
-    margin: 10px 0;
-  }
-  .print-diagram-box svg {
-    max-width: 100%;
-    max-height: 460px;
-    height: auto;
-  }
-  .print-syntax-box {
-    background: #f8fafc;
-    border: 1px solid #e2e8f0;
-    border-radius: 4px;
-    padding: 8px 12px;
-    font-family: monospace;
-    font-size: 10px;
-    white-space: pre-wrap;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-  }
-}
 ")),
     # Graphviz bundle (wasm embedded). Local runApp serves it from www/; in the ShinyLive static
     # site it is hosted next to index.html (site/hpcc-js/) so it bypasses the slow R/webR HTTP
