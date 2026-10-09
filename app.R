@@ -1969,16 +1969,11 @@ ui <- fluidPage(
 
     # ---------------- Model tab ----------------------------------
     tabPanel("Model",
-             fluidRow(
+             fluidRow(class = "s2-model-row",
                # ---------- Left column (inputs) -------------------
                column(width = 7,
-                      conditionalPanel(
-                        condition = "input.analysis_mode == 'raw'",
-                        checkboxInput("diagram_std",
-                                      "Show standardized coefficients in diagram",
-                                      value = TRUE)),
-                       # -------------- Run & Auto-Optimize buttons -------------------
-                       div(style = "display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;",
+                       # -------------- Run & Auto-Optimize buttons (sticky: stays visible while scrolling) --------
+                       div(class = "s2-toolbar s2-sticky-toolbar",
                            actionButton("run_model", "Run",
                                         class = "btn btn-success",
                                         title = "Run / update the model (fit it with the current settings)"),
@@ -2005,6 +2000,11 @@ ui <- fluidPage(
                                           title = "Save, load or delete models kept in this browser; import / export JSON")
                            )
                        ),
+                      conditionalPanel(
+                        condition = "input.analysis_mode == 'raw'",
+                        checkboxInput("diagram_std",
+                                      "Show standardized coefficients in diagram",
+                                      value = TRUE)),
                       shinyjs::hidden(
                         div(id = "latent_error_box",
                             class = "alert alert-danger",
@@ -2019,7 +2019,7 @@ ui <- fluidPage(
                       ),
                       tags$hr(),
                       div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; flex-wrap: wrap; gap: 8px;",
-                          h4("Structural Model", style = "margin: 0; font-weight: 600;"),
+                          h4("Structural Model", class = "s2-section-title"),
                           div(style = "display: flex; align-items: center; gap: 12px; flex-wrap: wrap;",
                               div(style = "margin-bottom: 0;",
                                   checkboxInput("show_suggested_paths", "Highlight top N paths by Modification Indices", value = TRUE, width = "auto")),
@@ -2032,13 +2032,17 @@ ui <- fluidPage(
                               )
                           )
                       ),
-                      p("Color intensity indicates R² strength (white: low, red: high). ",
+                      p(class = "s2-legend",
+                        "Cell color = R² strength (white: low, red: high). ",
                         tags$span(style = "color: #2563eb; font-weight: 600;", "Blue border"),
-                        " indicates recommended paths based on Modification Indices (thick border + #1 = strongest; ",
+                        " = path suggested by Modification Indices; ",
                         tags$span(style = "color: #d97706; font-weight: 600;", "orange border"),
-                        " = would create a feedback loop). Add ONE path at a time and re-run the model, because MI values change after every change. ",
-                        "Use as exploratory reference alongside theoretical knowledge.",
-                        style = "font-size: 12px; color: #666; margin-bottom: 10px;"),
+                        " = would create a feedback loop."),
+                      tags$details(class = "s2-legend",
+                        tags$summary("How to use the suggestions"),
+                        p("Thick border + #1 marks the strongest suggestion. Add ONE path at a time and re-run the model, ",
+                          "because MI values change after every change. ",
+                          "Use as exploratory reference alongside theoretical knowledge.")),
                       uiOutput("suggestion_status_ui"),
                       rHandsontableOutput("checkbox_matrix"),
                       tags$hr(),
@@ -2059,6 +2063,7 @@ ui <- fluidPage(
 
                # ---------- Right column (outputs) -----------------
                column(width = 5,
+                 div(class = "s2-sticky-right",
                       # ---------- Fit message (above the tabs so it is visible on every tab) ----------
                       shinyjs::hidden(
                         div(id = "fit_alert_box",
@@ -2102,10 +2107,11 @@ ui <- fluidPage(
                                            onclick = "downloadSemDiagramPng(2)")
                           )
                       ),
-                      div(style = "height:60vh; overflow-y:auto; overflow-x:hidden; border:1px solid #ccc; position: relative;",
+                      div(class = "s2-diagram-box",
                           tags$div(id = "sem_plot_container", 
                                    style = "width:100%; height:100%; display: flex; align-items: center; justify-content: center; color: #666;",
                                    "Define a model to view the path diagram."))
+                 )
                )
              )),
 
