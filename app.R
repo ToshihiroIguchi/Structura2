@@ -2961,6 +2961,8 @@ server <- function(input, output, session) {
       }
       rh
     }, error = function(e) {
+      # req() on an empty model is not a failure: let Shiny leave the output blank
+      if (inherits(e, "shiny.silent.error")) stop(e)
       error_mat <- data.frame(
         Dependent = "Error",
         Operator = "~",
