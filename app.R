@@ -1182,6 +1182,17 @@ ui <- fluidPage(
 #lavaan_model { white-space: pre; }
 #approx_eq    { white-space: pre-wrap; }
 
+/* Results of the previous fit are dimmed while a new fit is running */
+.structura-stale { opacity: 0.35; pointer-events: none; transition: opacity 0.15s; }
+.structura-busy-spinner {
+  border: 3px solid rgba(100,116,139,0.25);
+  border-left-color: #2563eb;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  animation: structura-spin 1s linear infinite;
+  margin: 0 auto 10px auto;
+}
+
 /* Custom elegant splash preloader styles */
 #structura-preload-container {
   position: fixed;
@@ -1391,6 +1402,34 @@ ui <- fluidPage(
         };
 
         startTimer();
+      })();
+
+      // While a fit is running, the previous results are marked as stale so they are not mistaken for the new ones.
+      // The diagram is overwritten by the next update_sem_plot message; the other outputs are un-dimmed on idle.
+      (function() {
+        var staleSel = '#fit_alert_box, #fit_indices, #approx_eq, #param_tbl, #fit_summary, #ident_note';
+        var pending = false, sawBusy = false;
+        function clearStale() {
+          pending = false; sawBusy = false;
+          $(staleSel).removeClass('structura-stale');
+        }
+        $(document).on('click', '#run_model', function() {
+          if ($(this).prop('disabled')) return;
+          pending = true; sawBusy = false;
+          $(staleSel).addClass('structura-stale');
+          var container = document.getElementById('sem_plot_container');
+          if (container) {
+            container.style.display = 'flex';
+            container.style.alignItems = 'center';
+            container.style.justifyContent = 'center';
+            container.innerHTML = '<div style=\"color:#666; padding:10px; text-align:center;\">' +
+              '<div class=\"structura-busy-spinner\"></div>Estimating the model...</div>';
+          }
+        });
+        $(document).on('shiny:busy', function() { if (pending) sawBusy = true; });
+        $(document).on('shiny:idle', function() { if (pending && sawBusy) clearStale(); });
+        // Safety net: a click that triggers no server round trip must not leave results dimmed
+        $(document).on('shiny:error', function() { if (pending) clearStale(); });
       })();
 
       // Standalone client-side diagram export helpers
