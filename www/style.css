@@ -178,3 +178,7 @@
 details.s2-legend summary { cursor: pointer; color: var(--s2-primary); margin-bottom: 4px; }
 .s2-model-row > [class*="col-"] { min-width: 0; }
 .s2-sticky-right .dataTables_wrapper { overflow-x: auto; }
+
+/* Fit indices: pass / fail marks (also carry a text symbol, so color is not the only cue) */
+.s2-ok { color: #15803d; font-weight: 600; }
+.s2-ng { color: var(--s2-danger); font-weight: 600; }

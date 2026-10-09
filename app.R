@@ -1305,6 +1305,39 @@ ui <- fluidPage(
         $(document).on('shiny:error', function() { if (pending) clearStale(); });
       })();
 
+      // Draws a Graphviz DOT message (or a status / error note) into a container; shared by the main
+      // path diagram and the prune preview. Notes use the s2-empty / s2-error classes.
+      window.structuraRenderDot = function(container, message) {
+        var note = function(cls, html) {
+          container.style.display = 'flex';
+          container.style.alignItems = 'center';
+          container.style.justifyContent = 'center';
+          container.innerHTML = '';
+          var d = document.createElement('div');
+          d.className = cls;
+          d.innerHTML = html;
+          container.appendChild(d);
+        };
+        if (message.message) { note(message.error ? 's2-error' : 's2-empty', message.message); return; }
+        container.style.display = 'block';
+        var hpccWasm = window['@hpcc-js/wasm/graphviz'];
+        if (!(hpccWasm && hpccWasm.Graphviz)) { note('s2-error', 'Graphviz library not loaded.'); return; }
+        hpccWasm.Graphviz.load().then(function(graphviz) {
+          try {
+            container.innerHTML = graphviz.layout(message.dot, 'svg', message.engine);
+            var svgElement = container.querySelector('svg');
+            if (svgElement) {
+              svgElement.setAttribute('width', '100%');
+              svgElement.setAttribute('height', '100%');
+            }
+          } catch (err) {
+            note('s2-error', 'Layout failed: ' + err.message);
+          }
+        }).catch(function(err) {
+          note('s2-error', 'Failed to load Graphviz WASM: ' + err.message);
+        });
+      };
+
       // Standalone client-side diagram export helpers
       // The on-screen SVG is sized 100% x 100% to fit its container; exports need absolute pixel sizes
       // (a percentage size cannot be drawn to a canvas in every browser), so a clone is sized from its viewBox.
@@ -1659,41 +1692,7 @@ ui <- fluidPage(
 
         Shiny.addCustomMessageHandler('update_sem_plot', function(message) {
           var container = document.getElementById('sem_plot_container');
-          if (!container) return;
-          
-          if (message.message) {
-            container.style.display = 'flex';
-            container.style.alignItems = 'center';
-            container.style.justifyContent = 'center';
-            if (message.error) {
-              container.innerHTML = '<div style=\"color:red; padding:10px; text-align:center;\">' + message.message + '</div>';
-            } else {
-              container.innerHTML = '<div style=\"color:#666; padding:10px; text-align:center;\">' + message.message + '</div>';
-            }
-            return;
-          }
-          
-          container.style.display = 'block';
-          var hpccWasm = window['@hpcc-js/wasm/graphviz'];
-          if (hpccWasm && hpccWasm.Graphviz) {
-            hpccWasm.Graphviz.load().then(function(graphviz) {
-              try {
-                var svg = graphviz.layout(message.dot, 'svg', message.engine);
-                container.innerHTML = svg;
-                var svgElement = container.querySelector('svg');
-                if (svgElement) {
-                  svgElement.setAttribute('width', '100%');
-                  svgElement.setAttribute('height', '100%');
-                }
-              } catch (err) {
-                container.innerHTML = '<div style=\"color:red; padding:10px;\">Layout failed: ' + err.message + '</div>';
-              }
-            }).catch(function(err) {
-              container.innerHTML = '<div style=\"color:red; padding:10px;\">Failed to load Graphviz WASM: ' + err.message + '</div>';
-            });
-          } else {
-            container.innerHTML = '<div style=\"color:red; padding:10px;\">Graphviz library not loaded.</div>';
-          }
+          if (container) window.structuraRenderDot(container, message);
         });
 
         // The modal content is inserted asynchronously, so the first message can arrive before
@@ -1714,41 +1713,7 @@ ui <- fluidPage(
 
         function renderPrunePreview(message) {
           var container = document.getElementById('prune_preview_container');
-          if (!container) return;
-
-          if (message.message) {
-            container.style.display = 'flex';
-            container.style.alignItems = 'center';
-            container.style.justifyContent = 'center';
-            if (message.error) {
-              container.innerHTML = '<div style=\"color:red; padding:10px; text-align:center;\">' + message.message + '</div>';
-            } else {
-              container.innerHTML = '<div style=\"color:#666; padding:10px; text-align:center;\">' + message.message + '</div>';
-            }
-            return;
-          }
-          
-          container.style.display = 'block';
-          var hpccWasm = window['@hpcc-js/wasm/graphviz'];
-          if (hpccWasm && hpccWasm.Graphviz) {
-            hpccWasm.Graphviz.load().then(function(graphviz) {
-              try {
-                var svg = graphviz.layout(message.dot, 'svg', message.engine);
-                container.innerHTML = svg;
-                var svgElement = container.querySelector('svg');
-                if (svgElement) {
-                  svgElement.setAttribute('width', '100%');
-                  svgElement.setAttribute('height', '100%');
-                }
-              } catch (err) {
-                container.innerHTML = '<div style=\"color:red; padding:10px;\">Layout failed: ' + err.message + '</div>';
-              }
-            }).catch(function(err) {
-              container.innerHTML = '<div style=\"color:red; padding:10px;\">Failed to load Graphviz WASM: ' + err.message + '</div>';
-            });
-          } else {
-            container.innerHTML = '<div style=\"color:red; padding:10px;\">Graphviz library not loaded.</div>';
-          }
+          if (container) window.structuraRenderDot(container, message);
         }
 
         // Real-time Optimization Live Canvas Line Chart Renderer
@@ -3093,33 +3058,42 @@ server <- function(input, output, session) {
     }
     vals <- round(as.numeric(ms[c("pvalue","srmr","rmsea","aic","bic","gfi","agfi","nfi","cfi")]), 3)
     names(vals) <- c("pvalue","srmr","rmsea","aic","bic","gfi","agfi","nfi","cfi")
+    # One row per index: value, the criterion it is judged against, and a pass / fail mark
+    # (the mark is text, so the verdict does not depend on color alone)
     thr <- c(pvalue = .05, srmr = .08, rmsea = .08,
              gfi = .90, agfi = .90, nfi = .90, cfi = .90)
+    dir <- c(pvalue = ">=", srmr = "<=", rmsea = "<=", gfi = ">=", agfi = ">=", nfi = ">=", cfi = ">=")
+    labels <- c(pvalue = "p-value", srmr = "SRMR", rmsea = "RMSEA", aic = "AIC", bic = "BIC",
+                gfi = "GFI", agfi = "AGFI", nfi = "NFI", cfi = "CFI")
     # Not identified: lavaan's values are shown as they are; the ones that cannot be computed (p, NFI, CFI)
     # and the df are red
     unident <- isFALSE(model$identified) && is.finite(model$ident_df)
-    fmt <- function(idx, v) {
-      ok <- switch(idx,
-                   pvalue = v >= thr["pvalue"],
-                   srmr   = v <= thr["srmr"],
-                   rmsea  = v <= thr["rmsea"],
-                   gfi    = v >= thr["gfi"],
-                   agfi   = v >= thr["agfi"],
-                   nfi    = v >= thr["nfi"],
-                   cfi    = v >= thr["cfi"], TRUE)
-      if (is.na(v)) (if (unident) '<span style="color:red;">NA</span>' else "NA")
-      else if (!ok) sprintf('<span style="color:red;">%.3f</span>', v)
-      else sprintf('%.3f', v)
+    judge <- function(idx, v) {
+      if (is.na(v) || !(idx %in% names(thr))) return(NA)
+      if (dir[[idx]] == ">=") v >= thr[[idx]] else v <= thr[[idx]]
     }
-    html_vals <- mapply(fmt, names(vals), vals, USE.NAMES = FALSE)
-    tbl <- as.data.frame(t(html_vals), stringsAsFactors = FALSE)
-    colnames(tbl) <- toupper(names(vals))
+    rows <- lapply(names(vals), function(idx) {
+      v <- vals[[idx]]
+      ok <- judge(idx, v)
+      value_html <- if (is.na(v)) {
+        if (unident) '<span class="s2-ng">NA</span>' else "NA"
+      } else if (isFALSE(ok)) sprintf('<span class="s2-ng">%.3f</span>', v)
+      else sprintf("%.3f", v)
+      crit <- if (idx %in% names(thr)) sprintf("%s %s", if (dir[[idx]] == ">=") "≥" else "≤", sub("^0", "", format(thr[[idx]], nsmall = 2))) else "—"
+      mark <- if (is.na(ok)) "" else if (ok) '<span class="s2-ok">✓</span>' else '<span class="s2-ng">✗</span>'
+      data.frame(Index = labels[[idx]], Value = value_html, Criterion = crit, Fit = mark,
+                 stringsAsFactors = FALSE)
+    })
+    tbl <- do.call(rbind, rows)
     if (unident) {
       df_txt <- if (is.finite(model$ident_df)) format(model$ident_df) else "NA"
-      tbl <- cbind(DF = sprintf('<span style="color:red;font-weight:bold;">%s</span>', df_txt), tbl)
+      tbl <- rbind(data.frame(Index = "DF", Value = sprintf('<span class="s2-ng" style="font-weight:bold;">%s</span>', df_txt),
+                              Criterion = "—", Fit = "", stringsAsFactors = FALSE), tbl)
     }
-    datatable(tbl, escape = FALSE, rownames = FALSE,
-              options = list(dom = 't'))
+    datatable(tbl, escape = FALSE, rownames = FALSE, class = "compact stripe",
+              options = list(dom = 't', paging = FALSE, ordering = FALSE,
+                             columnDefs = list(list(className = "dt-right", targets = 1),
+                                               list(className = "dt-center", targets = c(2, 3)))))
   })
 
   # ----------------- Approximate Equations ----------------------
@@ -3140,7 +3114,7 @@ server <- function(input, output, session) {
     model <- tryCatch(fit_model_safe(), error = function(e) NULL)
     if (is.null(model) || !isFALSE(model$identified)) return(NULL)
     df_txt <- if (is.finite(model$ident_df)) sprintf(" (df = %s)", format(model$ident_df)) else ""
-    div(style = "color: #b91c1c; font-weight: 600; font-size: 13px; margin-bottom: 8px;",
+    div(class = "alert-box alert-box-error",
         paste0("The model is not identified", df_txt, ": standard errors and fit indices are unavailable or unreliable."))
   })
 
