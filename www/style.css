@@ -146,3 +146,8 @@
     print-color-adjust: exact;
   }
 }
+
+/* Header: current dataset summary and the Load Data button, placed left of the logo */
+#app-header-info { position: absolute; top: 12px; right: 76px; display: flex; align-items: center; gap: 10px; z-index: 5; }
+.s2-data-info { font-size: 12px; color: var(--s2-muted); white-space: nowrap; }
+.s2-data-info strong { color: #1e293b; margin-right: 6px; }

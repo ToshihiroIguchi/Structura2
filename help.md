@@ -61,8 +61,8 @@ Follow these steps to specify and estimate your first SEM model in under five mi
 
 1. **Load a Sample Dataset**:
    - When Structura2 opens, the **Load Data** dialog appears. Select the demo dataset **`HolzingerSwineford1939`** and click outside the modal or proceed.
-2. **Review Filtered Variables**:
-   - Click the **Filtered** tab. The default **Analysis mode** is set to `Standardized (scaled)`.
+2. **Review Variables**:
+   - Click the **Variables** tab. The default **Analysis mode** is set to `Standardized (scaled)`.
    - In **Display columns**, uncheck demographic identifiers (`id`, `sex`, `school`, `grade`) and keep the cognitive test batteries (`x1` through `x9`).
 3. **Define the Measurement Model**:
    - Switch to the **Model** tab.
@@ -104,7 +104,7 @@ When launching or resetting the application, you can explore five benchmark data
 * **`FacialBurns`**: Clinical psychological assessment data examining trauma, body image, and adjustment variables.
 
 ### 3.3 Analysis Settings (Mode & Missing Data)
-Located at the top of the **Filtered** tab, these settings govern the mathematical foundation of model fitting:
+Located at the top of the **Variables** tab, these settings govern the mathematical foundation of model fitting:
 
 #### Analysis Mode
 * **Standardized (scaled)** *(Default)*:
@@ -388,7 +388,7 @@ When estimating structural equation models, mathematical anomalies in empirical 
 * **Meaning**: One variable is an exact copy or an exact sum of others, so the covariance matrix cannot be inverted. Structura2 names the variables involved before estimation starts.
 * **Common Causes**:
   - A duplicated column, or a total score included together with the items it sums.
-* **Fix**: Remove one of the listed variables in **Filtered > Display columns**.
+* **Fix**: Remove one of the listed variables in **Variables > Display columns**.
 
 ### 2. "Too few rows: the model uses p variables but only N complete rows are available"
 * **Meaning**: Fewer complete rows than variables ($N < p$), so the covariance matrix is singular.
@@ -418,14 +418,14 @@ When estimating structural equation models, mathematical anomalies in empirical 
 * **Common Causes**:
   - Vastly differing variable variances (e.g., mixing income in tens of thousands with age in tens).
   - Problematic starting values in complex reciprocal feedback loops.
-* **Fix**: Switch **Analysis mode** to `Standardized (scaled)` in the **Filtered** tab. If running in Raw mode, apply a `log10` transformation to high-magnitude variables.
+* **Fix**: Switch **Analysis mode** to `Standardized (scaled)` in the **Variables** tab. If running in Raw mode, apply a `log10` transformation to high-magnitude variables.
 
 ### 6. "These variables are used in the model but not found in the data: ..."
 * **Meaning**: The model refers to a name that is not a column of the (filtered) data.
 * **Common Causes**:
   - A typo in **Manual Equations** (variable names are case-sensitive).
-  - The variable was unchecked in **Filtered > Display columns** or excluded as a constant column.
-* **Fix**: Correct the name, or select the variable again in the **Filtered** tab.
+  - The variable was unchecked in **Variables > Display columns** or excluded as a constant column.
+* **Fix**: Correct the name, or select the variable again in the **Variables** tab.
 
 ### 7. "Latent variable names cannot be the same as observed variables"
 * **Meaning**: In lavaan syntax, construct names must be distinct from manifest column headers.

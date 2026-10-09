@@ -867,7 +867,7 @@ diagnose_fit_inputs <- function(syntax_str, data, missing_method, needs_meanstru
     absent <- setdiff(lavaan::lavNames(pt, "ov"), names(data))
     if (length(absent) > 0) {
       return(structure(sprintf(
-        "These variables are used in the model but not found in the data: %s. Check the spelling in Manual Equations (names are case-sensitive), or select the variable in Filtered > Display columns.",
+        "These variables are used in the model but not found in the data: %s. Check the spelling in Manual Equations (names are case-sensitive), or select the variable in Variables > Display columns.",
         fmt_var_list(absent)), kind = "data"))
     }
     ov <- intersect(lavaan::lavNames(pt, "ov"), names(data))
@@ -895,7 +895,7 @@ diagnose_fit_inputs <- function(syntax_str, data, missing_method, needs_meanstru
           culprits <- colnames(Xc)[abs(v) > 0.1]
           kind <- "data"
           msgs <- c(msgs, sprintf(
-            "These variables are exactly linearly dependent: %s. This happens when a column is duplicated or is a total/sum of other columns. Remove one of them from the model (Filtered tab > Display columns).",
+            "These variables are exactly linearly dependent: %s. This happens when a column is duplicated or is a total/sum of other columns. Remove one of them from the model (Variables tab > Display columns).",
             fmt_var_list(culprits)))
         }
       }
@@ -1933,14 +1933,18 @@ ui <- fluidPage(
       div(id = "app-logo",
           img(src = "logo.png", height = 40,
               title = "Structural Insights, Simplified")),
+      div(id = "app-header-info",
+          uiOutput("data_info", inline = TRUE),
+          actionButton("load_data_btn", "Load Data", class = "btn btn-default btn-sm",
+                       title = "Load a different CSV file or demo dataset")),
 
   tabsetPanel(id = "main_tabs",
 
     # ---------------- Data tab -----------------------------------
     tabPanel("Data", h4("Uploaded Data"), DTOutput("datatable")),
 
-    # -------------- Filtered tab ---------------------------------
-    tabPanel("Filtered",
+    # -------------- Variables tab ---------------------------------
+    tabPanel("Variables",
              # ---- Analysis Settings (moved from Model tab) -----------
              h4("Analysis Settings"),
              radioButtons("analysis_mode", "Analysis mode:",
@@ -2159,22 +2163,7 @@ server <- function(input, output, session) {
       shinyjs::show("structura-main-app")
       
       # Show the initial load data modal dialog after dependencies are loaded
-      showModal(
-        modalDialog(
-          title = "Load Data",
-          fileInput("datafile", NULL,
-                    buttonLabel = "Browse…",
-                    placeholder  = "Upload CSV",
-                    accept       = c(".csv", "text/csv", "application/csv")),
-          tags$hr(),
-          radioButtons("sample_ds", "Or choose a demo dataset:",
-                       choices = c("None", "HolzingerSwineford1939",
-                                   "PoliticalDemocracy", "Demo.growth",
-                                   "Demo.twolevel", "FacialBurns")),
-          easyClose = FALSE,
-          footer    = NULL
-        )
-      )
+      showModal(load_data_modal(reload = FALSE))
 
       # Attach lavaan only after the dialog has been sent to the browser. R is single-threaded,
       # so any click made while lavaan loads is queued and handled once the engine is ready.
@@ -2221,6 +2210,46 @@ server <- function(input, output, session) {
     }, once = TRUE)
   }, ignoreInit = TRUE)
 
+  # Load Data dialog. At startup it cannot be dismissed (the app needs data); when reopened from the
+  # header button it can be cancelled, and it warns that loading replaces the current model definition.
+  load_data_modal <- function(reload = FALSE) {
+    modalDialog(
+      title = "Load Data",
+      if (reload && !is.null(data())) {
+        div(class = "alert-box alert-box-warning",
+            "Loading a new dataset resets the model definition. Save the current model first with Saved Models if you want to keep it.")
+      },
+      fileInput("datafile", NULL,
+                buttonLabel = "Browse…",
+                placeholder  = "Upload CSV",
+                accept       = c(".csv", "text/csv", "application/csv")),
+      tags$hr(),
+      radioButtons("sample_ds", "Or choose a demo dataset:",
+                   choices = c("None", "HolzingerSwineford1939",
+                               "PoliticalDemocracy", "Demo.growth",
+                               "Demo.twolevel", "FacialBurns")),
+      easyClose = reload,
+      footer    = if (reload) modalButton("Cancel") else NULL
+    )
+  }
+
+  observeEvent(input$load_data_btn, {
+    tryCatch(showModal(load_data_modal(reload = TRUE)), error = function(e) {
+      showNotification(paste("Could not open the Load Data dialog:", conditionMessage(e)),
+                       type = "error", duration = 8)
+    })
+  })
+
+  # Header summary of the dataset being analyzed
+  output$data_info <- renderUI({
+    df <- data()
+    if (is.null(df)) return(NULL)
+    lbl <- data_label()
+    span(class = "s2-data-info",
+         if (nzchar(lbl)) tags$strong(lbl),
+         sprintf("%s rows × %s cols", format(nrow(df), big.mark = ","), ncol(df)))
+  })
+
   data <- reactiveVal(NULL)
   data_label <- reactiveVal("")   # file name or demo dataset name; stored in model specs for reference only
 
@@ -2264,6 +2293,7 @@ server <- function(input, output, session) {
                  "FacialBurns"           = FacialBurns)
     data_label(input$sample_ds)
     data(ds)
+    updateRadioButtons(session, "sample_ds", selected = "None")
     removeModal()
   })
 
@@ -2294,7 +2324,7 @@ server <- function(input, output, session) {
     checkboxGroupInput("log_columns", "Log-transform columns (log10):",
                        choices = valid, inline = TRUE)
   })
-  # Rendered even while the Filtered tab is hidden, so a model restore can set the selection
+  # Rendered even while the Variables tab is hidden, so a model restore can set the selection
   outputOptions(output, "log_transform_ui", suspendWhenHidden = FALSE)
 
   # Column-name shape (log10 renames / one-hot dummy names) computed from the full,
