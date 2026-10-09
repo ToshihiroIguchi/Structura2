@@ -1727,7 +1727,7 @@ ui <- fluidPage(
 
           if (msg.opt_history_html && msg.opt_history_html.trim() !== '') {
             html += '<div class=\"print-avoid-break\">' +
-              '<div class=\"print-section-title\">Model Optimization History</div>' +
+              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Model Optimization History</div>' +
               msg.opt_history_html +
             '</div>';
           }
@@ -3522,10 +3522,10 @@ server <- function(input, output, session) {
       # Build Auto-Optimization History Details
       opt_history_html <- tryCatch({
         # Only an optimization whose result was applied, and whose syntax is still the one that was fitted
-        res <- prune_results()
         applied <- applied_prune_info()
+        res <- applied$res   # the run the applied candidate came from (a later, unapplied run must not leak in)
         if (!is.null(res) && !is.null(res$candidates) && length(res$candidates) > 0 &&
-            !is.null(applied) && identical(model_res$syntax, applied$expected_syntax)) {
+            identical(model_res$syntax, applied$expected_syntax)) {
           strat <- res$strategy_used %||% "Unknown"
           crit  <- res$criterion %||% "AIC"
           baseline_cand <- NULL
@@ -5384,8 +5384,10 @@ server <- function(input, output, session) {
     pending_prune_check(if (isTRUE(cand$converged) && isTRUE(cand$vars_ok) && !is.na(cand$aic))
                           list(aic = cand$aic, bic = cand$bic) else NULL)
 
-    ctx_applied <- isolate(prune_results())$ctx
+    res_applied <- isolate(prune_results())
+    ctx_applied <- res_applied$ctx
     applied_prune_info(list(
+      res = res_applied,
       cand = cand,
       expected_syntax = unlist(c(ctx_applied$meas_lines, build_struct_lines(cand$struct_df), ctx_applied$extra_lines))))
 
