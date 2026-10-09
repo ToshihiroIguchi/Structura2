@@ -1782,10 +1782,26 @@ ui <- fluidPage(
           }
         });
 
+        // The modal content is inserted asynchronously, so the first message can arrive before
+        // the container exists; keep only the latest message and retry until the container appears.
+        window.structuraPrunePreviewMsg = null;
         Shiny.addCustomMessageHandler('update_prune_preview_plot', function(message) {
+          window.structuraPrunePreviewMsg = message;
+          var tries = 0;
+          (function render() {
+            if (window.structuraPrunePreviewMsg !== message) return;
+            if (!document.getElementById('prune_preview_container')) {
+              if (++tries < 50) setTimeout(render, 100);
+              return;
+            }
+            renderPrunePreview(message);
+          })();
+        });
+
+        function renderPrunePreview(message) {
           var container = document.getElementById('prune_preview_container');
           if (!container) return;
-          
+
           if (message.message) {
             container.style.display = 'flex';
             container.style.alignItems = 'center';
@@ -1819,7 +1835,7 @@ ui <- fluidPage(
           } else {
             container.innerHTML = '<div style=\"color:red; padding:10px;\">Graphviz library not loaded.</div>';
           }
-        });
+        }
 
         // Real-time Optimization Live Canvas Line Chart Renderer
         Shiny.addCustomMessageHandler('update_optimization_live_chart', function(msg) {
