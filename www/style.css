@@ -151,3 +151,30 @@
 #app-header-info { position: absolute; top: 12px; right: 76px; display: flex; align-items: center; gap: 10px; z-index: 5; }
 .s2-data-info { font-size: 12px; color: var(--s2-muted); white-space: nowrap; }
 .s2-data-info strong { color: #1e293b; margin-right: 6px; }
+
+/* Model tab: sticky run toolbar and sticky diagram column.
+   Bootstrap 3 columns are floats and would not stretch, so the row becomes a flex container
+   (the columns then share the row height, which gives the sticky column room to move). */
+.s2-model-row { display: flex; align-items: stretch; }
+.s2-model-row::before, .s2-model-row::after { display: none; }
+.s2-sticky-toolbar {
+  position: sticky; top: 0; z-index: 20;
+  background: #fff; padding: 6px 0; margin-bottom: 8px;
+  border-bottom: 1px solid var(--s2-border);
+}
+.s2-sticky-right { position: sticky; top: 8px; }
+.s2-diagram-box {
+  height: calc(100vh - 300px); min-height: 320px;
+  overflow-y: auto; overflow-x: hidden; border: 1px solid #ccc; position: relative;
+}
+@media (max-width: 991px) {
+  .s2-model-row { display: block; }
+  .s2-sticky-right { position: static; }
+  .s2-diagram-box { height: 60vh; }
+}
+
+/* Matrix legend */
+.s2-legend { font-size: 12px; color: #666; margin-bottom: 6px; }
+details.s2-legend summary { cursor: pointer; color: var(--s2-primary); margin-bottom: 4px; }
+.s2-model-row > [class*="col-"] { min-width: 0; }
+.s2-sticky-right .dataTables_wrapper { overflow-x: auto; }
