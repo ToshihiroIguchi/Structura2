@@ -24,18 +24,18 @@ Structura2 is an interactive Shiny application for Structural Equation Modeling 
 ## Features
 
 * **Data Upload & Inspection**: Upload CSV files with automatic encoding detection (UTF-8, Shift-JIS, etc.) handled directly in the browser.
-* **Log-transform**: Apply common logarithm (log10) to positive numeric columns.
-* **One-hot Encoding**: Convert categorical variables to dummy indicators for SEM compatibility.
+* **Variables Tab**: Choose which columns enter the analysis, apply the common logarithm (log10) to positive numeric columns, and one-hot encode categorical variables into dummy indicators for SEM compatibility.
 * **Model Specification**: Define measurement (`Latent =~ Indicators`) and structural (`Dependent ~ Predictors`) models in interactive Handsontable grids powered by **rhandsontable** and **DT** ([cran.r-project.org](https://cran.r-project.org/package=shiny), [shiny.posit.co](https://shiny.posit.co/)).
 * **SEM Fitting**: Fit models using **lavaan** with support for mean structures and detailed fit measures.
 * **Model Optimization & Recommendations**: Automatically prune non-significant paths to minimize AIC/BIC, or discover promising paths to add with the top N paths by Modification Index highlighted directly in the structural matrix.
 * **Visualization**: Render path diagrams via browser-side **@hpcc-js/wasm**/**semDiagram**.
-* **Comprehensive Reporting**: View fit indices (p-value, SRMR, RMSEA, AIC, BIC, GFI, AGFI, NFI, CFI), parameter tables, and formatted equations in real time.
-* **Export & Reporting**: Export publication-grade vector SVG and high-resolution PNG path diagrams, and generate comprehensive A4 PDF analysis reports directly from the browser.
+* **Comprehensive Reporting**: View fit indices (p-value, SRMR, RMSEA, AIC, BIC, GFI, AGFI, NFI, CFI) listed against their conventional criteria (e.g. SRMR ≤ .08, CFI ≥ .90) with a check mark for each index that meets it, plus parameter tables and formatted equations in real time.
+* **Saved Models**: Save model definitions in the browser and restore them later, export/import them as JSON, and pick up the model from a previous session.
+* **Export & Reporting**: Export publication-grade vector SVG and high-resolution PNG path diagrams, generate comprehensive A4 PDF analysis reports, and download a results ZIP (text results plus the path diagram as SVG and PNG) directly from the browser.
 
 ## Prerequisites & Installation (For Local Runs)
 
-To run **Structura2** locally on your machine (Options 2, 3, 4, or 5), you need to have **R** installed. Using **RStudio** is highly recommended for an optimal experience.
+To run **Structura2** locally on your machine (Options 2 to 6), you need to have **R** installed. Using **RStudio** is highly recommended for an optimal experience.
 
 1. **Install R**: Download and install R for your operating system from the [Comprehensive R Archive Network (CRAN)](https://cran.r-project.org/).
 2. **Install RStudio**: Download and install RStudio Desktop from [Posit](https://posit.co/download/rstudio-desktop/).
@@ -76,6 +76,9 @@ You can launch the application instantly from your R console without cloning or 
    shiny::runGitHub("Structura2", "ToshihiroIguchi", ref = "main")
    ```
    The app will automatically open in your default browser.
+
+> [!NOTE]
+> The Regularized SEM (Lasso / Elastic Net) search strategy additionally needs `regsem`. If you plan to use it, also run `install.packages("regsem")`; without it that strategy is unavailable (Options 2, 3, 5 and 6).
 
 ---
 
@@ -125,7 +128,7 @@ You can compile the app into a static WebAssembly site and serve it locally. Thi
      In R, install the `servr` package and serve the directory:
      ```r
      install.packages("servr")
-     servr::httwd("site", port = 8100)
+     servr::httd("site", port = 8100)
      ```
    * **Method B: Using Python 3**
      In your terminal, run:
@@ -150,6 +153,11 @@ This script automatically detects your host's local IPv4 address and configures 
 1. **Prerequisites**: Make sure the hosting machine and the client devices are connected to the same Wi-Fi or local network.
 2. **Firewall Settings**: If client devices cannot connect, check your hosting machine's firewall settings. Ensure that incoming TCP traffic is allowed on port `8100`.
 3. **Run the Script**: Copy the script below, save it as an R script (e.g., `run_lan.R`), or run it directly in your R/RStudio console.
+4. **Open from another device**: Browse to `http://<printed IP>:8100` (the script prints the address it uses).
+
+> [!NOTE]
+> * `get_ip()` takes the first IPv4 address it finds. On a machine with several network adapters (wired and Wi-Fi together, VPN, virtual adapters), it may pick the wrong one; in that case set `host_ip` to the correct address by hand.
+> * `runGitHub()` always fetches the current `main` branch from GitHub, so uncommitted or unpushed local changes are not served.
 
 <details>
 <summary>Click to expand the complete LAN-hosting script</summary>
@@ -227,6 +235,28 @@ shiny::runGitHub(
 ```
 
 </details>
+
+---
+
+### Option 6: Deploy on Shiny Server
+
+You can host **Structura2** as a regular Shiny app on [Shiny Server](https://posit.co/products/open-source/shiny-server/) (Linux).
+
+1. **Install the packages on the server**: In the R installation that Shiny Server uses (as a system-wide library, so that the `shiny` user can load them), install:
+   ```r
+   install.packages(c("shiny", "shinyjs", "DT", "rhandsontable", "lavaan", "markdown"))
+   ```
+   Add `"regsem"` if you want the Regularized SEM search strategy.
+2. **Copy the app files**: Copy `app.R`, `help.md` and the `www/` directory into one folder under the Shiny Server site directory, for example:
+   ```bash
+   sudo mkdir -p /srv/shiny-server/structura2
+   sudo cp -r app.R help.md www /srv/shiny-server/structura2/
+   sudo chmod -R a+rX /srv/shiny-server/structura2
+   ```
+3. **Open the App**: Browse to `http://<server>:3838/structura2/` (the default Shiny Server port). No restart is needed; Shiny Server picks up new directories automatically.
+
+> [!NOTE]
+> The path diagram is drawn in the browser by the bundled `www/hpcc-js/graphviz.umd.js`, so Graphviz does not need to be installed on the server.
 
 ## License
 
