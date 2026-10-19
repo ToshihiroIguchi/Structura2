@@ -247,6 +247,9 @@ You can host **Structura2** as a regular Shiny app on [Shiny Server](https://pos
    install.packages(c("shiny", "shinyjs", "DT", "rhandsontable", "lavaan", "markdown"))
    ```
    Add `"regsem"` if you want the Regularized SEM search strategy.
+
+   > [!NOTE]
+   > Install these from CRAN rather than from your Linux distribution (e.g. `r-cran-dt` from `apt`). The Debian/Ubuntu build of DT 0.31 replaces its bundled jQuery noUiSlider with a system copy that has no jQuery plugin, so the numeric column filters on the Data and Variables tabs fail with `$x.noUiSlider is not a function`. If you upgraded DT and still see this, reload the page once to clear the browser cache (the script keeps the same URL).
 2. **Copy the app files**: Copy `app.R`, `help.md` and the `www/` directory into one folder under the Shiny Server site directory, for example:
    ```bash
    sudo mkdir -p /srv/shiny-server/structura2
