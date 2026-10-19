@@ -261,6 +261,35 @@ You can host **Structura2** as a regular Shiny app on [Shiny Server](https://pos
 > [!NOTE]
 > The path diagram is drawn in the browser by the bundled `www/hpcc-js/graphviz.umd.js`, so Graphviz does not need to be installed on the server.
 
+### Option 7: Docker (Shiny Server) on your LAN
+
+Run **Structura2** in the [`rocker/shiny`](https://rocker-project.org/images/versioned/shiny.html) image (Shiny Server in a container) and let other PCs on the same LAN open it in a browser.
+
+1. **Create a `Dockerfile`** in the repository root:
+   ```dockerfile
+   FROM rocker/shiny:latest
+   RUN install2.r --error --skipinstalled shinyjs DT rhandsontable lavaan markdown regsem
+   COPY app.R help.md /srv/shiny-server/structura2/
+   COPY www /srv/shiny-server/structura2/www
+   RUN chmod -R a+rX /srv/shiny-server/structura2
+   ```
+   `regsem` is only needed for the Regularized SEM search strategy and can be removed.
+2. **Build and start the container**, publishing host port 8100 (mapped to Shiny Server's port 3838 inside the container) on all host interfaces:
+   ```bash
+   docker build -t structura2 .
+   docker run -d --name structura2 --restart unless-stopped -p 8100:3838 structura2
+   ```
+3. **Find the host's LAN IP address**: `ipconfig` (Windows) or `ip addr` / `hostname -I` (Linux), e.g. `192.168.1.20`.
+4. **Allow the port through the host firewall** (Windows example, run in an administrator PowerShell; limit it to the private profile):
+   ```powershell
+   New-NetFirewallRule -DisplayName "Structura2 (Shiny Server)" -Direction Inbound -Protocol TCP -LocalPort 8100 -Action Allow -Profile Private
+   ```
+   On Linux with `ufw`: `sudo ufw allow from 192.168.1.0/24 to any port 8100 proto tcp`.
+5. **Open the App** from any device on the LAN: `http://192.168.1.20:8100/structura2/`.
+
+> [!WARNING]
+> Shiny Server (open source) has no authentication or HTTPS. Expose it only on a trusted LAN, never forward port 8100 on your router, and bind to a single interface if needed, e.g. `-p 192.168.1.20:8100:3838`. To update the app, rebuild the image and recreate the container (`docker rm -f structura2`, then `docker build` and `docker run` again). To stop it, run `docker stop structura2`.
+
 ## License
 
 Released under the **MIT License** © 2025-2026 Toshihiro Iguchi.
