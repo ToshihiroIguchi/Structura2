@@ -32,11 +32,17 @@ Structura2/
 │   ├── hpcc-js/       # graphviz.umd.js (wasm embedded); hosted at site/hpcc-js/ in the static site, not in app.json
 │   └── style.css      # Custom CSS overrides
 ├── test_webr/         # Minimal test app for WebR compatibility verification
+├── tests/             # R scripts for edge cases, helpers and strategy comparisons
+├── test_browser/      # Node/Puppeteer scripts for browser checks and startup measurement
+├── test_*.csv         # Sample CSVs (UTF-8, Shift-JIS, 50 variables) read by test_browser scripts via relative paths; do not move
+├── .github/workflows/deploy.yml  # GitHub Pages deployment (ShinyLive export on push to main)
 ├── AGENT.md           # This file: agent guidelines (all AI models)
 ├── GEMINI.md          # Gemini-specific agent guidelines
 ├── CLAUDE.md          # Claude-specific agent guidelines
 └── README.md          # Project readme
 ```
+
+`site/` (static ShinyLive output) and `app_source/` (clean source staged by `export_shinylive.R`) are generated and git-ignored.
 
 ## Key Dependencies
 
