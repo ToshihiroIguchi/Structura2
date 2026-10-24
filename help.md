@@ -216,7 +216,7 @@ Clicking the cyan **Optimize** button (active whenever structural paths are defi
 #### Search Algorithm Strategy
 Structura2 provides a robust suite of optimization strategies spanning exact combinatorial search, modern regularized estimation, greedy pruning, and heuristic meta-heuristics:
 * **Adaptive Auto-Switch** *(Recommended for General Use)*:
-  Calculates the total combinatorial search space $2^M$, where $M$ is the number of unlocked structural paths. If $2^M \le 1024$ (configurable threshold), it executes an **Exhaustive Search** guaranteeing global optimality. If $2^M > 1024$, it automatically switches to a **Stepwise Search** for instant convergence without browser freezing.
+  Calculates the total combinatorial search space $2^M$, where $M$ is the number of unlocked structural paths. If $2^M \le 1024$ (configurable threshold), it executes an **Exhaustive Search** guaranteeing global optimality. If $2^M > 1024$, it automatically switches to **Simulated Annealing** (using the SA iteration and temperature settings), which escapes the local optima that a greedy Stepwise Search can get stuck in while keeping the run time bounded.
 * **Regularized SEM (Lasso / Elastic Net - Modern Industry Standard)**:
   Penalized maximum likelihood estimation (`regsem::cv_regsem`) applying $L_1$ (Lasso) or Elastic Net regularization to structural regression coefficients across a grid of shrinkage parameters ($\lambda$). The modern gold standard for continuous shrinkage and sparse model selection in SEM.
 * **Stepwise Search (Fast & Deterministic)**:
