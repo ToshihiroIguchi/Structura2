@@ -4112,7 +4112,7 @@ server <- function(input, output, session) {
                            value = 1024, min = 64, max = 8192, step = 64)
             ),
             conditionalPanel(
-              condition = "input.prune_strategy == 'sa'",
+              condition = "input.prune_strategy == 'sa' || input.prune_strategy == 'adaptive'",
               fluidRow(
                 column(4, numericInput("sa_max_iter", "SA Max Iterations:", value = 150, min = 20, max = 500, step = 10)),
                 column(4, numericInput("sa_temp_init", "SA Initial Temp (in AIC/BIC units):", value = 10.0, min = 1.0, max = 100.0, step = 1.0)),
@@ -4481,9 +4481,9 @@ server <- function(input, output, session) {
       if (total_comb <= max_comb) {
         eff_strategy <- "exhaustive"
       } else {
-        eff_strategy <- "stepwise"
+        eff_strategy <- "sa"
         showNotification(
-          sprintf("Search space (%s combinations) exceeds the threshold (%s): using Stepwise Search, which does not guarantee the global optimum.",
+          sprintf("Search space (%s combinations) exceeds the threshold (%s): using Simulated Annealing, which does not guarantee the global optimum.",
                   format(total_comb, big.mark = ",", scientific = FALSE), format(max_comb, big.mark = ",", scientific = FALSE)),
           type = "message", duration = 8)
       }
