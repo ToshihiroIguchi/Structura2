@@ -5,6 +5,7 @@ exprs <- parse("app.R")
 wanted <- c("struct_pred_cols", "build_struct_lines", "make_struct_key", "active_struct_vars",
             "run_lavaan_sem", "free_cov_pairs", "required_struct_vars", "candidate_structure_check",
             "check_variable_isolation", "fit_is_proper", "candidate_score", "fit_candidate_model",
+            "droppable_struct_vars", "orphaned_struct_vars", "orphan_zero_lines",
             "struct_descendants", "struct_dependents", "struct_edges", "fit_suggestion_model", "fit_cutoff_violations", "get_modification_suggestions", "get_suggested_structural_paths",
             "%||%")
 for (e in exprs) {
@@ -120,6 +121,69 @@ chk_lat2 <- candidate_structure_check(lat_no_st, lat_ctx)
 ok(chk_lat2$replaced && "speed ~~ textual" %in% chk_lat2$added_covs, "dropping speed ~ textual -> speed ~~ textual freed (detected)")
 lat_ok <- fit_candidate_model(mk_lat(list(c("textual", "visual"), c("speed", "textual"))), lat_ctx)
 ok(!candidate_structure_check(lat_ok, lat_ctx)$replaced, "dropping speed ~ visual keeps speed dependent -> pure reduction")
+
+# --- exogenous predictors may lose every path: scored with fixed-zero paths (variable selection)
+hs <- lavaan::HolzingerSwineford1939[, paste0("x", 1:6)]
+hs_items <- paste0("x", 1:6)
+mk_hs <- function(preds) {
+  s <- data.frame(Dependent = hs_items, Operator = "~", stringsAsFactors = FALSE)
+  for (i in hs_items) s[[i]] <- FALSE
+  for (p in preds) s[s$Dependent == "x6", p] <- TRUE
+  s
+}
+hs_base <- mk_hs(paste0("x", 1:5))
+for (ms in c(FALSE, TRUE)) for (mm in c("listwise", "ml")) {
+  tag <- sprintf("[meanstructure=%s, missing=%s]", ms, mm)
+  c0 <- list(data = hs, missing_method = mm, needs_meanstructure = ms || mm == "ml",
+             meas_lines = NULL, extra_lines = NULL, base_fit = NULL)
+  b <- fit_candidate_model(hs_base, c0)
+  hctx <- c0
+  hctx$droppable_vars <- droppable_struct_vars(hs_base, b)
+  hctx$base_edges <- struct_edges(hs_base)
+  hctx$required_vars <- setdiff(required_struct_vars(hs_base, b), hctx$droppable_vars)
+  hctx$base_ov <- lavNames(b, "ov")
+  hctx$base_cov_pairs <- free_cov_pairs(b)
+  ok(setequal(hctx$droppable_vars, paste0("x", 1:5)), paste(tag, "exogenous predictors are droppable"))
+  ok(length(hctx$required_vars) == 1 && hctx$required_vars == "x6", paste(tag, "the dependent variable stays required"))
+
+  hs_cand <- mk_hs(c("x2", "x3", "x4", "x5"))                     # x1 loses its only path
+  ok(identical(orphaned_struct_vars(hs_cand, hctx), "x1"), paste(tag, "x1 is orphaned"))
+  ok(identical(orphan_zero_lines(hs_cand, hctx), "x6 ~ 0*x1"), paste(tag, "fixed-zero line for x1"))
+  ok(!length(orphan_zero_lines(hs_base, hctx)), paste(tag, "no extra lines for the baseline"))
+  fc <- fit_candidate_model(hs_cand, hctx)
+  chk <- candidate_structure_check(fc, hctx)
+  ok(chk$vars_ok && !chk$replaced, paste(tag, "orphaned predictor is a pure reduction (same variables, no added covariances)"))
+  ok(fitMeasures(fc, "df") == fitMeasures(b, "df") + 1, paste(tag, "one path removed -> exactly 1 df"))
+  # AIC difference equals that of the plain regression with the predictor removed (listwise data are complete)
+  l_full <- lm(x6 ~ x1 + x2 + x3 + x4 + x5, hs); l_red <- lm(x6 ~ x2 + x3 + x4 + x5, hs)
+  ok(abs((AIC(fc) - AIC(b)) - (AIC(l_red) - AIC(l_full))) < 1e-6, paste(tag, "delta AIC equals the regression variable-selection delta"))
+  ok(check_variable_isolation(hs_cand, "x6", character(0), struct_pred_cols(hs_cand), hctx$required_vars),
+     paste(tag, "an orphaned exogenous predictor passes the isolation check"))
+  ok(!check_variable_isolation(mk_hs(character(0)), "x6", character(0), struct_pred_cols(hs_base), hctx$required_vars),
+     paste(tag, "the dependent variable may never lose all incoming paths"))
+  # several predictors orphaned at once, and a non-adjacent one
+  cand2 <- mk_hs(c("x2", "x4"))
+  ok(setequal(orphaned_struct_vars(cand2, hctx), c("x1", "x3", "x5")), paste(tag, "several orphaned predictors"))
+  ok(identical(orphan_zero_lines(cand2, hctx), "x6 ~ 0*x1 + 0*x3 + 0*x5"), paste(tag, "one fixed-zero line per dependent"))
+  fc2 <- fit_candidate_model(cand2, hctx)
+  ok(candidate_structure_check(fc2, hctx)$vars_ok, paste(tag, "several orphans keep the variable set"))
+  l_red2 <- lm(x6 ~ x2 + x4, hs)
+  ok(abs((AIC(fc2) - AIC(b)) - (AIC(l_red2) - AIC(l_full))) < 1e-6, paste(tag, "multi-orphan delta AIC equals the regression delta"))
+}
+
+# exogenous variable used by several dependents: orphaned only when every path is gone
+multi_df <- mk(list(c("m", "x1"), c("y", "x1"), c("y", "m"), c("y", "x2")))
+mctx <- mk_ctx(d, multi_df)
+mctx$droppable_vars <- droppable_struct_vars(multi_df, fit_candidate_model(multi_df, mctx))
+mctx$base_edges <- struct_edges(multi_df)
+ok(setequal(mctx$droppable_vars, c("x1", "x2")), "x1 and x2 are exogenous -> droppable (m and y are dependent)")
+ok(!"x1" %in% orphaned_struct_vars(mk(list(c("m", "x1"), c("y", "m"))), mctx), "x1 keeps one path -> not orphaned")
+no_x1 <- mk(list(c("y", "m"), c("y", "x2")))
+no_x1_dep <- unique(struct_edges(multi_df)$dep)
+ok(identical(orphaned_struct_vars(no_x1, mctx), "x1"), "x1 lost both its paths -> orphaned")
+ok(identical(sort(orphan_zero_lines(no_x1, mctx)), c("m ~ 0*x1", "y ~ 0*x1")), "fixed-zero lines for every removed path of x1")
+ok(!check_variable_isolation(no_x1, no_x1_dep, character(0), struct_pred_cols(no_x1), setdiff(required_struct_vars(multi_df, fit_candidate_model(multi_df, mctx)), mctx$droppable_vars)),
+   "m lost its only incoming path -> still rejected (dependent-variable constraint)")
 
 # --- score / improper handling
 ok(is.infinite(candidate_score(list(converged = TRUE, proper = FALSE, aic = 1, bic = 1), "AIC")), "improper -> Inf")

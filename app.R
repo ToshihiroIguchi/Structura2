@@ -991,6 +991,32 @@ required_struct_vars <- function(struct_df, base_fit) {
   setdiff(active_struct_vars(struct_df), c(lv, ind))
 }
 
+# Exogenous predictors of the baseline (no incoming structural path) that an optimization may strip of
+# every path. They are evaluated with their removed paths fixed to zero (see orphan_zero_lines) so the
+# likelihood stays comparable, and are left out of the model when the candidate is applied.
+droppable_struct_vars <- function(struct_df, base_fit) {
+  setdiff(required_struct_vars(struct_df, base_fit), struct_dependents(struct_df))
+}
+
+# Droppable variables that no longer take part in any active path of a candidate.
+orphaned_struct_vars <- function(struct_df, ctx) {
+  if (is.null(ctx$droppable_vars) || !length(ctx$droppable_vars)) return(character(0))
+  intersect(ctx$droppable_vars, setdiff(ctx$droppable_vars, active_struct_vars(struct_df)))
+}
+
+# `dep ~ 0*pred` lines for the baseline paths of orphaned variables. A fixed-zero regression keeps the
+# variable in the model as a free exogenous covariate (same variable set, same free covariances as the
+# baseline), so AIC/BIC differences equal those of the equivalent regression with that predictor removed.
+orphan_zero_lines <- function(struct_df, ctx) {
+  orphans <- orphaned_struct_vars(struct_df, ctx)
+  if (!length(orphans) || is.null(ctx$base_edges) || !nrow(ctx$base_edges)) return(character(0))
+  e <- ctx$base_edges[ctx$base_edges$pred %in% orphans, , drop = FALSE]
+  if (!nrow(e)) return(character(0))
+  vapply(unique(e$dep), function(dp) {
+    paste0(dp, " ~ ", paste0("0*", e$pred[e$dep == dp], collapse = " + "))
+  }, character(1), USE.NAMES = FALSE)
+}
+
 # Structural comparability of a fitted candidate with the baseline described by `ctx`
 # (ctx$base_ov = observed variables, ctx$base_cov_pairs = free covariances of the baseline fit).
 candidate_structure_check <- function(fit, ctx) {
@@ -1043,8 +1069,12 @@ candidate_score <- function(rec, criterion) {
 # Fits one candidate structural model with the same syntax and options as the main model.
 # `ctx` carries data, estimation options, measurement lines, extra lines and an optional warm-start
 # fit. Returns NULL when estimation fails.
+#
+# An exogenous predictor that lost every path would silently leave the model (different data, so AIC/BIC
+# are not comparable). Its removed paths are therefore kept as fixed-zero regressions (`y ~ 0*x`) while
+# the candidate is scored; applying the candidate removes the variable for real.
 fit_candidate_model <- function(struct_df, ctx) {
-  all_syntax <- unlist(c(ctx$meas_lines, build_struct_lines(struct_df), ctx$extra_lines))
+  all_syntax <- unlist(c(ctx$meas_lines, build_struct_lines(struct_df), orphan_zero_lines(struct_df, ctx), ctx$extra_lines))
   if (!length(all_syntax)) return(NULL)
   syntax_str <- paste(all_syntax, collapse = "\n")
 
@@ -3433,16 +3463,23 @@ server <- function(input, output, session) {
             length(strsplit(optimal_cand$removed_str, ";", fixed = TRUE)[[1]])
           } else 0L
 
+          excluded_note <- if (length(optimal_cand$excluded_vars %||% character(0))) {
+            sprintf(paste0("<div><b>Predictors removed from the model:</b> %s. The optimal score above was computed with their paths fixed to zero; ",
+                           "the fit indices in this report are computed on the model without them and are not comparable with the baseline.</div>"),
+                    htmltools::htmlEscape(paste(optimal_cand$excluded_vars, collapse = ", ")))
+          } else ""
+
           sprintf(
             paste0(
               "<div style='background-color:#f8fafc; border:1px solid #e2e8f0; border-radius:4px; padding:8px 12px; font-size:11px; margin-bottom:12px;'>",
               "<div><b>Optimization Strategy:</b> %s | <b>Criterion:</b> %s</div>",
               "<div><b>Baseline %s Score:</b> %s &rarr; <b>Optimal %s Score:</b> %s</div>",
               "<div><b>Paths Pruned:</b> %d path(s)</div>",
+              "%s",
               "</div>"),
             htmltools::htmlEscape(strat), htmltools::htmlEscape(crit),
             htmltools::htmlEscape(crit), base_score, htmltools::htmlEscape(crit), opt_score,
-            pruned_paths_count
+            pruned_paths_count, excluded_note
           )
         } else ""
       }, error = function(e) "")
@@ -4057,9 +4094,9 @@ server <- function(input, output, session) {
               tags$b("Variable Isolation Prevention (Keep in Model)", style = "color: #1e293b; font-size: 14px;"),
               span(style = "font-size: 11px; color: #64748b;", "At least one connecting path will be retained")
           ),
-          p("Every variable of your model always keeps at least one path (lavaan would otherwise drop it silently and the scores could no longer be compared), ",
-            "and every dependent variable always keeps at least one incoming path (otherwise it would become exogenous and lavaan would replace the paths with covariances). ",
-            "Select predictor variables below to additionally require an outgoing path.",
+          p("Every dependent variable always keeps at least one incoming path (otherwise it would become exogenous and lavaan would replace the paths with covariances). ",
+            "A predictor that has no incoming path may lose all of its paths: it is then scored with those paths fixed to zero (so the scores stay comparable) and is removed from the model when the candidate is applied. ",
+            "Select predictor variables below to require an outgoing path, which keeps them in the model.",
             style = "font-size: 12px; color: #64748b; margin-bottom: 10px;"),
           fluidRow(
             column(width = 12,
@@ -4340,6 +4377,11 @@ server <- function(input, output, session) {
             "[Variable Dropped] means a variable lost all of its paths and was left out of the model. Neither can be ranked as optimal. ",
             "[Not Identified] models (df < 0 or no standard errors) show no AIC/BIC and are never ranked.",
             style = "margin: 6px 0 0 0; font-size: 12px; color: #64748b;"),
+          if (any(vapply(res$candidates, function(cd) length(cd$excluded_vars) > 0, logical(1))))
+            p("Note: a predictor that lost every path is scored with its removed paths fixed to zero so that the scores stay comparable. ",
+              "Applying such a candidate removes the predictor from the model, so the AIC/BIC after applying will differ from the values in this table ",
+              "(they are computed on fewer variables) and cannot be compared with the model before optimization.",
+              style = "margin: 6px 0 0 0; font-size: 12px; color: #b45309; font-weight: 600;"),
           if (nzchar(res$fallback_note %||% ""))
             p(res$fallback_note, style = "margin: 6px 0 0 0; font-size: 12px; color: #b45309; font-weight: 600;")
         ),
@@ -4566,13 +4608,18 @@ server <- function(input, output, session) {
     # Candidates are estimated exactly like the main model. They stay comparable with the baseline only if
     # no variable disappears (required_vars always keep a path) and no removed path is silently replaced
     # by a covariance (checked after each fit against base_ov / base_cov_pairs).
+    # Exogenous predictors may lose every path: they are scored with fixed-zero paths (droppable_vars,
+    # base_edges) and are removed from the model when the candidate is applied.
+    droppable_vars <- droppable_struct_vars(struct_df, base_fit)
     ctx <- list(
       data = processed_data(),
       missing_method = input$missing_method,
       needs_meanstructure = needs_meanstructure,
       meas_lines = mlines,
       extra_lines = extra,
-      required_vars = required_struct_vars(struct_df, base_fit),
+      droppable_vars = droppable_vars,
+      base_edges = struct_edges(struct_df),
+      required_vars = setdiff(required_struct_vars(struct_df, base_fit), droppable_vars),
       base_ov = lavaan::lavNames(base_fit, "ov"),
       base_cov_pairs = free_cov_pairs(base_fit),
       base_fit = base_fit
@@ -4704,7 +4751,8 @@ server <- function(input, output, session) {
         cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
         converged = TRUE, proper = proper, status = stat,
         identified = ident$identified, deficit = ident$deficit, raw_aic = raw_aic,
-        vars_ok = chk$vars_ok, replaced = chk$replaced, added_covs = chk$added_covs
+        vars_ok = chk$vars_ok, replaced = chk$replaced, added_covs = chk$added_covs,
+        excluded_vars = orphaned_struct_vars(curr_s_df, st$ctx)
       )
     }
 
@@ -5264,8 +5312,17 @@ server <- function(input, output, session) {
         type = "warning", duration = 10)
     }
     # The refit below uses the same syntax and options as the candidate, so its AIC/BIC must match the table.
-    pending_prune_check(if (isTRUE(cand$converged) && isTRUE(cand$vars_ok) && !is.na(cand$aic))
+    # With excluded predictors the applied model has fewer variables, so its scores cannot match the table.
+    excluded_vars <- cand$excluded_vars %||% character(0)
+    pending_prune_check(if (isTRUE(cand$converged) && isTRUE(cand$vars_ok) && !is.na(cand$aic) && !length(excluded_vars))
                           list(aic = cand$aic, bic = cand$bic) else NULL)
+    if (length(excluded_vars)) {
+      showNotification(
+        paste0("Removed from the model: ", paste(excluded_vars, collapse = ", "),
+               ". These predictors lost every path, so the AIC/BIC after applying are computed on fewer variables ",
+               "and differ from the candidate table; they cannot be compared with the model before optimization."),
+        type = "warning", duration = 15)
+    }
 
     res_applied <- isolate(prune_results())
     ctx_applied <- res_applied$ctx
