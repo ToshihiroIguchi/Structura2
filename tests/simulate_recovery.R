@@ -6,7 +6,7 @@ args <- commandArgs(trailingOnly = TRUE)
 reps <- if (length(args)) as.integer(args[1]) else 40L
 exprs <- parse("app.R")
 wanted <- c("struct_pred_cols", "build_struct_lines", "make_struct_key", "active_struct_vars", "struct_dependents", "struct_edges",
-            "run_lavaan_sem", "free_cov_pairs", "required_struct_vars", "candidate_structure_check",
+            "run_lavaan_sem", "free_cov_pairs", "required_struct_vars", "candidate_structure_check", "droppable_struct_vars", "orphaned_struct_vars", "orphan_zero_lines",
             "check_variable_isolation", "fit_is_proper", "fit_cutoff_violations", "candidate_score", "fit_candidate_model",
             "struct_descendants", "fit_suggestion_model", "get_modification_suggestions",
             "get_suggested_structural_paths", "%||%")
