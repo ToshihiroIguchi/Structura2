@@ -4,7 +4,7 @@ suppressMessages(library(lavaan))
 exprs <- parse("app.R")
 wanted <- c("struct_pred_cols", "build_struct_lines", "make_struct_key", "active_struct_vars",
             "run_lavaan_sem", "free_cov_pairs", "required_struct_vars", "candidate_structure_check",
-            "check_variable_isolation", "fit_is_proper", "candidate_score", "fit_candidate_model",
+            "check_variable_isolation", "fit_is_proper", "candidate_score", "criterion_field", "aicc_from_fit", "fit_candidate_model",
             "droppable_struct_vars", "orphaned_struct_vars", "orphan_zero_lines",
             "struct_descendants", "struct_dependents", "struct_edges", "fit_suggestion_model", "fit_cutoff_violations", "get_modification_suggestions", "get_suggested_structural_paths",
             "%||%")
@@ -189,6 +189,20 @@ ok(!check_variable_isolation(no_x1, no_x1_dep, character(0), struct_pred_cols(no
 ok(is.infinite(candidate_score(list(converged = TRUE, proper = FALSE, aic = 1, bic = 1), "AIC")), "improper -> Inf")
 ok(is.infinite(candidate_score(list(converged = FALSE, aic = 1, bic = 1), "AIC")), "non-converged -> Inf")
 ok(candidate_score(list(converged = TRUE, proper = TRUE, aic = 5, bic = 7), "BIC") == 7, "BIC score")
+ok(candidate_score(list(converged = TRUE, proper = TRUE, aic = 5, bic = 7, aicc = 9), "AICc") == 9, "AICc score")
+ok(is.infinite(candidate_score(list(converged = TRUE, proper = TRUE, aic = 5, bic = 7, aicc = NA_real_), "AICc")),
+   "undefined AICc -> Inf (never ranked)")
+
+# --- AICc: AIC + 2k(k+1)/(n-k-1), NA when n - k - 1 <= 0
+small_fit <- sem("m ~ x1\ny ~ m", data = d[1:20, ], fixed.x = FALSE)
+k_s <- as.numeric(lavInspect(small_fit, "npar")); n_s <- as.numeric(lavInspect(small_fit, "ntotal"))
+aic_s <- as.numeric(AIC(small_fit))
+ok(abs(aicc_from_fit(small_fit, aic_s) - (aic_s + 2 * k_s * (k_s + 1) / (n_s - k_s - 1))) < 1e-8,
+   "AICc matches the hand-computed formula")
+ok(aicc_from_fit(small_fit, aic_s) > aic_s, "AICc is larger than AIC")
+tiny_fit <- sem("m ~ x1\ny ~ m", data = d[1:6, ], fixed.x = FALSE)
+ok(is.na(aicc_from_fit(tiny_fit, as.numeric(AIC(tiny_fit)))), "n - k - 1 <= 0 -> NA")
+ok(is.na(aicc_from_fit(NULL, 1)), "NULL fit -> NA, no error")
 
 # --- reachability / cycles
 ok(setequal(struct_descendants(base_df, "x1"), c("m", "y")), "descendants of x1")

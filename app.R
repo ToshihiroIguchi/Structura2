@@ -1054,6 +1054,23 @@ fit_cutoff_violations <- function(ms) {
     srmr  = isTRUE(get("srmr") > 0.08))
 }
 
+# Small-sample corrected AIC: AIC + 2k(k+1)/(n-k-1), k = free parameters, n = total observations.
+# Returns NA when the correction is undefined (n - k - 1 <= 0) or the counts cannot be read, so such a
+# candidate is never ranked (candidate_score() turns NA into Inf).
+aicc_from_fit <- function(fit, aic) {
+  tryCatch({
+    k <- as.numeric(lavaan::lavInspect(fit, "npar"))
+    n <- as.numeric(lavaan::lavInspect(fit, "ntotal"))
+    if (!is.finite(k) || !is.finite(n) || !is.finite(aic) || n - k - 1 <= 0) return(NA_real_)
+    as.numeric(aic) + 2 * k * (k + 1) / (n - k - 1)
+  }, error = function(e) NA_real_)
+}
+
+# Name of the candidate-record field that holds the score of an optimization criterion
+criterion_field <- function(criterion) {
+  switch(criterion, AIC = "aic", BIC = "bic", AICc = "aicc", "aic")
+}
+
 # Score used for ranking/search. Non-converged or improper (e.g. negative variance) fits never win, and
 # neither do candidates that are not a pure path reduction of the baseline (a variable was dropped, or
 # lavaan replaced a removed path by a covariance).
@@ -1062,7 +1079,7 @@ candidate_score <- function(rec, criterion) {
   if (isFALSE(rec$vars_ok) || isTRUE(rec$replaced)) return(Inf)
   # An unidentified model fits "perfectly" (df < 0) and would otherwise win on AIC/BIC
   if (isFALSE(rec$identified)) return(Inf)
-  s <- if (criterion == "AIC") rec$aic else rec$bic
+  s <- rec[[criterion_field(criterion)]]
   if (is.null(s) || is.na(s)) Inf else s
 }
 
@@ -3451,7 +3468,7 @@ server <- function(input, output, session) {
           
           # AIC/BIC are NA for models that are not identified (e.g. the starting model of an optimization)
           score_txt <- function(cand) {
-            v <- if (is.null(cand)) NA_real_ else if (crit == "AIC") cand$aic else cand$bic
+            v <- if (is.null(cand)) NA_real_ else cand[[criterion_field(crit)]] %||% NA_real_
             if (is.finite(v)) sprintf("%.2f", v) else "n/a (not identified)"
           }
           base_score <- score_txt(baseline_cand)
@@ -4121,9 +4138,10 @@ server <- function(input, output, session) {
         fluidRow(
           column(width = 6,
                  selectInput("prune_criterion", "Optimization Criterion:",
-                             choices = c("AIC (Predictive Accuracy / Balanced)" = "AIC",
+                             choices = c("AICc (Small-Sample Corrected / Recommended)" = "AICc",
+                                         "AIC (Predictive Accuracy / Balanced)" = "AIC",
                                          "BIC (Stronger Sparsity Penalty)" = "BIC"),
-                             selected = "AIC")
+                             selected = "AICc")
           ),
           column(width = 6,
                  selectInput("prune_strategy", "Search Algorithm Strategy:",
@@ -4152,7 +4170,7 @@ server <- function(input, output, session) {
               condition = "input.prune_strategy == 'sa' || input.prune_strategy == 'adaptive'",
               fluidRow(
                 column(4, numericInput("sa_max_iter", "SA Max Iterations:", value = 150, min = 20, max = 500, step = 10)),
-                column(4, numericInput("sa_temp_init", "SA Initial Temp (in AIC/BIC units):", value = 10.0, min = 1.0, max = 100.0, step = 1.0)),
+                column(4, numericInput("sa_temp_init", "SA Initial Temp (in criterion units):", value = 10.0, min = 1.0, max = 100.0, step = 1.0)),
                 column(4, numericInput("sa_seed", "Random Seed:", value = 1, min = 1, step = 1))
               ),
               helpText("The cooling rate is derived automatically so the temperature falls to 0.1 at the final iteration.")
@@ -4375,11 +4393,14 @@ server <- function(input, output, session) {
             "Candidates are estimated with lavaan's default rules, exactly like a model you build by hand. A [Replaced] candidate is one where ",
             "lavaan frees a covariance in place of a removed path (see Added Cov.), so the association is not actually removed; ",
             "[Variable Dropped] means a variable lost all of its paths and was left out of the model. Neither can be ranked as optimal. ",
-            "[Not Identified] models (df < 0 or no standard errors) show no AIC/BIC and are never ranked.",
+            "[Not Identified] models (df < 0 or no standard errors) show no AIC/BIC/AICc and are never ranked. ",
+            sprintf("[Improved] means the selected criterion (%s) is lower than the baseline's; compare the matching Δ column. ", res$criterion),
+            "AICc is shown as — when the model has too many free parameters for the sample size (n - k - 1 <= 0); ",
+            "such candidates cannot be ranked under AICc.",
             style = "margin: 6px 0 0 0; font-size: 12px; color: #64748b;"),
           if (any(vapply(res$candidates, function(cd) length(cd$excluded_vars) > 0, logical(1))))
             p("Note: a predictor that lost every path is scored with its removed paths fixed to zero so that the scores stay comparable. ",
-              "Applying such a candidate removes the predictor from the model, so the AIC/BIC after applying will differ from the values in this table ",
+              "Applying such a candidate removes the predictor from the model, so the scores (AIC/BIC/AICc) after applying will differ from the values in this table ",
               "(they are computed on fewer variables) and cannot be compared with the model before optimization.",
               style = "margin: 6px 0 0 0; font-size: 12px; color: #b45309; font-weight: 600;"),
           if (nzchar(res$fallback_note %||% ""))
@@ -4544,11 +4565,12 @@ server <- function(input, output, session) {
 
     # An unidentified start has no meaningful AIC/BIC: there is no baseline score to compare candidates with
     base_ms <- if (base_identified) {
-      lavaan::fitMeasures(base_fit, c("aic", "bic", "cfi", "rmsea", "srmr"))
+      ms0 <- lavaan::fitMeasures(base_fit, c("aic", "bic", "cfi", "rmsea", "srmr"))
+      c(ms0, aicc = aicc_from_fit(base_fit, ms0[["aic"]]))
     } else {
-      c(aic = NA_real_, bic = NA_real_, cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_)
+      c(aic = NA_real_, bic = NA_real_, cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_, aicc = NA_real_)
     }
-    base_score <- if (criterion == "AIC") as.numeric(base_ms["aic"]) else as.numeric(base_ms["bic"])
+    base_score <- as.numeric(base_ms[criterion_field(criterion)])
 
     meas_syntax <- hot_to_r(input$input_table)
     mlines <- build_meas_lines(meas_syntax)
@@ -4674,8 +4696,10 @@ server <- function(input, output, session) {
       fit = base_fit,
       aic = as.numeric(base_ms["aic"]),
       bic = as.numeric(base_ms["bic"]),
+      aicc = as.numeric(base_ms["aicc"]),
       delta_aic = if (base_identified) 0.0 else NA_real_,
       delta_bic = if (base_identified) 0.0 else NA_real_,
+      delta_aicc = if (base_identified && is.finite(base_ms[["aicc"]])) 0.0 else NA_real_,
       cfi = as.numeric(base_ms["cfi"]),
       rmsea = as.numeric(base_ms["rmsea"]),
       srmr = as.numeric(base_ms["srmr"]),
@@ -4715,7 +4739,8 @@ server <- function(input, output, session) {
           removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
           retained_str = ret_str,
           struct_df = curr_s_df, fit = NULL,
-          aic = NA_real_, bic = NA_real_, delta_aic = NA_real_, delta_bic = NA_real_,
+          aic = NA_real_, bic = NA_real_, aicc = NA_real_,
+          delta_aic = NA_real_, delta_bic = NA_real_, delta_aicc = NA_real_,
           cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
           converged = FALSE, proper = FALSE, identified = FALSE, deficit = Inf, raw_aic = NA_real_,
           status = "[Non-converged]"
@@ -4724,8 +4749,10 @@ server <- function(input, output, session) {
       # Ultra-fast score extraction using stats::AIC and stats::BIC (skips baseline model fitting)
       c_aic <- tryCatch(as.numeric(stats::AIC(fm)), error = function(e) NA_real_)
       c_bic <- tryCatch(as.numeric(stats::BIC(fm)), error = function(e) NA_real_)
+      c_aicc <- aicc_from_fit(fm, c_aic)
       d_aic <- c_aic - as.numeric(st$base_ms["aic"])
       d_bic <- c_bic - as.numeric(st$base_ms["bic"])
+      d_aicc <- c_aicc - as.numeric(st$base_ms["aicc"])
       proper <- fit_is_proper(fm)
       chk <- candidate_structure_check(fm, st$ctx)
       ident <- fit_identification(fm)
@@ -4733,11 +4760,12 @@ server <- function(input, output, session) {
       if (!chk$vars_ok || !ident$identified) {
         # Fitted on a different set of variables, or not identified: its AIC/BIC are meaningless and
         # cannot be compared with the baseline at all
-        c_aic <- c_bic <- d_aic <- d_bic <- NA_real_
+        c_aic <- c_bic <- c_aicc <- d_aic <- d_bic <- d_aicc <- NA_real_
       }
 
       stat <- "[Good]"
-      if (isTRUE((st$criterion == "AIC" && d_aic < -0.01) || (st$criterion == "BIC" && d_bic < -0.01))) stat <- "[Improved]"
+      d_crit <- c(AIC = d_aic, BIC = d_bic, AICc = d_aicc)[[st$criterion]]
+      if (isTRUE(d_crit < -0.01)) stat <- "[Improved]"
       if (!proper) stat <- "[Improper]"
       if (!ident$identified) stat <- "[Not Identified]"
       if (chk$replaced) stat <- "[Replaced]"
@@ -4747,7 +4775,8 @@ server <- function(input, output, session) {
         removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
         retained_str = ret_str,
         struct_df = curr_s_df, fit = fm,
-        aic = c_aic, bic = c_bic, delta_aic = d_aic, delta_bic = d_bic,
+        aic = c_aic, bic = c_bic, aicc = c_aicc,
+        delta_aic = d_aic, delta_bic = d_bic, delta_aicc = d_aicc,
         cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
         converged = TRUE, proper = proper, status = stat,
         identified = ident$identified, deficit = ident$deficit, raw_aic = raw_aic,
@@ -5160,8 +5189,10 @@ server <- function(input, output, session) {
         `Retained Paths` = ret_str,
         AIC = if (is.na(c_item$aic)) "—" else sprintf("%.2f", c_item$aic),
         BIC = if (is.na(c_item$bic)) "—" else sprintf("%.2f", c_item$bic),
+        AICc = if (is.null(c_item$aicc) || is.na(c_item$aicc)) "—" else sprintf("%.2f", c_item$aicc),
         `ΔAIC` = if (is.na(c_item$delta_aic)) "—" else sprintf("%+.2f", c_item$delta_aic),
         `ΔBIC` = if (is.na(c_item$delta_bic)) "—" else sprintf("%+.2f", c_item$delta_bic),
+        `ΔAICc` = if (is.null(c_item$delta_aicc) || is.na(c_item$delta_aicc)) "—" else sprintf("%+.2f", c_item$delta_aicc),
         `Δ vs Best` = if (is.null(c_item$delta_best) || !is.finite(c_item$delta_best)) "—" else sprintf("%.2f", c_item$delta_best),
         `Added Cov.` = if (length(c_item$added_covs) > 0) paste(c_item$added_covs, collapse = "; ") else "—",
         Weight = if (is.null(c_item$weight) || !is.finite(c_item$weight)) "—" else sprintf("%.3f", c_item$weight),
@@ -5319,7 +5350,7 @@ server <- function(input, output, session) {
     if (length(excluded_vars)) {
       showNotification(
         paste0("Removed from the model: ", paste(excluded_vars, collapse = ", "),
-               ". These predictors lost every path, so the AIC/BIC after applying are computed on fewer variables ",
+               ". These predictors lost every path, so the scores (AIC/BIC/AICc) after applying are computed on fewer variables ",
                "and differ from the candidate table; they cannot be compared with the model before optimization."),
         type = "warning", duration = 15)
     }
