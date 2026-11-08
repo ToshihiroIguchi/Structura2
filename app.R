@@ -1140,6 +1140,37 @@ fit_suggestion_model <- function(syntax_lines, unused_vars, anchor_var, ctx) {
   if (is.null(fm) || !isTRUE(lavaan::lavInspect(fm, "converged"))) NULL else fm
 }
 
+# ---- Helper: Removal candidates (checked paths with weak evidence) ------------
+# Checked regression paths whose estimate is not significant (p >= alpha) in the fitted model, mapped onto
+# the structural checkbox matrix by variable NAME. Each cell is NULL or list(est, p, rank); rank 1 = the
+# least significant path (highest p-value). Paths that are not estimated in `fit` are never listed.
+get_removal_candidate_paths <- function(fit, struct_df, alpha = 0.05, max_paths = Inf) {
+  if (is.null(fit) || !isTRUE(lavaan::lavInspect(fit, "converged"))) return(NULL)
+  pe <- tryCatch(lavaan::parameterEstimates(fit), error = function(e) NULL)
+  if (is.null(pe) || !"pvalue" %in% names(pe)) return(NULL)
+  reg <- pe[pe$op == "~" & is.finite(pe$pvalue) & pe$pvalue >= alpha, , drop = FALSE]
+  if (nrow(reg) == 0) return(NULL)
+  reg <- reg[order(-reg$pvalue), , drop = FALSE]
+
+  deps <- struct_df$Dependent
+  preds <- struct_pred_cols(struct_df)
+  removal_matrix <- replicate(nrow(struct_df), vector("list", length(preds)), simplify = FALSE)
+  has_any <- FALSE
+  rank_counter <- 0L
+  for (i in seq_len(nrow(reg))) {
+    if (rank_counter >= max_paths) break
+    r <- match(as.character(reg$lhs[i]), deps)
+    c <- match(as.character(reg$rhs[i]), preds)
+    if (is.na(r) || is.na(c)) next
+    if (!isTRUE(as.logical(struct_df[r, preds[c]]))) next   # only paths that are currently checked
+    rank_counter <- rank_counter + 1L
+    removal_matrix[[r]][[c]] <- list(est = as.numeric(reg$est[i]), p = as.numeric(reg$pvalue[i]), rank = rank_counter)
+    has_any <- TRUE
+  }
+  if (!has_any) return(NULL)
+  removal_matrix
+}
+
 # ---- Helper: Modification-index based suggestions ------------
 # All MI rows (regressions, residual covariances, cross-loadings) passing the MI and |std.EPC| filters.
 get_modification_suggestions <- function(fit, mi_threshold = 6.63, epc_threshold = 0) {
@@ -2047,12 +2078,14 @@ ui <- fluidPage(
                       p(class = "s2-legend",
                         "Cell color = R² strength (white: low, red: high). ",
                         tags$span(style = "color: #2563eb; font-weight: 600;", "Blue border"),
-                        " = path suggested by Modification Indices; ",
+                        " = path suggested by Modification Indices (check it); ",
+                        tags$span(style = "color: #dc2626; font-weight: 600;", "red border"),
+                        " = checked path that is not significant (p ≥ .05; consider unchecking); ",
                         tags$span(style = "color: #d97706; font-weight: 600;", "orange border"),
                         " = would create a feedback loop."),
                       tags$details(class = "s2-legend",
                         tags$summary("How to use the suggestions"),
-                        p("Thick border + #1 marks the strongest suggestion. Add ONE path at a time and re-run the model, ",
+                        p("Thick border + #1 marks the strongest suggestion. Add or remove ONE path at a time and re-run the model, ",
                           "because MI values change after every change. ",
                           "Use as exploratory reference alongside theoretical knowledge.")),
                       uiOutput("suggestion_status_ui"),
@@ -2083,17 +2116,7 @@ ui <- fluidPage(
                             class = "alert-box")
                       ),
                       # ---------- Tabset for outputs ---------------
-                      tabsetPanel(id = "right_tabs", type = "tabs",
-
-                                  # ----- Diagnostics tab ---------------------
-                                  tabPanel("Diagnostics",
-                                           h4("Fit Indices"),
-                                           DTOutput("fit_indices")),
-
-                                  # ----- Equations tab -----------------------
-                                  tabPanel("Equations",
-                                           h4("Approximate Equations"),
-                                           verbatimTextOutput("approx_eq")),
+                      tabsetPanel(id = "right_tabs", type = "tabs", selected = "Diagram Settings",
 
                                   # ----- Diagram settings tab ---------------
                                   tabPanel("Diagram Settings",
@@ -2107,7 +2130,17 @@ ui <- fluidPage(
                                                          "Circular layout (circo)"          = "circo",
                                                          "Radial layout (twopi)"            = "twopi"
                                                        ),
-                                                       selected = "dot_LR"))
+                                                       selected = "dot_LR")),
+
+                                  # ----- Diagnostics tab ---------------------
+                                  tabPanel("Diagnostics",
+                                           h4("Fit Indices"),
+                                           DTOutput("fit_indices")),
+
+                                  # ----- Equations tab -----------------------
+                                  tabPanel("Equations",
+                                           h4("Approximate Equations"),
+                                           verbatimTextOutput("approx_eq"))
                       ),
                       # ---------- Path diagram --------------------
                       div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; margin-top: 10px;",
@@ -2715,6 +2748,7 @@ server <- function(input, output, session) {
 
   # Reactive cache for modification indices suggestions to eliminate heavy recalculation in checkbox_matrix
   cached_suggested_matrix <- reactiveVal(NULL)
+  cached_removal_matrix <- reactiveVal(NULL)
 
   # Fit that modification indices are read from: the user's fitted model, extended with any unused
   # numeric items attached via fixed-zero regressions so those items can be suggested too.
@@ -2747,6 +2781,7 @@ server <- function(input, output, session) {
     show_sug <- isTRUE(input$show_suggested_paths)
     if (!show_sug) {
       cached_suggested_matrix(NULL)
+      cached_removal_matrix(NULL)
       return()
     }
     model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
@@ -2762,8 +2797,13 @@ server <- function(input, output, session) {
                                                     max_paths = max_sug),
                       error = function(e) NULL)
       cached_suggested_matrix(sug)
+      # Red borders: checked paths that are not significant in the fitted model (candidates to uncheck)
+      rem <- tryCatch(get_removal_candidate_paths(model_res$fit, mat, max_paths = max_sug),
+                      error = function(e) NULL)
+      cached_removal_matrix(rem)
     } else {
       cached_suggested_matrix(NULL)
+      cached_removal_matrix(NULL)
     }
   })
 
@@ -2807,6 +2847,8 @@ server <- function(input, output, session) {
       # Use cached suggested paths matrix if enabled
       suggested_matrix <- if (isTRUE(input$show_suggested_paths)) cached_suggested_matrix() else NULL
       rh$x$suggested_matrix <- suggested_matrix
+      removal_matrix <- if (isTRUE(input$show_suggested_paths)) cached_removal_matrix() else NULL
+      rh$x$removal_matrix <- removal_matrix
       
       # Define static JS renderer referencing the shared R2 matrix and suggested paths matrix
       # (Note: Col index offset is -2 because 'Dependent' and 'Operator' columns are on the left)
@@ -2816,13 +2858,14 @@ server <- function(input, output, session) {
           var params = instance.params || instance.getSettings();
           var r2_matrix = params.r2_matrix;
           var suggested_matrix = params.suggested_matrix;
+          var removal_matrix = params.removal_matrix;
           var col_var_idx = col - 2;
           
           td.style.boxShadow = '';
           td.style.backgroundColor = '';
           td.style.cursor = '';
           td.classList.remove('htDimmed');
-          if (td.title && td.title.indexOf('Suggested Path') !== -1) {
+          if (td.title && (td.title.indexOf('Suggested Path') !== -1 || td.title.indexOf('Removal Candidate') !== -1)) {
             td.title = '';
           }
           var chk = td.querySelector('input');
@@ -2851,6 +2894,22 @@ server <- function(input, output, session) {
             return;
           }
           
+          if (removal_matrix && value && row < removal_matrix.length && col_var_idx >= 0 && col_var_idx < removal_matrix[row].length) {
+            var rem = removal_matrix[row][col_var_idx];
+            if (rem) {
+              var rem_color = '#dc2626';
+              td.style.boxShadow = 'inset 0 0 0 ' + (rem.rank === 1 ? '4px ' : '2.5px ') + rem_color;
+              if (chk) {
+                chk.style.outline = '2px solid ' + rem_color;
+                chk.style.outlineOffset = '1px';
+                chk.style.borderRadius = '3px';
+              }
+              td.title = 'Removal Candidate (#' + rem.rank + ' by p-value):\\nestimate: ' + Number(rem.est).toFixed(3) +
+                         ', p = ' + Number(rem.p).toFixed(3) + ' (not significant)' +
+                         '\\nUncheck one path at a time, then re-run the model.';
+            }
+          }
+
           if (suggested_matrix && row < suggested_matrix.length && col_var_idx >= 0 && col_var_idx < suggested_matrix[row].length) {
             var sug = suggested_matrix[row][col_var_idx];
             if (sug && !value) {
@@ -4382,21 +4441,17 @@ server <- function(input, output, session) {
           } else {
             "background-color: #f8fafc; padding: 10px 14px; border-radius: 6px; border: 1px solid #e2e8f0; margin-bottom: 15px;"
           },
-          p(sprintf("Strategy Used: %s%s%s. Click any candidate row in the table below or use navigation arrows to preview path diagrams. Models with degraded fit indices are flagged.",
+          p(sprintf("Strategy: %s%s%s. Select a row (or use the arrows) to preview its path diagram. Sort by %s, AIC, BIC or AICc.",
                     toupper(res$strategy_used),
                     if (nzchar(res$isolation_summary %||% "")) paste0(" [Protected: ", res$isolation_summary, "]") else "",
-                    if (stopped_early) sprintf(" (Exploration halted early at step %d of %d; best candidates evaluated so far are shown)", current_step, st$max_steps) else ""),
+                    if (stopped_early) sprintf(" (halted early at step %d of %d; best candidates so far are shown)", current_step, st$max_steps) else "",
+                    res$criterion),
             style = if (stopped_early) "margin: 0; font-size: 13px; color: #92400e;" else "margin: 0; font-size: 13px; color: #334155;"),
-          p("Note: the top-ranked model was selected using the same data it is evaluated on, so its fit is optimistic. ",
-            "Candidates marked [Equivalent] are within 2 ", res$criterion, " units of the best and cannot be reliably distinguished from it; ",
-            "prefer the one that is theoretically most defensible. [Improper] models (e.g. negative variances) are never ranked first. ",
-            "Candidates are estimated with lavaan's default rules, exactly like a model you build by hand. A [Replaced] candidate is one where ",
-            "lavaan frees a covariance in place of a removed path (see Added Cov.), so the association is not actually removed; ",
-            "[Variable Dropped] means a variable lost all of its paths and was left out of the model. Neither can be ranked as optimal. ",
-            "[Not Identified] models (df < 0 or no standard errors) show no AIC/BIC/AICc and are never ranked. ",
-            sprintf("[Improved] means the selected criterion (%s) is lower than the baseline's; compare the matching Δ column. ", res$criterion),
-            "AICc is shown as — when the model has too many free parameters for the sample size (n - k - 1 <= 0); ",
-            "such candidates cannot be ranked under AICc.",
+          p("Scores are computed on the same data used for the search, so they are optimistic; ",
+            "differences of about 2 or less are not reliable, so prefer the theoretically most defensible candidate. ",
+            "Notes: Improper = negative variances; Replaced = lavaan freed a covariance in place of the removed path; ",
+            "Variable Dropped = a variable lost all its paths; Not Identified = no scores. ",
+            "A dash means the score could not be computed (for AICc: too many parameters for the sample size).",
             style = "margin: 6px 0 0 0; font-size: 12px; color: #64748b;"),
           if (any(vapply(res$candidates, function(cd) length(cd$excluded_vars) > 0, logical(1))))
             p("Note: a predictor that lost every path is scored with its removed paths fixed to zero so that the scores stay comparable. ",
@@ -4412,7 +4467,7 @@ server <- function(input, output, session) {
               if (nzchar(res$repair_note)) res$repair_note
               else "Unlock paths or simplify the model (every variable keeps at least one path), then run the optimization again."),
         if (!res$base_identified && res$any_identified)
-          p("The starting model was not identified, so ΔAIC/ΔBIC against it are not shown; compare candidates with \"Δ vs Best\" and Weight.",
+          p("The starting model was not identified, so it has no scores; compare candidates by their scores and Weight.",
             style = "margin: 0 0 8px 0; font-size: 12px; color: #1e3a8a;"),
         DTOutput("prune_candidates_table"),
         tags$hr(style = "margin: 15px 0;"),
@@ -5185,15 +5240,18 @@ server <- function(input, output, session) {
       ret_str <- if (is.null(c_item$retained_str)) build_retained_str(c_item$struct_df) else c_item$retained_str
       data.frame(
         Rank = i,
-        Status = if (identical(c_item$status, "[Baseline]") && isFALSE(c_item$identified)) "[Baseline] [Not Identified]" else c_item$status,
+        Note = {
+          st_lbl <- c_item$status
+          if (identical(st_lbl, "[Baseline]")) {
+            if (isFALSE(c_item$identified)) "Current model (not identified)" else "Current model"
+          } else if (st_lbl %in% c("[Improper]", "[Replaced]", "[Variable Dropped]", "[Not Identified]", "[Degraded Fit]")) {
+            gsub("^\\[|\\]$", "", st_lbl)
+          } else "—"
+        },
         `Retained Paths` = ret_str,
         AIC = if (is.na(c_item$aic)) "—" else sprintf("%.2f", c_item$aic),
         BIC = if (is.na(c_item$bic)) "—" else sprintf("%.2f", c_item$bic),
         AICc = if (is.null(c_item$aicc) || is.na(c_item$aicc)) "—" else sprintf("%.2f", c_item$aicc),
-        `ΔAIC` = if (is.na(c_item$delta_aic)) "—" else sprintf("%+.2f", c_item$delta_aic),
-        `ΔBIC` = if (is.na(c_item$delta_bic)) "—" else sprintf("%+.2f", c_item$delta_bic),
-        `ΔAICc` = if (is.null(c_item$delta_aicc) || is.na(c_item$delta_aicc)) "—" else sprintf("%+.2f", c_item$delta_aicc),
-        `Δ vs Best` = if (is.null(c_item$delta_best) || !is.finite(c_item$delta_best)) "—" else sprintf("%.2f", c_item$delta_best),
         `Added Cov.` = if (length(c_item$added_covs) > 0) paste(c_item$added_covs, collapse = "; ") else "—",
         Weight = if (is.null(c_item$weight) || !is.finite(c_item$weight)) "—" else sprintf("%.3f", c_item$weight),
         CFI = if (is.na(c_item$cfi)) "—" else sprintf("%.3f", c_item$cfi),
