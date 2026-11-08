@@ -364,6 +364,14 @@ semDiagram <- function(
 
 `%||%` <- function(x, y) if (!is.null(x)) x else y
 
+# Sanitise a numericInput value: a cleared field arrives as NA, and a typed value can bypass the UI min/max.
+# Non-numeric or non-finite input falls back to `default`; out-of-range values are clamped to [min_val, max_val].
+safe_num <- function(x, default, min_val = -Inf, max_val = Inf) {
+  v <- suppressWarnings(as.numeric(x))
+  if (length(v) != 1 || !is.finite(v)) return(default)
+  min(max(v, min_val), max_val)
+}
+
 # ---- Helper: Approximate Equations -----------------------------
 #   * Indicator  =  intercept + loading * Latent
 #   * Dependent  =  intercept + Σ( slope * Predictor )
@@ -2804,8 +2812,7 @@ server <- function(input, output, session) {
     model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
     sug_fit <- tryCatch(suggestion_fit(), error = function(e) NULL)
     model_items() # establish dependency so the cache is invalidated when structural items (rows/cols) change shape
-    max_sug <- input$max_suggestions %||% 5
-    if (!is.numeric(max_sug) || is.na(max_sug) || max_sug < 1) max_sug <- 5
+    max_sug <- safe_num(input$max_suggestions, 5, 1)
     # Matching is by variable name against the current table, so paths the user has just ticked
     # (but not yet fitted) are no longer suggested; suggestion_status_ui flags the stale state.
     mat <- isolate(struct_table_data())
@@ -4531,6 +4538,42 @@ server <- function(input, output, session) {
 
   # 2. Run Candidate Search & Display Step 2 Modal via Stepwise Stepper Engine
   observeEvent(input$run_prune_explore, {
+    # Validate every optimizer input up front (before any modal is shown): cleared fields arrive as NA and
+    # typed values can bypass the UI limits. Corrected fields are reported together in one notification.
+    adjusted <- character(0)
+    num_input <- function(id, label, default, min_val, max_val) {
+      raw <- input[[id]]
+      v <- safe_num(raw, default, min_val, max_val)
+      raw_num <- suppressWarnings(as.numeric(raw))
+      if (!(length(raw_num) == 1 && is.finite(raw_num) && raw_num == v)) {
+        adjusted <<- c(adjusted, sprintf("%s -> %s", label, format(v, scientific = FALSE)))
+      }
+      v
+    }
+    choice_input <- function(id, label, allowed, default) {
+      v <- input[[id]]
+      if (length(v) != 1 || is.na(v) || !(v %in% allowed)) {
+        adjusted <<- c(adjusted, sprintf("%s -> %s", label, default))
+        return(default)
+      }
+      v
+    }
+    criterion <- choice_input("prune_criterion", "Optimization Criterion", c("AICc", "AIC", "BIC"), "AICc")
+    strategy <- choice_input("prune_strategy", "Search Algorithm Strategy",
+                             c("adaptive", "regsem", "stepwise", "exhaustive", "sa"), "adaptive")
+    max_comb <- num_input("max_exhaustive_comb", "Exhaustive Search Max Combinations", 1024, 64, 8192)
+    sa_max_iter <- as.integer(num_input("sa_max_iter", "SA Max Iterations", 150, 20, 500))
+    sa_T0 <- num_input("sa_temp_init", "SA Initial Temp", 10, 1, 100)
+    sa_seed <- as.integer(num_input("sa_seed", "Random Seed", 1, 1, .Machine$integer.max))
+    regsem_type <- choice_input("regsem_type", "Regularization Penalty", c("lasso", "enet"), "lasso")
+    regsem_n_lambda <- as.integer(num_input("regsem_n_lambda", "Number of Lambda Steps", 30, 10, 100))
+    if (length(adjusted) > 0) {
+      showNotification(
+        paste0("Some optimizer settings were empty or out of range and were adjusted: ",
+               paste(adjusted, collapse = "; "), "."),
+        type = "warning", duration = 8)
+    }
+
     base_model <- fit_model_safe()
     base_info <- optimization_baseline(base_model)
     if (!isTRUE(base_info$usable)) {
@@ -4545,7 +4588,7 @@ server <- function(input, output, session) {
     }
     base_fit <- base_info$fit
     base_identified <- isTRUE(base_info$identified)
-    if (!base_identified && identical(input$prune_strategy, "regsem")) {
+    if (!base_identified && identical(strategy, "regsem")) {
       showModal(modalDialog(
         title = "Auto-Optimize Warning",
         div(class = "alert alert-warning",
@@ -4610,12 +4653,7 @@ server <- function(input, output, session) {
       return()
     }
 
-    criterion <- input$prune_criterion
-    strategy <- input$prune_strategy
     total_comb <- 2^M
-    # An empty or invalid threshold field arrives as NA; fall back to the default instead of failing in `if`
-    max_comb <- suppressWarnings(as.numeric(input$max_exhaustive_comb %||% 1024))
-    if (length(max_comb) != 1 || !is.finite(max_comb) || max_comb < 1) max_comb <- 1024
 
     eff_strategy <- strategy
     if (strategy == "adaptive") {
@@ -4658,144 +4696,147 @@ server <- function(input, output, session) {
     needs_meanstructure <- (input$analysis_mode == "raw" || 
                             input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
 
-    # Display Progress Modal with live HTML5 Canvas Chart
-    showModal(modalDialog(
-      title = "Auto-Optimize Model: Optimizing Model Space...",
-      footer = div(
-        style = "display: flex; justify-content: space-between; align-items: center; width: 100%;",
-        actionButton("cancel_prune_explore", "Cancel", class = "btn btn-default", `data-dismiss` = "modal"),
-        actionButton("stop_prune_explore", "Stop & View Results", class = "btn btn-warning")
-      ),
-      div(
-        style = "text-align: center; padding: 15px;",
-        div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;",
-            span(style = "font-weight: bold; color: #475569; font-size: 13px;",
-                 sprintf("Strategy: %s | Criterion: %s", toupper(eff_strategy), criterion)),
-            span(id = "prune_iter_badge", class = "badge badge-primary", style = "font-size: 12px; background-color: #2563eb;", "Step 0")
+    tryCatch({
+      # Display Progress Modal with live HTML5 Canvas Chart
+      showModal(modalDialog(
+        title = "Auto-Optimize Model: Optimizing Model Space...",
+        footer = div(
+          style = "display: flex; justify-content: space-between; align-items: center; width: 100%;",
+          actionButton("cancel_prune_explore", "Cancel", class = "btn btn-default", `data-dismiss` = "modal"),
+          actionButton("stop_prune_explore", "Stop & View Results", class = "btn btn-warning")
         ),
-        tags$canvas(id = "opt_chart_canvas", width = "540", height = "200",
-                    style = "border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.15); background-color: #0f172a; width: 100%; max-width: 540px; height: 200px;"),
-        div(style = "width: 100%; background-color: #e2e8f0; border-radius: 6px; height: 8px; overflow: hidden; margin-top: 12px;",
-            div(id = "prune_progress_bar_inner", style = "width: 0%; height: 100%; background-color: #3b82f6; transition: width 0.15s ease;")
-        ),
-        div(id = "prune_progress_status", style = "margin-top: 10px; font-weight: 600; color: #1e293b; font-size: 13px;",
-            "Initializing baseline model and structural constraints...")
+        div(
+          style = "text-align: center; padding: 15px;",
+          div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;",
+              span(style = "font-weight: bold; color: #475569; font-size: 13px;",
+                   sprintf("Strategy: %s | Criterion: %s", toupper(eff_strategy), criterion)),
+              span(id = "prune_iter_badge", class = "badge badge-primary", style = "font-size: 12px; background-color: #2563eb;", "Step 0")
+          ),
+          tags$canvas(id = "opt_chart_canvas", width = "540", height = "200",
+                      style = "border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.15); background-color: #0f172a; width: 100%; max-width: 540px; height: 200px;"),
+          div(style = "width: 100%; background-color: #e2e8f0; border-radius: 6px; height: 8px; overflow: hidden; margin-top: 12px;",
+              div(id = "prune_progress_bar_inner", style = "width: 0%; height: 100%; background-color: #3b82f6; transition: width 0.15s ease;")
+          ),
+          div(id = "prune_progress_status", style = "margin-top: 10px; font-weight: 600; color: #1e293b; font-size: 13px;",
+              "Initializing baseline model and structural constraints...")
+        )
+      ))
+
+      # Initialize stepper state (inputs were validated at the top of this handler)
+      # Upper bound on the number of candidate evaluations of a backward-elimination run:
+      # at most M + (M-1) + ... + 1 fits (one per tick, so Stop/Cancel stay responsive).
+      max_steps <- if (eff_strategy == "exhaustive") {
+        total_comb
+      } else if (eff_strategy == "stepwise") {
+        M * (M + 1) / 2
+      } else if (eff_strategy == "sa") {
+        sa_max_iter
+      } else {
+        regsem_n_lambda
+      }
+      grid_matrix <- if (eff_strategy == "exhaustive") expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE)) else NULL
+
+      # Reproducible stochastic search; temperature is annealed from T0 to 0.1 over the whole run.
+      set.seed(sa_seed)
+      sa_alpha <- (0.1 / sa_T0)^(1 / max(sa_max_iter, 1))
+
+      # Candidates are estimated exactly like the main model. They stay comparable with the baseline only if
+      # no variable disappears (required_vars always keep a path) and no removed path is silently replaced
+      # by a covariance (checked after each fit against base_ov / base_cov_pairs).
+      # Exogenous predictors may lose every path: they are scored with fixed-zero paths (droppable_vars,
+      # base_edges) and are removed from the model when the candidate is applied.
+      droppable_vars <- droppable_struct_vars(struct_df, base_fit)
+      ctx <- list(
+        data = processed_data(),
+        missing_method = input$missing_method,
+        needs_meanstructure = needs_meanstructure,
+        meas_lines = mlines,
+        extra_lines = extra,
+        droppable_vars = droppable_vars,
+        base_edges = struct_edges(struct_df),
+        required_vars = setdiff(required_struct_vars(struct_df, base_fit), droppable_vars),
+        base_ov = lavaan::lavNames(base_fit, "ov"),
+        base_cov_pairs = free_cov_pairs(base_fit),
+        base_fit = base_fit
       )
-    ))
+      base_ident <- fit_identification(base_fit)
 
-    # Initialize stepper state
-    # A cleared numeric field arrives as NA (not NULL): fall back to the default instead of failing later in `if`
-    num_or <- function(x, default, min_val = -Inf) {
-      v <- suppressWarnings(as.numeric(x))
-      if (length(v) != 1 || !is.finite(v) || v < min_val) default else v
-    }
-    sa_max_iter <- as.integer(num_or(input$sa_max_iter, 150, 1))
-    regsem_n_lambda <- as.integer(num_or(input$regsem_n_lambda, 30, 1))
+      state_obj <- list(
+        eff_strategy = eff_strategy,
+        criterion = criterion,
+        ctx = ctx,
+        base_fit = base_fit,
+        base_identified = base_identified,
+        base_ms = base_ms,
+        base_score = base_score,
+        removable_paths = removable_paths,
+        M = M,
+        struct_df = struct_df,
+        pred_cols = pred_cols,
+        max_steps = max_steps,
+        grid_matrix = grid_matrix,
+        candidates_map = list(),
+        scores_hist = numeric(0),
+        best_scores_hist = if (is.finite(base_score)) base_score else numeric(0),
+        curr_vec = rep(TRUE, M),
+        curr_df = struct_df,
+        T_val = sa_T0,
+        sa_alpha = sa_alpha,
+        # Stepwise sub-step state: one candidate fit per tick
+        sw_idx = 1L,
+        sw_best_score = NULL,
+        sw_best_df = NULL,
+        sw_improved = FALSE,
+        regsem_type = regsem_type,
+        regsem_n_lambda = regsem_n_lambda,
+        retain_deps = retain_deps,
+        retain_preds = retain_preds,
+        # Repair phase: remove paths until the model is identified (Stepwise and SA only; Exhaustive
+        # enumerates every combination, so the identified ones simply rank)
+        repair = !base_identified && eff_strategy %in% c("stepwise", "sa"),
+        repair_df = struct_df,
+        repair_deficit = base_ident$deficit,
+        repair_idx = 1L,
+        repair_best = NULL,
+        repair_ticks = 0L
+      )
 
-    # Upper bound on the number of candidate evaluations of a backward-elimination run:
-    # at most M + (M-1) + ... + 1 fits (one per tick, so Stop/Cancel stay responsive).
-    max_steps <- if (eff_strategy == "exhaustive") {
-      total_comb
-    } else if (eff_strategy == "stepwise") {
-      M * (M + 1) / 2
-    } else if (eff_strategy == "sa") {
-      sa_max_iter
-    } else {
-      regsem_n_lambda
-    }
-    grid_matrix <- if (eff_strategy == "exhaustive") expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE)) else NULL
+      base_key <- make_struct_key(struct_df)
+      state_obj$candidates_map[[base_key]] <- list(
+        removed_str = "None (Baseline Model)",
+        retained_str = build_retained_str(struct_df),
+        struct_df = struct_df,
+        fit = base_fit,
+        aic = as.numeric(base_ms["aic"]),
+        bic = as.numeric(base_ms["bic"]),
+        aicc = as.numeric(base_ms["aicc"]),
+        delta_aic = if (base_identified) 0.0 else NA_real_,
+        delta_bic = if (base_identified) 0.0 else NA_real_,
+        delta_aicc = if (base_identified && is.finite(base_ms[["aicc"]])) 0.0 else NA_real_,
+        cfi = as.numeric(base_ms["cfi"]),
+        rmsea = as.numeric(base_ms["rmsea"]),
+        srmr = as.numeric(base_ms["srmr"]),
+        converged = TRUE,
+        proper = fit_is_proper(base_fit),
+        identified = base_identified, deficit = base_ident$deficit,
+        vars_ok = TRUE, replaced = FALSE, added_covs = character(0),
+        status = "[Baseline]"
+      )
 
-    # Reproducible stochastic search; temperature is annealed from T0 to 0.1 over the whole run.
-    set.seed(as.integer(num_or(input$sa_seed, 1)))
-    sa_T0 <- max(num_or(input$sa_temp_init, 10.0), 0.2)
-    sa_alpha <- (0.1 / sa_T0)^(1 / max(sa_max_iter, 1))
-
-    # Candidates are estimated exactly like the main model. They stay comparable with the baseline only if
-    # no variable disappears (required_vars always keep a path) and no removed path is silently replaced
-    # by a covariance (checked after each fit against base_ov / base_cov_pairs).
-    # Exogenous predictors may lose every path: they are scored with fixed-zero paths (droppable_vars,
-    # base_edges) and are removed from the model when the candidate is applied.
-    droppable_vars <- droppable_struct_vars(struct_df, base_fit)
-    ctx <- list(
-      data = processed_data(),
-      missing_method = input$missing_method,
-      needs_meanstructure = needs_meanstructure,
-      meas_lines = mlines,
-      extra_lines = extra,
-      droppable_vars = droppable_vars,
-      base_edges = struct_edges(struct_df),
-      required_vars = setdiff(required_struct_vars(struct_df, base_fit), droppable_vars),
-      base_ov = lavaan::lavNames(base_fit, "ov"),
-      base_cov_pairs = free_cov_pairs(base_fit),
-      base_fit = base_fit
-    )
-    base_ident <- fit_identification(base_fit)
-
-    state_obj <- list(
-      eff_strategy = eff_strategy,
-      criterion = criterion,
-      ctx = ctx,
-      base_fit = base_fit,
-      base_identified = base_identified,
-      base_ms = base_ms,
-      base_score = base_score,
-      removable_paths = removable_paths,
-      M = M,
-      struct_df = struct_df,
-      pred_cols = pred_cols,
-      max_steps = max_steps,
-      grid_matrix = grid_matrix,
-      candidates_map = list(),
-      scores_hist = numeric(0),
-      best_scores_hist = if (is.finite(base_score)) base_score else numeric(0),
-      curr_vec = rep(TRUE, M),
-      curr_df = struct_df,
-      T_val = sa_T0,
-      sa_alpha = sa_alpha,
-      # Stepwise sub-step state: one candidate fit per tick
-      sw_idx = 1L,
-      sw_best_score = NULL,
-      sw_best_df = NULL,
-      sw_improved = FALSE,
-      regsem_type = input$regsem_type %||% "lasso",
-      regsem_n_lambda = regsem_n_lambda,
-      retain_deps = retain_deps,
-      retain_preds = retain_preds,
-      # Repair phase: remove paths until the model is identified (Stepwise and SA only; Exhaustive
-      # enumerates every combination, so the identified ones simply rank)
-      repair = !base_identified && eff_strategy %in% c("stepwise", "sa"),
-      repair_df = struct_df,
-      repair_deficit = base_ident$deficit,
-      repair_idx = 1L,
-      repair_best = NULL,
-      repair_ticks = 0L
-    )
-
-    base_key <- make_struct_key(struct_df)
-    state_obj$candidates_map[[base_key]] <- list(
-      removed_str = "None (Baseline Model)",
-      retained_str = build_retained_str(struct_df),
-      struct_df = struct_df,
-      fit = base_fit,
-      aic = as.numeric(base_ms["aic"]),
-      bic = as.numeric(base_ms["bic"]),
-      aicc = as.numeric(base_ms["aicc"]),
-      delta_aic = if (base_identified) 0.0 else NA_real_,
-      delta_bic = if (base_identified) 0.0 else NA_real_,
-      delta_aicc = if (base_identified && is.finite(base_ms[["aicc"]])) 0.0 else NA_real_,
-      cfi = as.numeric(base_ms["cfi"]),
-      rmsea = as.numeric(base_ms["rmsea"]),
-      srmr = as.numeric(base_ms["srmr"]),
-      converged = TRUE,
-      proper = fit_is_proper(base_fit),
-      identified = base_identified, deficit = base_ident$deficit,
-      vars_ok = TRUE, replaced = FALSE, added_covs = character(0),
-      status = "[Baseline]"
-    )
-
-    opt_state(state_obj)
-    opt_step(0)
-    opt_running(TRUE)
+      opt_state(state_obj)
+      opt_step(0)
+      opt_running(TRUE)
+    }, error = function(e) {
+      # Silent conditions (req/validate) are Shiny flow control: let them through
+      if (inherits(e, "shiny.silent.error")) stop(e)
+      opt_running(FALSE)
+      opt_state(NULL)
+      removeModal()
+      showNotification(
+        paste0("Auto-Optimize could not start: ", conditionMessage(e),
+               ". Check that the model fits with the current data and settings, or try another search strategy."),
+        type = "error", duration = 12)
+    })
   })
 
   # Stepwise optimization execution observer with real-time UI yielding
@@ -5257,6 +5298,7 @@ server <- function(input, output, session) {
 
       opt_step(step + step_advance)
     }, error = function(e) {
+      # req()/validate()/cancelOutput() conditions all inherit from shiny.silent.error: re-raise them as flow control
       if (inherits(e, "shiny.silent.error")) stop(e)
       opt_running(FALSE)
       removeModal()

@@ -7,7 +7,7 @@ wanted <- c("struct_pred_cols", "build_struct_lines", "make_struct_key", "active
             "check_variable_isolation", "fit_is_proper", "candidate_score", "criterion_field", "aicc_from_fit", "fit_candidate_model",
             "droppable_struct_vars", "orphaned_struct_vars", "orphan_zero_lines",
             "struct_descendants", "struct_dependents", "struct_edges", "fit_suggestion_model", "fit_cutoff_violations", "get_modification_suggestions", "get_suggested_structural_paths",
-            "%||%")
+            "%||%", "safe_num")
 for (e in exprs) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && as.character(e[[2]]) %in% wanted) eval(e)
 }
@@ -27,6 +27,17 @@ mk <- function(paths) {
   s
 }
 base_df <- mk(list(c("m", "x1"), c("y", "m"), c("y", "x2"), c("y", "x3")))
+
+# --- safe_num: sanitises numericInput values (NA when cleared, huge or out-of-range when typed)
+ok(safe_num(NA, 150, 20, 500) == 150, "safe_num: NA falls back to default")
+ok(safe_num(NULL, 150, 20, 500) == 150, "safe_num: NULL falls back to default")
+ok(safe_num("", 150, 20, 500) == 150, "safe_num: empty string falls back to default")
+ok(safe_num(c(1, 2), 150, 20, 500) == 150, "safe_num: length-2 input falls back to default")
+ok(safe_num(Inf, 150, 20, 500) == 150, "safe_num: Inf falls back to default")
+ok(safe_num(1e10, 150, 20, 500) == 500, "safe_num: huge value clamps to max")
+ok(safe_num(-5, 150, 20, 500) == 20, "safe_num: negative value clamps to min")
+ok(safe_num(100, 150, 20, 500) == 100, "safe_num: in-range value is kept")
+ok(!is.na(as.integer(safe_num(1e10, 1, 1, .Machine$integer.max))), "safe_num: integer cast of clamped seed is not NA")
 
 # --- syntax / key round trip
 ok(identical(build_struct_lines(base_df), c("m ~ x1", "y ~ x2 + x3 + m")) ||
