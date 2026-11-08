@@ -1046,6 +1046,23 @@ fit_identification <- function(fit) {
   list(identified = isTRUE(df >= 0) && se_ok, df = df, deficit = deficit)
 }
 
+# Names of the fit indices that are drawn in red on the path diagram (same cutoffs as the diagram title):
+# p <= .05, GFI/AGFI/NFI/CFI <= .90, SRMR/RMSEA > .08. Returns NA when no index could be computed.
+fit_threshold_violations <- function(fit) {
+  ms <- tryCatch(lavaan::fitMeasures(fit, c("pvalue", "srmr", "rmsea", "gfi", "agfi", "nfi", "cfi")),
+                 error = function(e) NULL)
+  if (is.null(ms) || all(is.na(ms))) return(NA_character_)
+  bad <- c(
+    p     = isTRUE(ms[["pvalue"]] <= 0.05),
+    SRMR  = isTRUE(ms[["srmr"]]  > 0.08),
+    RMSEA = isTRUE(ms[["rmsea"]] > 0.08),
+    GFI   = isTRUE(ms[["gfi"]]   <= 0.90),
+    AGFI  = isTRUE(ms[["agfi"]]  <= 0.90),
+    NFI   = isTRUE(ms[["nfi"]]   <= 0.90),
+    CFI   = isTRUE(ms[["cfi"]]   <= 0.90))
+  names(bad)[bad]
+}
+
 # Which conventional fit cutoffs (CFI < .90, RMSEA > .08, SRMR > .08) a set of fit measures violates.
 fit_cutoff_violations <- function(ms) {
   get <- function(nm) if (nm %in% names(ms)) as.numeric(ms[nm]) else NA_real_
@@ -4377,6 +4394,7 @@ server <- function(input, output, session) {
         }
         if (cand_k$converged && !is.null(cand_k$fit) && is.na(cand_k$cfi)) {
           ms_k <- tryCatch(lavaan::fitMeasures(cand_k$fit, c("cfi", "rmsea", "srmr")), error = function(e) NULL)
+          if (cand_k$identified) sorted_candidates[[k]]$violations <- fit_threshold_violations(cand_k$fit)
           if (!is.null(ms_k)) {
             sorted_candidates[[k]]$cfi <- as.numeric(ms_k["cfi"])
             sorted_candidates[[k]]$rmsea <- as.numeric(ms_k["rmsea"])
@@ -4451,6 +4469,7 @@ server <- function(input, output, session) {
             "differences of about 2 or less are not reliable, so prefer the theoretically most defensible candidate. ",
             "Notes: Improper = negative variances; Replaced = lavaan freed a covariance in place of the removed path; ",
             "Variable Dropped = a variable lost all its paths; Not Identified = no scores. ",
+            "Fit lists the indices that would be red on the path diagram (p, SRMR, RMSEA, GFI, AGFI, NFI, CFI); it is evaluated for the top 20 candidates only. ",
             "A dash means the score could not be computed (for AICc: too many parameters for the sample size).",
             style = "margin: 6px 0 0 0; font-size: 12px; color: #64748b;"),
           if (any(vapply(res$candidates, function(cd) length(cd$excluded_vars) > 0, logical(1))))
@@ -4469,14 +4488,16 @@ server <- function(input, output, session) {
         if (!res$base_identified && res$any_identified)
           p("The starting model was not identified, so it has no scores; compare candidates by their scores and Weight.",
             style = "margin: 0 0 8px 0; font-size: 12px; color: #1e3a8a;"),
-        DTOutput("prune_candidates_table"),
-        tags$hr(style = "margin: 15px 0;"),
+        # Table on the left, path diagram preview on the right (stays in view while the table scrolls)
+        div(class = "s2-prune-layout",
+          div(class = "s2-prune-left", DTOutput("prune_candidates_table")),
+          div(class = "s2-prune-right",
         div(
           style = "display: flex; justify-content: space-between; align-items: center; margin-top: 0; margin-bottom: 10px;",
           h5("Path Diagram Preview for Selected Candidate:", style = "margin: 0; font-weight: 600;"),
           uiOutput("prune_cand_indicator_ui", inline = TRUE)
         ),
-        div(style = "height: 320px; border: 1px solid #ccc; position: relative; border-radius: 4px; overflow: hidden; background-color: #ffffff;",
+        div(style = "height: calc(100vh - 300px); min-height: 320px; border: 1px solid #ccc; position: relative; border-radius: 4px; overflow: hidden; background-color: #ffffff;",
             actionButton("prune_prev_cand", label = "<", class = "btn btn-default btn-sm",
                          style = "position: absolute; left: 12px; top: 50%; transform: translateY(-50%); z-index: 10; width: 38px; height: 38px; padding: 0; border-radius: 50%; background: rgba(255, 255, 255, 0.9); border: 1px solid #cbd5e1; box-shadow: 0 2px 5px rgba(0,0,0,0.15); display: flex; align-items: center; justify-content: center;",
                          title = "Previous Candidate"),
@@ -4485,7 +4506,9 @@ server <- function(input, output, session) {
                          title = "Next Candidate"),
             tags$div(id = "prune_preview_container", 
                      style = "width:100%; height:100%; display: flex; align-items: center; justify-content: center; color: #666;",
-                     "Select a candidate row above to view preview."))
+                     "Select a candidate row to view its preview."))
+          )
+        )
       ),
       footer = NULL
     ))
@@ -5244,7 +5267,7 @@ server <- function(input, output, session) {
           st_lbl <- c_item$status
           if (identical(st_lbl, "[Baseline]")) {
             if (isFALSE(c_item$identified)) "Current model (not identified)" else "Current model"
-          } else if (st_lbl %in% c("[Improper]", "[Replaced]", "[Variable Dropped]", "[Not Identified]", "[Degraded Fit]")) {
+          } else if (st_lbl %in% c("[Improper]", "[Replaced]", "[Variable Dropped]", "[Not Identified]")) {
             gsub("^\\[|\\]$", "", st_lbl)
           } else "—"
         },
@@ -5252,7 +5275,12 @@ server <- function(input, output, session) {
         AIC = if (is.na(c_item$aic)) "—" else sprintf("%.2f", c_item$aic),
         BIC = if (is.na(c_item$bic)) "—" else sprintf("%.2f", c_item$bic),
         AICc = if (is.null(c_item$aicc) || is.na(c_item$aicc)) "—" else sprintf("%.2f", c_item$aicc),
-        `Added Cov.` = if (length(c_item$added_covs) > 0) paste(c_item$added_covs, collapse = "; ") else "—",
+        Fit = {
+          v <- c_item$violations
+          if (is.null(v) || (length(v) == 1 && is.na(v))) "—"
+          else if (length(v) == 0) "OK"
+          else paste0("NG: ", paste(v, collapse = ", "))
+        },
         Weight = if (is.null(c_item$weight) || !is.finite(c_item$weight)) "—" else sprintf("%.3f", c_item$weight),
         CFI = if (is.na(c_item$cfi)) "—" else sprintf("%.3f", c_item$cfi),
         RMSEA = if (is.na(c_item$rmsea)) "—" else sprintf("%.3f", c_item$rmsea),
