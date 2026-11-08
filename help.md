@@ -230,7 +230,7 @@ Structura2 provides a robust suite of optimization strategies spanning exact com
 * **How candidates are estimated**:
   Every candidate is the baseline with some structural paths removed and is estimated with exactly the same lavaan call and default rules as a model you build by hand. The same path diagram therefore always gives the same AIC/BIC, and applying a candidate reproduces the scores shown in the catalogue. Two lavaan defaults matter when a path is removed:
   - **A variable that loses every path** is silently dropped by lavaan, so its likelihood is computed on different data and AIC/BIC could not be compared with the baseline. For a **predictor that has no incoming path** (e.g. `x1` in `y ~ x1 + x2`), Structura2 therefore scores the candidate with the removed paths fixed to zero (`y ~ 0*x1`): `x1` stays in the model as a free exogenous variable, so the AIC/BIC differences equal those of an ordinary regression with that predictor removed (variable selection). When you **apply** such a candidate, the predictor is removed from the model entirely, so the AIC/BIC after applying are computed on fewer variables; they differ from the values in the candidate table and cannot be compared with the model before optimization (the app shows a notice). To keep a predictor in the model, select it under *Variable Isolation Prevention*.
-  - **A removed path can be replaced by a covariance.** If a variable becomes exogenous, lavaan frees its covariances with the other exogenous variables; if two variables both stay dependent, lavaan frees their residual covariance (`m ~~ y`). The association is then still in the model and the parameter count does not drop. Such candidates are labelled `[Replaced]`, listed with the covariances lavaan added (column `Added Cov.`), and never ranked as `[Optimal]`. Consequently, a path between two dependent variables (e.g. `y2 ~ y1` when both have other predictors) cannot be pruned by this tool.
+  - **A removed path can be replaced by a covariance.** If a variable becomes exogenous, lavaan frees its covariances with the other exogenous variables; if two variables both stay dependent, lavaan frees their residual covariance (`m ~~ y`). The association is then still in the model and the parameter count does not drop. Such candidates are labelled `Replaced` in the `Note` column, and never ranked as `[Optimal]`. Consequently, a path between two dependent variables (e.g. `y2 ~ y1` when both have other predictors) cannot be pruned by this tool.
   - **A dependent variable that loses every incoming path** becomes exogenous, so lavaan replaces the paths with covariances and the candidate could never be ranked as optimal. Structura2 therefore always keeps **at least one incoming path** (in-degree $\ge 1$) for every dependent variable of your structural model.
 * **Variable Isolation Prevention** (additional, optional constraint):
   - **Predictor Variables**: When checked, the algorithm guarantees the variable retains **at least one outgoing path** (out-degree $\ge 1$).
@@ -250,12 +250,13 @@ During optimization, Structura2 launches an animated progress modal powered by a
 Upon completion, the Step 2 dialog presents an organized catalog of model candidates:
 * **Candidate Ranking Table**:
   Lists models sorted from best to worst criterion score. Columns include:
-  - `Rank` and `Status` (`[Optimal]`, `[Baseline]`, `[Improved]`, `[Equivalent]`, `[Degraded Fit]`, `[Replaced]`, `[Variable Dropped]`, or `[Not Identified]`).
+  - `Rank` and `Note` (`Current model`, `Improper`, `Replaced`, `Variable Dropped`, or `Not Identified`; a dash when there is nothing to report).
   - `Retained Paths`: Explicit listing of structural regressions maintained in that model.
-  - `AIC`, `BIC`, and respective deltas ($\Delta AIC$, $\Delta BIC$), plus `Added Cov.` (covariances lavaan freed in place of a removed path).
+  - `AIC`, `BIC`, and `AICc` (click a column header to sort), and `Weight`.
+  - `Fit`: `OK`, or `NG:` followed by the indices that would be red on the path diagram (p, SRMR, RMSEA, GFI, AGFI, NFI, CFI). Evaluated for the top 20 candidates only; a dash otherwise.
   - Post-computed fit measures: **CFI**, **RMSEA**, and **SRMR**.
-* **Degraded Fit Warning (`[Degraded Fit]`)**:
-  If a candidate model achieves a low AIC/BIC purely through extreme parsimony while causing CFI to fall below $0.90$ or RMSEA/SRMR to exceed $0.08$, Structura2 flags it prominently to prevent adopting an ill-fitting specification.
+* **Fit check (`Fit` column)**:
+  A candidate can reach a low AIC/BIC purely through extreme parsimony while fitting poorly. The `Fit` column lists every index beyond its cutoff so that such ill-fitting specifications are not adopted unnoticed.
 * **Interactive Path Diagram Preview**:
   Clicking any candidate row or using the `<` and `>` arrow navigation buttons renders an instant vector path diagram preview of that candidate.
 * **Apply Selected Model to UI**:
