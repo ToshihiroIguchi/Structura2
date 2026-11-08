@@ -4684,8 +4684,13 @@ server <- function(input, output, session) {
     ))
 
     # Initialize stepper state
-    sa_max_iter <- as.integer(input$sa_max_iter %||% 150)
-    regsem_n_lambda <- as.integer(input$regsem_n_lambda %||% 30)
+    # A cleared numeric field arrives as NA (not NULL): fall back to the default instead of failing later in `if`
+    num_or <- function(x, default, min_val = -Inf) {
+      v <- suppressWarnings(as.numeric(x))
+      if (length(v) != 1 || !is.finite(v) || v < min_val) default else v
+    }
+    sa_max_iter <- as.integer(num_or(input$sa_max_iter, 150, 1))
+    regsem_n_lambda <- as.integer(num_or(input$regsem_n_lambda, 30, 1))
 
     # Upper bound on the number of candidate evaluations of a backward-elimination run:
     # at most M + (M-1) + ... + 1 fits (one per tick, so Stop/Cancel stay responsive).
@@ -4701,8 +4706,8 @@ server <- function(input, output, session) {
     grid_matrix <- if (eff_strategy == "exhaustive") expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE)) else NULL
 
     # Reproducible stochastic search; temperature is annealed from T0 to 0.1 over the whole run.
-    set.seed(as.integer(input$sa_seed %||% 1))
-    sa_T0 <- max(input$sa_temp_init %||% 10.0, 0.2)
+    set.seed(as.integer(num_or(input$sa_seed, 1)))
+    sa_T0 <- max(num_or(input$sa_temp_init, 10.0), 0.2)
     sa_alpha <- (0.1 / sa_T0)^(1 / max(sa_max_iter, 1))
 
     # Candidates are estimated exactly like the main model. They stay comparable with the baseline only if
@@ -4797,7 +4802,8 @@ server <- function(input, output, session) {
   observe({
     req(opt_running())
     invalidateLater(30, session)
-    
+    # Any unexpected error in a tick must not take the whole session down: it is reported and the run is stopped
+    tryCatch({
     step <- isolate(opt_step())
     st <- isolate(opt_state())
     req(st)
@@ -5250,6 +5256,15 @@ server <- function(input, output, session) {
     ))
 
     opt_step(step + step_advance)
+    }, error = function(e) {
+      if (inherits(e, "shiny.silent.error")) stop(e)
+      opt_running(FALSE)
+      removeModal()
+      showNotification(
+        paste0("Auto-Optimize stopped because of an unexpected error: ", conditionMessage(e),
+               ". Check the optimization settings (empty or invalid fields) and run it again."),
+        type = "error", duration = 12)
+    })
   })
 
   # Render Candidate Ranking Table
