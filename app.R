@@ -364,6 +364,14 @@ semDiagram <- function(
 
 `%||%` <- function(x, y) if (!is.null(x)) x else y
 
+# Sanitise a numericInput value: a cleared field arrives as NA, and a typed value can bypass the UI min/max.
+# Non-numeric or non-finite input falls back to `default`; out-of-range values are clamped to [min_val, max_val].
+safe_num <- function(x, default, min_val = -Inf, max_val = Inf) {
+  v <- suppressWarnings(as.numeric(x))
+  if (length(v) != 1 || !is.finite(v)) return(default)
+  min(max(v, min_val), max_val)
+}
+
 # ---- Helper: Approximate Equations -----------------------------
 #   * Indicator  =  intercept + loading * Latent
 #   * Dependent  =  intercept + Σ( slope * Predictor )
@@ -2804,8 +2812,7 @@ server <- function(input, output, session) {
     model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
     sug_fit <- tryCatch(suggestion_fit(), error = function(e) NULL)
     model_items() # establish dependency so the cache is invalidated when structural items (rows/cols) change shape
-    max_sug <- input$max_suggestions %||% 5
-    if (!is.numeric(max_sug) || is.na(max_sug) || max_sug < 1) max_sug <- 5
+    max_sug <- safe_num(input$max_suggestions, 5, 1)
     # Matching is by variable name against the current table, so paths the user has just ticked
     # (but not yet fitted) are no longer suggested; suggestion_status_ui flags the stale state.
     mat <- isolate(struct_table_data())
@@ -4531,6 +4538,42 @@ server <- function(input, output, session) {
 
   # 2. Run Candidate Search & Display Step 2 Modal via Stepwise Stepper Engine
   observeEvent(input$run_prune_explore, {
+    # Validate every optimizer input up front (before any modal is shown): cleared fields arrive as NA and
+    # typed values can bypass the UI limits. Corrected fields are reported together in one notification.
+    adjusted <- character(0)
+    num_input <- function(id, label, default, min_val, max_val) {
+      raw <- input[[id]]
+      v <- safe_num(raw, default, min_val, max_val)
+      raw_num <- suppressWarnings(as.numeric(raw))
+      if (!(length(raw_num) == 1 && is.finite(raw_num) && raw_num == v)) {
+        adjusted <<- c(adjusted, sprintf("%s -> %s", label, format(v, scientific = FALSE)))
+      }
+      v
+    }
+    choice_input <- function(id, label, allowed, default) {
+      v <- input[[id]]
+      if (length(v) != 1 || is.na(v) || !(v %in% allowed)) {
+        adjusted <<- c(adjusted, sprintf("%s -> %s", label, default))
+        return(default)
+      }
+      v
+    }
+    criterion <- choice_input("prune_criterion", "Optimization Criterion", c("AICc", "AIC", "BIC"), "AICc")
+    strategy <- choice_input("prune_strategy", "Search Algorithm Strategy",
+                             c("adaptive", "regsem", "stepwise", "exhaustive", "sa"), "adaptive")
+    max_comb <- num_input("max_exhaustive_comb", "Exhaustive Search Max Combinations", 1024, 64, 8192)
+    sa_max_iter <- as.integer(num_input("sa_max_iter", "SA Max Iterations", 150, 20, 500))
+    sa_T0 <- num_input("sa_temp_init", "SA Initial Temp", 10, 1, 100)
+    sa_seed <- as.integer(num_input("sa_seed", "Random Seed", 1, 1, .Machine$integer.max))
+    regsem_type <- choice_input("regsem_type", "Regularization Penalty", c("lasso", "enet"), "lasso")
+    regsem_n_lambda <- as.integer(num_input("regsem_n_lambda", "Number of Lambda Steps", 30, 10, 100))
+    if (length(adjusted) > 0) {
+      showNotification(
+        paste0("Some optimizer settings were empty or out of range and were adjusted: ",
+               paste(adjusted, collapse = "; "), "."),
+        type = "warning", duration = 8)
+    }
+
     base_model <- fit_model_safe()
     base_info <- optimization_baseline(base_model)
     if (!isTRUE(base_info$usable)) {
@@ -4545,7 +4588,7 @@ server <- function(input, output, session) {
     }
     base_fit <- base_info$fit
     base_identified <- isTRUE(base_info$identified)
-    if (!base_identified && identical(input$prune_strategy, "regsem")) {
+    if (!base_identified && identical(strategy, "regsem")) {
       showModal(modalDialog(
         title = "Auto-Optimize Warning",
         div(class = "alert alert-warning",
@@ -4610,12 +4653,7 @@ server <- function(input, output, session) {
       return()
     }
 
-    criterion <- input$prune_criterion
-    strategy <- input$prune_strategy
     total_comb <- 2^M
-    # An empty or invalid threshold field arrives as NA; fall back to the default instead of failing in `if`
-    max_comb <- suppressWarnings(as.numeric(input$max_exhaustive_comb %||% 1024))
-    if (length(max_comb) != 1 || !is.finite(max_comb) || max_comb < 1) max_comb <- 1024
 
     eff_strategy <- strategy
     if (strategy == "adaptive") {
@@ -4658,144 +4696,147 @@ server <- function(input, output, session) {
     needs_meanstructure <- (input$analysis_mode == "raw" || 
                             input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
 
-    # Display Progress Modal with live HTML5 Canvas Chart
-    showModal(modalDialog(
-      title = "Auto-Optimize Model: Optimizing Model Space...",
-      footer = div(
-        style = "display: flex; justify-content: space-between; align-items: center; width: 100%;",
-        actionButton("cancel_prune_explore", "Cancel", class = "btn btn-default", `data-dismiss` = "modal"),
-        actionButton("stop_prune_explore", "Stop & View Results", class = "btn btn-warning")
-      ),
-      div(
-        style = "text-align: center; padding: 15px;",
-        div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;",
-            span(style = "font-weight: bold; color: #475569; font-size: 13px;",
-                 sprintf("Strategy: %s | Criterion: %s", toupper(eff_strategy), criterion)),
-            span(id = "prune_iter_badge", class = "badge badge-primary", style = "font-size: 12px; background-color: #2563eb;", "Step 0")
+    tryCatch({
+      # Display Progress Modal with live HTML5 Canvas Chart
+      showModal(modalDialog(
+        title = "Auto-Optimize Model: Optimizing Model Space...",
+        footer = div(
+          style = "display: flex; justify-content: space-between; align-items: center; width: 100%;",
+          actionButton("cancel_prune_explore", "Cancel", class = "btn btn-default", `data-dismiss` = "modal"),
+          actionButton("stop_prune_explore", "Stop & View Results", class = "btn btn-warning")
         ),
-        tags$canvas(id = "opt_chart_canvas", width = "540", height = "200",
-                    style = "border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.15); background-color: #0f172a; width: 100%; max-width: 540px; height: 200px;"),
-        div(style = "width: 100%; background-color: #e2e8f0; border-radius: 6px; height: 8px; overflow: hidden; margin-top: 12px;",
-            div(id = "prune_progress_bar_inner", style = "width: 0%; height: 100%; background-color: #3b82f6; transition: width 0.15s ease;")
-        ),
-        div(id = "prune_progress_status", style = "margin-top: 10px; font-weight: 600; color: #1e293b; font-size: 13px;",
-            "Initializing baseline model and structural constraints...")
+        div(
+          style = "text-align: center; padding: 15px;",
+          div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;",
+              span(style = "font-weight: bold; color: #475569; font-size: 13px;",
+                   sprintf("Strategy: %s | Criterion: %s", toupper(eff_strategy), criterion)),
+              span(id = "prune_iter_badge", class = "badge badge-primary", style = "font-size: 12px; background-color: #2563eb;", "Step 0")
+          ),
+          tags$canvas(id = "opt_chart_canvas", width = "540", height = "200",
+                      style = "border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.15); background-color: #0f172a; width: 100%; max-width: 540px; height: 200px;"),
+          div(style = "width: 100%; background-color: #e2e8f0; border-radius: 6px; height: 8px; overflow: hidden; margin-top: 12px;",
+              div(id = "prune_progress_bar_inner", style = "width: 0%; height: 100%; background-color: #3b82f6; transition: width 0.15s ease;")
+          ),
+          div(id = "prune_progress_status", style = "margin-top: 10px; font-weight: 600; color: #1e293b; font-size: 13px;",
+              "Initializing baseline model and structural constraints...")
+        )
+      ))
+
+      # Initialize stepper state (inputs were validated at the top of this handler)
+      # Upper bound on the number of candidate evaluations of a backward-elimination run:
+      # at most M + (M-1) + ... + 1 fits (one per tick, so Stop/Cancel stay responsive).
+      max_steps <- if (eff_strategy == "exhaustive") {
+        total_comb
+      } else if (eff_strategy == "stepwise") {
+        M * (M + 1) / 2
+      } else if (eff_strategy == "sa") {
+        sa_max_iter
+      } else {
+        regsem_n_lambda
+      }
+      grid_matrix <- if (eff_strategy == "exhaustive") expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE)) else NULL
+
+      # Reproducible stochastic search; temperature is annealed from T0 to 0.1 over the whole run.
+      set.seed(sa_seed)
+      sa_alpha <- (0.1 / sa_T0)^(1 / max(sa_max_iter, 1))
+
+      # Candidates are estimated exactly like the main model. They stay comparable with the baseline only if
+      # no variable disappears (required_vars always keep a path) and no removed path is silently replaced
+      # by a covariance (checked after each fit against base_ov / base_cov_pairs).
+      # Exogenous predictors may lose every path: they are scored with fixed-zero paths (droppable_vars,
+      # base_edges) and are removed from the model when the candidate is applied.
+      droppable_vars <- droppable_struct_vars(struct_df, base_fit)
+      ctx <- list(
+        data = processed_data(),
+        missing_method = input$missing_method,
+        needs_meanstructure = needs_meanstructure,
+        meas_lines = mlines,
+        extra_lines = extra,
+        droppable_vars = droppable_vars,
+        base_edges = struct_edges(struct_df),
+        required_vars = setdiff(required_struct_vars(struct_df, base_fit), droppable_vars),
+        base_ov = lavaan::lavNames(base_fit, "ov"),
+        base_cov_pairs = free_cov_pairs(base_fit),
+        base_fit = base_fit
       )
-    ))
+      base_ident <- fit_identification(base_fit)
 
-    # Initialize stepper state
-    # A cleared numeric field arrives as NA (not NULL): fall back to the default instead of failing later in `if`
-    num_or <- function(x, default, min_val = -Inf) {
-      v <- suppressWarnings(as.numeric(x))
-      if (length(v) != 1 || !is.finite(v) || v < min_val) default else v
-    }
-    sa_max_iter <- as.integer(num_or(input$sa_max_iter, 150, 1))
-    regsem_n_lambda <- as.integer(num_or(input$regsem_n_lambda, 30, 1))
+      state_obj <- list(
+        eff_strategy = eff_strategy,
+        criterion = criterion,
+        ctx = ctx,
+        base_fit = base_fit,
+        base_identified = base_identified,
+        base_ms = base_ms,
+        base_score = base_score,
+        removable_paths = removable_paths,
+        M = M,
+        struct_df = struct_df,
+        pred_cols = pred_cols,
+        max_steps = max_steps,
+        grid_matrix = grid_matrix,
+        candidates_map = list(),
+        scores_hist = numeric(0),
+        best_scores_hist = if (is.finite(base_score)) base_score else numeric(0),
+        curr_vec = rep(TRUE, M),
+        curr_df = struct_df,
+        T_val = sa_T0,
+        sa_alpha = sa_alpha,
+        # Stepwise sub-step state: one candidate fit per tick
+        sw_idx = 1L,
+        sw_best_score = NULL,
+        sw_best_df = NULL,
+        sw_improved = FALSE,
+        regsem_type = regsem_type,
+        regsem_n_lambda = regsem_n_lambda,
+        retain_deps = retain_deps,
+        retain_preds = retain_preds,
+        # Repair phase: remove paths until the model is identified (Stepwise and SA only; Exhaustive
+        # enumerates every combination, so the identified ones simply rank)
+        repair = !base_identified && eff_strategy %in% c("stepwise", "sa"),
+        repair_df = struct_df,
+        repair_deficit = base_ident$deficit,
+        repair_idx = 1L,
+        repair_best = NULL,
+        repair_ticks = 0L
+      )
 
-    # Upper bound on the number of candidate evaluations of a backward-elimination run:
-    # at most M + (M-1) + ... + 1 fits (one per tick, so Stop/Cancel stay responsive).
-    max_steps <- if (eff_strategy == "exhaustive") {
-      total_comb
-    } else if (eff_strategy == "stepwise") {
-      M * (M + 1) / 2
-    } else if (eff_strategy == "sa") {
-      sa_max_iter
-    } else {
-      regsem_n_lambda
-    }
-    grid_matrix <- if (eff_strategy == "exhaustive") expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE)) else NULL
+      base_key <- make_struct_key(struct_df)
+      state_obj$candidates_map[[base_key]] <- list(
+        removed_str = "None (Baseline Model)",
+        retained_str = build_retained_str(struct_df),
+        struct_df = struct_df,
+        fit = base_fit,
+        aic = as.numeric(base_ms["aic"]),
+        bic = as.numeric(base_ms["bic"]),
+        aicc = as.numeric(base_ms["aicc"]),
+        delta_aic = if (base_identified) 0.0 else NA_real_,
+        delta_bic = if (base_identified) 0.0 else NA_real_,
+        delta_aicc = if (base_identified && is.finite(base_ms[["aicc"]])) 0.0 else NA_real_,
+        cfi = as.numeric(base_ms["cfi"]),
+        rmsea = as.numeric(base_ms["rmsea"]),
+        srmr = as.numeric(base_ms["srmr"]),
+        converged = TRUE,
+        proper = fit_is_proper(base_fit),
+        identified = base_identified, deficit = base_ident$deficit,
+        vars_ok = TRUE, replaced = FALSE, added_covs = character(0),
+        status = "[Baseline]"
+      )
 
-    # Reproducible stochastic search; temperature is annealed from T0 to 0.1 over the whole run.
-    set.seed(as.integer(num_or(input$sa_seed, 1)))
-    sa_T0 <- max(num_or(input$sa_temp_init, 10.0), 0.2)
-    sa_alpha <- (0.1 / sa_T0)^(1 / max(sa_max_iter, 1))
-
-    # Candidates are estimated exactly like the main model. They stay comparable with the baseline only if
-    # no variable disappears (required_vars always keep a path) and no removed path is silently replaced
-    # by a covariance (checked after each fit against base_ov / base_cov_pairs).
-    # Exogenous predictors may lose every path: they are scored with fixed-zero paths (droppable_vars,
-    # base_edges) and are removed from the model when the candidate is applied.
-    droppable_vars <- droppable_struct_vars(struct_df, base_fit)
-    ctx <- list(
-      data = processed_data(),
-      missing_method = input$missing_method,
-      needs_meanstructure = needs_meanstructure,
-      meas_lines = mlines,
-      extra_lines = extra,
-      droppable_vars = droppable_vars,
-      base_edges = struct_edges(struct_df),
-      required_vars = setdiff(required_struct_vars(struct_df, base_fit), droppable_vars),
-      base_ov = lavaan::lavNames(base_fit, "ov"),
-      base_cov_pairs = free_cov_pairs(base_fit),
-      base_fit = base_fit
-    )
-    base_ident <- fit_identification(base_fit)
-
-    state_obj <- list(
-      eff_strategy = eff_strategy,
-      criterion = criterion,
-      ctx = ctx,
-      base_fit = base_fit,
-      base_identified = base_identified,
-      base_ms = base_ms,
-      base_score = base_score,
-      removable_paths = removable_paths,
-      M = M,
-      struct_df = struct_df,
-      pred_cols = pred_cols,
-      max_steps = max_steps,
-      grid_matrix = grid_matrix,
-      candidates_map = list(),
-      scores_hist = numeric(0),
-      best_scores_hist = if (is.finite(base_score)) base_score else numeric(0),
-      curr_vec = rep(TRUE, M),
-      curr_df = struct_df,
-      T_val = sa_T0,
-      sa_alpha = sa_alpha,
-      # Stepwise sub-step state: one candidate fit per tick
-      sw_idx = 1L,
-      sw_best_score = NULL,
-      sw_best_df = NULL,
-      sw_improved = FALSE,
-      regsem_type = input$regsem_type %||% "lasso",
-      regsem_n_lambda = regsem_n_lambda,
-      retain_deps = retain_deps,
-      retain_preds = retain_preds,
-      # Repair phase: remove paths until the model is identified (Stepwise and SA only; Exhaustive
-      # enumerates every combination, so the identified ones simply rank)
-      repair = !base_identified && eff_strategy %in% c("stepwise", "sa"),
-      repair_df = struct_df,
-      repair_deficit = base_ident$deficit,
-      repair_idx = 1L,
-      repair_best = NULL,
-      repair_ticks = 0L
-    )
-
-    base_key <- make_struct_key(struct_df)
-    state_obj$candidates_map[[base_key]] <- list(
-      removed_str = "None (Baseline Model)",
-      retained_str = build_retained_str(struct_df),
-      struct_df = struct_df,
-      fit = base_fit,
-      aic = as.numeric(base_ms["aic"]),
-      bic = as.numeric(base_ms["bic"]),
-      aicc = as.numeric(base_ms["aicc"]),
-      delta_aic = if (base_identified) 0.0 else NA_real_,
-      delta_bic = if (base_identified) 0.0 else NA_real_,
-      delta_aicc = if (base_identified && is.finite(base_ms[["aicc"]])) 0.0 else NA_real_,
-      cfi = as.numeric(base_ms["cfi"]),
-      rmsea = as.numeric(base_ms["rmsea"]),
-      srmr = as.numeric(base_ms["srmr"]),
-      converged = TRUE,
-      proper = fit_is_proper(base_fit),
-      identified = base_identified, deficit = base_ident$deficit,
-      vars_ok = TRUE, replaced = FALSE, added_covs = character(0),
-      status = "[Baseline]"
-    )
-
-    opt_state(state_obj)
-    opt_step(0)
-    opt_running(TRUE)
+      opt_state(state_obj)
+      opt_step(0)
+      opt_running(TRUE)
+    }, error = function(e) {
+      # Silent conditions (req/validate) are Shiny flow control: let them through
+      if (inherits(e, "shiny.silent.error")) stop(e)
+      opt_running(FALSE)
+      opt_state(NULL)
+      removeModal()
+      showNotification(
+        paste0("Auto-Optimize could not start: ", conditionMessage(e),
+               ". Check that the model fits with the current data and settings, or try another search strategy."),
+        type = "error", duration = 12)
+    })
   })
 
   # Stepwise optimization execution observer with real-time UI yielding
@@ -4804,465 +4845,479 @@ server <- function(input, output, session) {
     invalidateLater(30, session)
     # Any unexpected error in a tick must not take the whole session down: it is reported and the run is stopped
     tryCatch({
-    step <- isolate(opt_step())
-    st <- isolate(opt_state())
-    req(st)
+      step <- isolate(opt_step())
+      st <- isolate(opt_state())
+      req(st)
 
-    if (step >= st$max_steps) {
-      finalize_prune_results(st, current_step = step, stopped_early = FALSE)
-      return()
-    }
+      if (step >= st$max_steps) {
+        finalize_prune_results(st, current_step = step, stopped_early = FALSE)
+        return()
+      }
 
-    make_key_local <- make_struct_key
+      make_key_local <- make_struct_key
 
-    build_candidate_record_local <- function(curr_s_df, removed_str) {
-      fm <- fit_candidate_model(curr_s_df, st$ctx)
-      ret_str <- build_retained_str(curr_s_df)
-      if (is.null(fm) || !isTRUE(lavaan::lavInspect(fm, "converged"))) {
-        return(list(
+      build_candidate_record_local <- function(curr_s_df, removed_str) {
+        fm <- fit_candidate_model(curr_s_df, st$ctx)
+        ret_str <- build_retained_str(curr_s_df)
+        if (is.null(fm) || !isTRUE(lavaan::lavInspect(fm, "converged"))) {
+          return(list(
+            removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
+            retained_str = ret_str,
+            struct_df = curr_s_df, fit = NULL,
+            aic = NA_real_, bic = NA_real_, aicc = NA_real_,
+            delta_aic = NA_real_, delta_bic = NA_real_, delta_aicc = NA_real_,
+            cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
+            converged = FALSE, proper = FALSE, identified = FALSE, deficit = Inf, raw_aic = NA_real_,
+            status = "[Non-converged]"
+          ))
+        }
+        # Ultra-fast score extraction using stats::AIC and stats::BIC (skips baseline model fitting)
+        c_aic <- tryCatch(as.numeric(stats::AIC(fm)), error = function(e) NA_real_)
+        c_bic <- tryCatch(as.numeric(stats::BIC(fm)), error = function(e) NA_real_)
+        c_aicc <- aicc_from_fit(fm, c_aic)
+        d_aic <- c_aic - as.numeric(st$base_ms["aic"])
+        d_bic <- c_bic - as.numeric(st$base_ms["bic"])
+        d_aicc <- c_aicc - as.numeric(st$base_ms["aicc"])
+        proper <- fit_is_proper(fm)
+        chk <- candidate_structure_check(fm, st$ctx)
+        ident <- fit_identification(fm)
+        raw_aic <- c_aic   # kept for the repair phase, which still has to compare unidentified fits
+        if (!chk$vars_ok || !ident$identified) {
+          # Fitted on a different set of variables, or not identified: its AIC/BIC are meaningless and
+          # cannot be compared with the baseline at all
+          c_aic <- c_bic <- c_aicc <- d_aic <- d_bic <- d_aicc <- NA_real_
+        }
+
+        stat <- "[Good]"
+        d_crit <- c(AIC = d_aic, BIC = d_bic, AICc = d_aicc)[[st$criterion]]
+        if (isTRUE(d_crit < -0.01)) stat <- "[Improved]"
+        if (!proper) stat <- "[Improper]"
+        if (!ident$identified) stat <- "[Not Identified]"
+        if (chk$replaced) stat <- "[Replaced]"
+        if (!chk$vars_ok) stat <- "[Variable Dropped]"
+
+        list(
           removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
           retained_str = ret_str,
-          struct_df = curr_s_df, fit = NULL,
-          aic = NA_real_, bic = NA_real_, aicc = NA_real_,
-          delta_aic = NA_real_, delta_bic = NA_real_, delta_aicc = NA_real_,
+          struct_df = curr_s_df, fit = fm,
+          aic = c_aic, bic = c_bic, aicc = c_aicc,
+          delta_aic = d_aic, delta_bic = d_bic, delta_aicc = d_aicc,
           cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
-          converged = FALSE, proper = FALSE, identified = FALSE, deficit = Inf, raw_aic = NA_real_,
-          status = "[Non-converged]"
-        ))
-      }
-      # Ultra-fast score extraction using stats::AIC and stats::BIC (skips baseline model fitting)
-      c_aic <- tryCatch(as.numeric(stats::AIC(fm)), error = function(e) NA_real_)
-      c_bic <- tryCatch(as.numeric(stats::BIC(fm)), error = function(e) NA_real_)
-      c_aicc <- aicc_from_fit(fm, c_aic)
-      d_aic <- c_aic - as.numeric(st$base_ms["aic"])
-      d_bic <- c_bic - as.numeric(st$base_ms["bic"])
-      d_aicc <- c_aicc - as.numeric(st$base_ms["aicc"])
-      proper <- fit_is_proper(fm)
-      chk <- candidate_structure_check(fm, st$ctx)
-      ident <- fit_identification(fm)
-      raw_aic <- c_aic   # kept for the repair phase, which still has to compare unidentified fits
-      if (!chk$vars_ok || !ident$identified) {
-        # Fitted on a different set of variables, or not identified: its AIC/BIC are meaningless and
-        # cannot be compared with the baseline at all
-        c_aic <- c_bic <- c_aicc <- d_aic <- d_bic <- d_aicc <- NA_real_
+          converged = TRUE, proper = proper, status = stat,
+          identified = ident$identified, deficit = ident$deficit, raw_aic = raw_aic,
+          vars_ok = chk$vars_ok, replaced = chk$replaced, added_covs = chk$added_covs,
+          excluded_vars = orphaned_struct_vars(curr_s_df, st$ctx)
+        )
       }
 
-      stat <- "[Good]"
-      d_crit <- c(AIC = d_aic, BIC = d_bic, AICc = d_aicc)[[st$criterion]]
-      if (isTRUE(d_crit < -0.01)) stat <- "[Improved]"
-      if (!proper) stat <- "[Improper]"
-      if (!ident$identified) stat <- "[Not Identified]"
-      if (chk$replaced) stat <- "[Replaced]"
-      if (!chk$vars_ok) stat <- "[Variable Dropped]"
+      # Score of a record under the active criterion; Inf for non-converged or improper fits
+      score_of <- function(rec) candidate_score(rec, st$criterion)
 
-      list(
-        removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
-        retained_str = ret_str,
-        struct_df = curr_s_df, fit = fm,
-        aic = c_aic, bic = c_bic, aicc = c_aicc,
-        delta_aic = d_aic, delta_bic = d_bic, delta_aicc = d_aicc,
-        cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
-        converged = TRUE, proper = proper, status = stat,
-        identified = ident$identified, deficit = ident$deficit, raw_aic = raw_aic,
-        vars_ok = chk$vars_ok, replaced = chk$replaced, added_covs = chk$added_covs,
-        excluded_vars = orphaned_struct_vars(curr_s_df, st$ctx)
-      )
-    }
+      curr_score_step <- st$base_score
+      # Without a baseline score (unidentified start) nothing has been achieved yet
+      best_curr <- if (length(st$best_scores_hist) > 0) tail(st$best_scores_hist, 1)
+                   else if (is.finite(st$base_score)) st$base_score else Inf
 
-    # Score of a record under the active criterion; Inf for non-converged or improper fits
-    score_of <- function(rec) candidate_score(rec, st$criterion)
+      step_advance <- 1L
 
-    curr_score_step <- st$base_score
-    # Without a baseline score (unidentified start) nothing has been achieved yet
-    best_curr <- if (length(st$best_scores_hist) > 0) tail(st$best_scores_hist, 1)
-                 else if (is.finite(st$base_score)) st$base_score else Inf
-
-    step_advance <- 1L
-
-    removed_label <- function(df) {
-      rem_vec <- c()
-      for (jp in st$removable_paths) {
-        if (!isTRUE(as.logical(df[df$Dependent == jp$dep, jp$pred]))) rem_vec <- c(rem_vec, paste0(jp$dep, " ~ ", jp$pred))
-      }
-      paste(rem_vec, collapse = "; ")
-    }
-
-    if (isTRUE(st$repair)) {
-      # Repair phase (unidentified start, Stepwise/SA): remove one path per sweep until the model is identified.
-      # One uncached candidate fit per tick, like the stepwise sweep. The removal that leaves the smallest
-      # identification deficit (ties: lowest raw AIC) is adopted at the end of each sweep.
-      st$repair_ticks <- st$repair_ticks + 1L
-      evaluated <- FALSE
-      while (!evaluated && st$repair_idx <= length(st$removable_paths)) {
-        rp <- st$removable_paths[[st$repair_idx]]
-        st$repair_idx <- st$repair_idx + 1L
-        if (!isTRUE(as.logical(st$repair_df[st$repair_df$Dependent == rp$dep, rp$pred]))) next
-        test_s_df <- st$repair_df
-        test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) next
-
-        k_str <- make_key_local(test_s_df)
-        if (!k_str %in% names(st$candidates_map)) {
-          st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, removed_label(test_s_df))
-          evaluated <- TRUE   # only a real model fit consumes the tick; cached candidates are free
+      removed_label <- function(df) {
+        rem_vec <- c()
+        for (jp in st$removable_paths) {
+          if (!isTRUE(as.logical(df[df$Dependent == jp$dep, jp$pred]))) rem_vec <- c(rem_vec, paste0(jp$dep, " ~ ", jp$pred))
         }
-        rec <- st$candidates_map[[k_str]]
-        # Only fits that converged and keep the variables/paths comparable can be walked through
-        if (isTRUE(rec$converged) && !isFALSE(rec$vars_ok) && !isTRUE(rec$replaced)) {
-          cand_def <- rec$deficit
-          cand_aic <- if (is.finite(rec$raw_aic %||% NA_real_)) rec$raw_aic else Inf
+        paste(rem_vec, collapse = "; ")
+      }
+
+      if (isTRUE(st$repair)) {
+        # Repair phase (unidentified start, Stepwise/SA): remove one path per sweep until the model is identified.
+        # One uncached candidate fit per tick, like the stepwise sweep. The removal that leaves the smallest
+        # identification deficit (ties: lowest raw AIC) is adopted at the end of each sweep.
+        st$repair_ticks <- st$repair_ticks + 1L
+        evaluated <- FALSE
+        while (!evaluated && st$repair_idx <= length(st$removable_paths)) {
+          rp <- st$removable_paths[[st$repair_idx]]
+          st$repair_idx <- st$repair_idx + 1L
+          if (!isTRUE(as.logical(st$repair_df[st$repair_df$Dependent == rp$dep, rp$pred]))) next
+          test_s_df <- st$repair_df
+          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+          if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) next
+
+          k_str <- make_key_local(test_s_df)
+          if (!k_str %in% names(st$candidates_map)) {
+            st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, removed_label(test_s_df))
+            evaluated <- TRUE   # only a real model fit consumes the tick; cached candidates are free
+          }
+          rec <- st$candidates_map[[k_str]]
+          # Only fits that converged and keep the variables/paths comparable can be walked through
+          if (isTRUE(rec$converged) && !isFALSE(rec$vars_ok) && !isTRUE(rec$replaced)) {
+            cand_def <- rec$deficit
+            cand_aic <- if (is.finite(rec$raw_aic %||% NA_real_)) rec$raw_aic else Inf
+            best <- st$repair_best
+            if (is.null(best) || cand_def < best$deficit - 1e-9 ||
+                (abs(cand_def - best$deficit) <= 1e-9 && cand_aic < best$raw_aic)) {
+              st$repair_best <- list(df = test_s_df, deficit = cand_def, raw_aic = cand_aic,
+                                     identified = is.finite(score_of(rec)))
+            }
+          }
+        }
+
+        if (st$repair_idx > length(st$removable_paths)) {
+          # Sweep finished
           best <- st$repair_best
-          if (is.null(best) || cand_def < best$deficit - 1e-9 ||
-              (abs(cand_def - best$deficit) <= 1e-9 && cand_aic < best$raw_aic)) {
-            st$repair_best <- list(df = test_s_df, deficit = cand_def, raw_aic = cand_aic,
-                                   identified = is.finite(score_of(rec)))
+          if (is.null(best) || st$repair_ticks > st$M * (st$M + 1) / 2 + st$M) {
+            st$repair_note <- paste0("Removing paths could not make the model identified: the locked paths and the rule that ",
+                                     "every variable keeps a path leave no identified submodel. Unlock paths or simplify the model.")
+            finalize_prune_results(st, current_step = isolate(opt_step()), stopped_early = FALSE)
+            return()
+          }
+          st$repair_df <- best$df
+          st$repair_deficit <- best$deficit
+          st$repair_idx <- 1L
+          st$repair_best <- NULL
+          if (isTRUE(best$identified)) {
+            # Identified: continue with the chosen strategy from this model
+            st$repair <- FALSE
+            st$curr_df <- best$df
+            st$curr_vec <- vapply(st$removable_paths, function(rp) {
+              isTRUE(as.logical(best$df[best$df$Dependent == rp$dep, rp$pred]))
+            }, logical(1))
+            # The repaired model is the first scored model: it is the best found so far
+            s0 <- score_of(st$candidates_map[[make_key_local(best$df)]])
+            if (is.finite(s0)) {
+              st$scores_hist <- c(st$scores_hist, s0)
+              st$best_scores_hist <- c(st$best_scores_hist, s0)
+            }
           }
         }
+
+        if (!isTRUE(isolate(opt_running()))) return()
+        opt_state(st)
+        n_removed <- sum(!vapply(st$removable_paths, function(rp) {
+          isTRUE(as.logical(st$repair_df[st$repair_df$Dependent == rp$dep, rp$pred]))
+        }, logical(1)))
+        session$sendCustomMessage("update_optimization_live_chart", list(
+          step = isolate(opt_step()),
+          maxIter = st$max_steps,
+          scores = st$scores_hist,
+          best_scores = st$best_scores_hist,
+          baseScore = NULL,
+          detail = if (isTRUE(st$repair))
+            sprintf("Repairing identification: %d path(s) removed so far (remaining deficit %.1f)", n_removed, st$repair_deficit)
+          else "Identified model reached. Searching for the best model..."
+        ))
+        return()   # repair ticks do not use up the strategy's step budget
       }
 
-      if (st$repair_idx > length(st$removable_paths)) {
-        # Sweep finished
-        best <- st$repair_best
-        if (is.null(best) || st$repair_ticks > st$M * (st$M + 1) / 2 + st$M) {
-          st$repair_note <- paste0("Removing paths could not make the model identified: the locked paths and the rule that ",
-                                   "every variable keeps a path leave no identified submodel. Unlock paths or simplify the model.")
-          finalize_prune_results(st, current_step = isolate(opt_step()), stopped_early = FALSE)
-          return()
+      if (st$eff_strategy == "stepwise") {
+        # Backward elimination, one candidate fit per tick so Stop/Cancel stay responsive in the
+        # single-threaded WebR runtime. A sweep tries removing each remaining active path from the
+        # current model; at the end of the sweep the best improving removal (if any) is adopted.
+        if (is.null(st$sw_best_score)) {
+          st$sw_best_score <- score_of(st$candidates_map[[make_key_local(st$curr_df)]])
+          st$sw_best_df <- st$curr_df
+          st$sw_start_score <- st$sw_best_score
+          st$sw_tie_df <- NULL
+          st$sw_improved <- FALSE
+          st$sw_idx <- 1L
         }
-        st$repair_df <- best$df
-        st$repair_deficit <- best$deficit
-        st$repair_idx <- 1L
-        st$repair_best <- NULL
-        if (isTRUE(best$identified)) {
-          # Identified: continue with the chosen strategy from this model
-          st$repair <- FALSE
-          st$curr_df <- best$df
-          st$curr_vec <- vapply(st$removable_paths, function(rp) {
-            isTRUE(as.logical(best$df[best$df$Dependent == rp$dep, rp$pred]))
-          }, logical(1))
-          # The repaired model is the first scored model: it is the best found so far
-          s0 <- score_of(st$candidates_map[[make_key_local(best$df)]])
-          if (is.finite(s0)) {
-            st$scores_hist <- c(st$scores_hist, s0)
-            st$best_scores_hist <- c(st$best_scores_hist, s0)
+
+        evaluated <- FALSE
+        last_cand_score <- NA_real_
+        while (!evaluated && st$sw_idx <= length(st$removable_paths)) {
+          rp <- st$removable_paths[[st$sw_idx]]
+          st$sw_idx <- st$sw_idx + 1L
+          if (!isTRUE(as.logical(st$curr_df[st$curr_df$Dependent == rp$dep, rp$pred]))) next
+
+          test_s_df <- st$curr_df
+          test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+
+          # Check variable isolation constraints
+          if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) next
+
+          rem_vec <- c()
+          for (j in seq_along(st$removable_paths)) {
+            jp <- st$removable_paths[[j]]
+            if (!isTRUE(as.logical(test_s_df[test_s_df$Dependent == jp$dep, jp$pred]))) {
+              rem_vec <- c(rem_vec, paste0(jp$dep, " ~ ", jp$pred))
+            }
+          }
+          k_str <- make_key_local(test_s_df)
+          if (!k_str %in% names(st$candidates_map)) {
+            st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, paste(rem_vec, collapse = "; "))
+            evaluated <- TRUE   # only a real model fit consumes the tick; cached candidates are free
+          }
+          cand_score <- score_of(st$candidates_map[[k_str]])
+          last_cand_score <- cand_score
+          if (is.finite(cand_score) && cand_score < st$sw_best_score - 0.01) {
+            st$sw_best_score <- cand_score
+            st$sw_best_df <- test_s_df
+            st$sw_improved <- TRUE
+          } else if (is.finite(cand_score) && is.null(st$sw_tie_df) &&
+                     abs(cand_score - st$sw_start_score) <= 0.01) {
+            # Equal fit with one path fewer (typical for saturated structural parts, where removing a
+            # path just frees a covariance). Remembered so the search can walk across such plateaus.
+            st$sw_tie_df <- test_s_df
           }
         }
+
+        if (st$sw_idx > length(st$removable_paths)) {
+          # Sweep finished
+          if (st$sw_improved || !is.null(st$sw_tie_df)) {
+            # Prefer a strictly improving removal; otherwise accept the first equal-fit removal (parsimony)
+            st$curr_df <- if (st$sw_improved) st$sw_best_df else st$sw_tie_df
+            st$sw_best_score <- NULL   # start a fresh sweep from the adopted model on the next tick
+          } else {
+            step_advance <- st$max_steps + 1   # no improving removal left: search converged
+          }
+        }
+
+        curr_score_step <- if (is.finite(last_cand_score)) last_cand_score else
+          if (!is.null(st$sw_best_score) && is.finite(st$sw_best_score)) st$sw_best_score else st$base_score
+        st$scores_hist <- c(st$scores_hist, curr_score_step)
+        if (is.finite(curr_score_step) && curr_score_step < best_curr) {
+          best_curr <- curr_score_step
+        }
+        st$best_scores_hist <- c(st$best_scores_hist, best_curr)
+      } else if (st$eff_strategy == "exhaustive") {
+        chunk_size <- min(4L, st$max_steps - step)
+        for (ci in seq_len(chunk_size)) {
+          row_i <- step + ci
+          if (row_i > st$max_steps) break
+          state_vec <- as.logical(st$grid_matrix[row_i, ])
+          test_s_df <- st$struct_df
+          removed_paths_vec <- c()
+          for (idx in seq_along(st$removable_paths)) {
+            rp <- st$removable_paths[[idx]]
+            if (!state_vec[idx]) {
+              test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+              removed_paths_vec <- c(removed_paths_vec, paste0(rp$dep, " ~ ", rp$pred))
+            }
+          }
+          # Check variable isolation constraints
+          if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) {
+            curr_score_step <- Inf
+          } else {
+            k_str <- make_key_local(test_s_df)
+            if (!k_str %in% names(st$candidates_map)) {
+              rem_label <- paste(removed_paths_vec, collapse = "; ")
+              st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
+            }
+            curr_score_step <- score_of(st$candidates_map[[k_str]])
+          }
+          st$scores_hist <- c(st$scores_hist, curr_score_step)
+          if (is.finite(curr_score_step) && curr_score_step < best_curr) {
+            best_curr <- curr_score_step
+          }
+          st$best_scores_hist <- c(st$best_scores_hist, best_curr)
+        }
+        step_advance <- chunk_size
+      } else if (st$eff_strategy == "sa") {
+        chunk_size <- min(4L, st$max_steps - step)
+        for (ci in seq_len(chunk_size)) {
+          flip_pos <- sample.int(st$M, 1)
+          cand_vec <- st$curr_vec
+          cand_vec[flip_pos] <- !cand_vec[flip_pos]
+          
+          test_s_df <- st$struct_df
+          rem_vec <- c()
+          for (idx in seq_along(st$removable_paths)) {
+            rp <- st$removable_paths[[idx]]
+            if (!cand_vec[idx]) {
+              test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+              rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
+            }
+          }
+          if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) {
+            c_score <- Inf
+          } else {
+            k_str <- make_key_local(test_s_df)
+            if (!k_str %in% names(st$candidates_map)) {
+              rem_label <- paste(rem_vec, collapse = "; ")
+              st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
+            }
+            c_score <- score_of(st$candidates_map[[k_str]])
+          }
+
+          if (is.finite(c_score)) {
+            curr_score_step <- c_score
+            curr_score <- score_of(st$candidates_map[[make_key_local(st$curr_df)]])
+
+            dE <- as.numeric(c_score - curr_score)
+            if (!is.na(dE) && !is.nan(dE)) {
+              eff_T <- max(st$T_val, 1e-6)
+              prob <- if (dE < 0) 1.0 else exp(-dE / eff_T)
+              if (!is.na(prob) && !is.nan(prob) && runif(1) < prob) {
+                st$curr_vec <- cand_vec
+                st$curr_df <- test_s_df
+              }
+            }
+          } else {
+            curr_score_step <- Inf
+          }
+          st$T_val <- max(st$T_val * st$sa_alpha, 1e-6)
+          st$scores_hist <- c(st$scores_hist, curr_score_step)
+          if (is.finite(curr_score_step) && curr_score_step < best_curr) {
+            best_curr <- curr_score_step
+          }
+          st$best_scores_hist <- c(st$best_scores_hist, best_curr)
+        }
+        step_advance <- chunk_size
+      } else if (st$eff_strategy == "regsem") {
+        # Regularized SEM (cv_regsem / regsem)
+        if (is.null(st$reg_params_mat)) {
+          pen_type <- st$regsem_type %||% "lasso"
+          n_lambda <- st$regsem_n_lambda %||% 30
+
+          # Resolve regsem functions dynamically so ShinyLive does not detect it as a startup dependency
+          regsem_loaded <- ensure_regsem_loaded()
+          reg_obj <- NULL
+          if (regsem_loaded) {
+            reg_obj <- tryCatch({
+              getExportedValue(regsem_pkg, "cv_regsem")(st$base_fit, type = pen_type, pars_pen = "regressions",
+                                                      n.lambda = n_lambda, jump = 0.04)
+            }, error = function(e) {
+              tryCatch({
+                getExportedValue(regsem_pkg, "regsem")(st$base_fit, type = pen_type, pars_pen = "regressions", lambda = 0.05)
+              }, error = function(e2) NULL)
+            })
+          }
+
+          params_mat <- NULL
+          if (!is.null(reg_obj)) {
+            if (!is.null(reg_obj$parameters)) {
+              params_mat <- reg_obj$parameters
+            } else if (!is.null(reg_obj$coefficients)) {
+              params_mat <- matrix(reg_obj$coefficients, nrow = 1, dimnames = list(NULL, names(reg_obj$coefficients)))
+            }
+          }
+
+          # Fallback if regsem is unavailable or failed: soft-threshold the STANDARDIZED regression
+          # coefficients so the result does not depend on variable scales. Clearly labelled as approximate.
+          # Column names follow regsem's "predictor -> dependent" convention.
+          if (is.null(params_mat)) {
+            note <- if (!regsem_loaded) {
+              "Regularized SEM engine (regsem) could not be loaded"
+            } else {
+              "regsem could not estimate this model (for example because of its missing-data setting)"
+            }
+            st$fallback_note <- paste0(note, "; results use an approximate soft-threshold path on standardized coefficients, NOT regsem.")
+            showNotification(st$fallback_note, type = "warning", duration = 10)
+            ss <- tryCatch(lavaan::standardizedSolution(st$base_fit), error = function(e) NULL)
+            if (!is.null(ss)) {
+              reg_ss <- ss[ss$op == "~", , drop = FALSE]
+              lambdas <- seq(0.01, 0.5, length.out = n_lambda)
+              params_mat <- matrix(0, nrow = n_lambda, ncol = nrow(reg_ss))
+              colnames(params_mat) <- paste0(reg_ss$rhs, " -> ", reg_ss$lhs)
+              for (li in seq_along(lambdas)) {
+                for (ci in seq_len(nrow(reg_ss))) {
+                  b <- reg_ss$est.std[ci]
+                  params_mat[li, ci] <- sign(b) * max(0, abs(b) - lambdas[li])
+                }
+              }
+            }
+          }
+
+          st$reg_params_mat <- params_mat
+          st$reg_n_steps <- if (!is.null(params_mat)) nrow(params_mat) else 1L
+          st$max_steps <- max(1L, st$reg_n_steps)
+        }
+
+        curr_lambda_idx <- step + 1L
+        curr_score_step <- Inf
+
+        if (!is.null(st$reg_params_mat) && curr_lambda_idx <= nrow(st$reg_params_mat)) {
+          p_row <- st$reg_params_mat[curr_lambda_idx, ]
+          p_names <- names(p_row)
+          test_s_df <- st$struct_df
+
+          for (rp in st$removable_paths) {
+            # Exact (not regex) match on regsem's "predictor -> dependent" parameter names
+            match_idx <- which(p_names == paste0(rp$pred, " -> ", rp$dep))
+            if (length(match_idx) > 0) {
+              val <- abs(p_row[match_idx[1]])
+              if (!is.na(val) && val < 1e-4) {
+                test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
+              }
+            }
+          }
+
+          if (check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) {
+            k_str <- make_key_local(test_s_df)
+            if (!k_str %in% names(st$candidates_map)) {
+              rem_vec <- c()
+              for (rp in st$removable_paths) {
+                if (!isTRUE(as.logical(test_s_df[test_s_df$Dependent == rp$dep, rp$pred]))) {
+                  rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
+                }
+              }
+              st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, paste(rem_vec, collapse = "; "))
+            }
+            curr_score_step <- score_of(st$candidates_map[[k_str]])
+          }
+        }
+
+        if (!is.finite(curr_score_step)) {
+          curr_score_step <- if (length(st$scores_hist) > 0) tail(st$scores_hist, 1) else st$base_score
+        }
+
+        st$scores_hist <- c(st$scores_hist, curr_score_step)
+        if (is.finite(curr_score_step) && curr_score_step < best_curr) {
+          best_curr <- curr_score_step
+        }
+        st$best_scores_hist <- c(st$best_scores_hist, best_curr)
+        step_advance <- 1L
+      }
+      
+      if (!isTRUE(isolate(opt_running()))) {
+        return()
       }
 
-      if (!isTRUE(isolate(opt_running()))) return()
       opt_state(st)
-      n_removed <- sum(!vapply(st$removable_paths, function(rp) {
-        isTRUE(as.logical(st$repair_df[st$repair_df$Dependent == rp$dep, rp$pred]))
-      }, logical(1)))
+
+      cur_step_display <- min(step + step_advance, st$max_steps)
+      fmt_score <- function(x) if (is.finite(x)) sprintf("%.2f", x) else "-"
+      detail_msg <- if (is.finite(st$base_score)) {
+        sprintf(
+          "Step %d / %d | Current %s: %.2f | Best: %.2f (Δ %+.2f)",
+          cur_step_display, st$max_steps, st$criterion,
+          curr_score_step, best_curr, best_curr - st$base_score
+        )
+      } else {
+        sprintf("Step %d / %d | Current %s: %s | Best: %s",
+                cur_step_display, st$max_steps, st$criterion, fmt_score(curr_score_step), fmt_score(best_curr))
+      }
+
       session$sendCustomMessage("update_optimization_live_chart", list(
-        step = isolate(opt_step()),
+        step = cur_step_display,
         maxIter = st$max_steps,
         scores = st$scores_hist,
         best_scores = st$best_scores_hist,
-        baseScore = NULL,
-        detail = if (isTRUE(st$repair))
-          sprintf("Repairing identification: %d path(s) removed so far (remaining deficit %.1f)", n_removed, st$repair_deficit)
-        else "Identified model reached. Searching for the best model..."
+        baseScore = st$base_score,
+        detail = detail_msg
       ))
-      return()   # repair ticks do not use up the strategy's step budget
-    }
 
-    if (st$eff_strategy == "stepwise") {
-      # Backward elimination, one candidate fit per tick so Stop/Cancel stay responsive in the
-      # single-threaded WebR runtime. A sweep tries removing each remaining active path from the
-      # current model; at the end of the sweep the best improving removal (if any) is adopted.
-      if (is.null(st$sw_best_score)) {
-        st$sw_best_score <- score_of(st$candidates_map[[make_key_local(st$curr_df)]])
-        st$sw_best_df <- st$curr_df
-        st$sw_start_score <- st$sw_best_score
-        st$sw_tie_df <- NULL
-        st$sw_improved <- FALSE
-        st$sw_idx <- 1L
-      }
-
-      evaluated <- FALSE
-      last_cand_score <- NA_real_
-      while (!evaluated && st$sw_idx <= length(st$removable_paths)) {
-        rp <- st$removable_paths[[st$sw_idx]]
-        st$sw_idx <- st$sw_idx + 1L
-        if (!isTRUE(as.logical(st$curr_df[st$curr_df$Dependent == rp$dep, rp$pred]))) next
-
-        test_s_df <- st$curr_df
-        test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-
-        # Check variable isolation constraints
-        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) next
-
-        rem_vec <- c()
-        for (j in seq_along(st$removable_paths)) {
-          jp <- st$removable_paths[[j]]
-          if (!isTRUE(as.logical(test_s_df[test_s_df$Dependent == jp$dep, jp$pred]))) {
-            rem_vec <- c(rem_vec, paste0(jp$dep, " ~ ", jp$pred))
-          }
-        }
-        k_str <- make_key_local(test_s_df)
-        if (!k_str %in% names(st$candidates_map)) {
-          st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, paste(rem_vec, collapse = "; "))
-          evaluated <- TRUE   # only a real model fit consumes the tick; cached candidates are free
-        }
-        cand_score <- score_of(st$candidates_map[[k_str]])
-        last_cand_score <- cand_score
-        if (is.finite(cand_score) && cand_score < st$sw_best_score - 0.01) {
-          st$sw_best_score <- cand_score
-          st$sw_best_df <- test_s_df
-          st$sw_improved <- TRUE
-        } else if (is.finite(cand_score) && is.null(st$sw_tie_df) &&
-                   abs(cand_score - st$sw_start_score) <= 0.01) {
-          # Equal fit with one path fewer (typical for saturated structural parts, where removing a
-          # path just frees a covariance). Remembered so the search can walk across such plateaus.
-          st$sw_tie_df <- test_s_df
-        }
-      }
-
-      if (st$sw_idx > length(st$removable_paths)) {
-        # Sweep finished
-        if (st$sw_improved || !is.null(st$sw_tie_df)) {
-          # Prefer a strictly improving removal; otherwise accept the first equal-fit removal (parsimony)
-          st$curr_df <- if (st$sw_improved) st$sw_best_df else st$sw_tie_df
-          st$sw_best_score <- NULL   # start a fresh sweep from the adopted model on the next tick
-        } else {
-          step_advance <- st$max_steps + 1   # no improving removal left: search converged
-        }
-      }
-
-      curr_score_step <- if (is.finite(last_cand_score)) last_cand_score else
-        if (!is.null(st$sw_best_score) && is.finite(st$sw_best_score)) st$sw_best_score else st$base_score
-      st$scores_hist <- c(st$scores_hist, curr_score_step)
-      if (is.finite(curr_score_step) && curr_score_step < best_curr) {
-        best_curr <- curr_score_step
-      }
-      st$best_scores_hist <- c(st$best_scores_hist, best_curr)
-    } else if (st$eff_strategy == "exhaustive") {
-      chunk_size <- min(4L, st$max_steps - step)
-      for (ci in seq_len(chunk_size)) {
-        row_i <- step + ci
-        if (row_i > st$max_steps) break
-        state_vec <- as.logical(st$grid_matrix[row_i, ])
-        test_s_df <- st$struct_df
-        removed_paths_vec <- c()
-        for (idx in seq_along(st$removable_paths)) {
-          rp <- st$removable_paths[[idx]]
-          if (!state_vec[idx]) {
-            test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-            removed_paths_vec <- c(removed_paths_vec, paste0(rp$dep, " ~ ", rp$pred))
-          }
-        }
-        # Check variable isolation constraints
-        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) {
-          curr_score_step <- Inf
-        } else {
-          k_str <- make_key_local(test_s_df)
-          if (!k_str %in% names(st$candidates_map)) {
-            rem_label <- paste(removed_paths_vec, collapse = "; ")
-            st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
-          }
-          curr_score_step <- score_of(st$candidates_map[[k_str]])
-        }
-        st$scores_hist <- c(st$scores_hist, curr_score_step)
-        if (is.finite(curr_score_step) && curr_score_step < best_curr) {
-          best_curr <- curr_score_step
-        }
-        st$best_scores_hist <- c(st$best_scores_hist, best_curr)
-      }
-      step_advance <- chunk_size
-    } else if (st$eff_strategy == "sa") {
-      chunk_size <- min(4L, st$max_steps - step)
-      for (ci in seq_len(chunk_size)) {
-        flip_pos <- sample.int(st$M, 1)
-        cand_vec <- st$curr_vec
-        cand_vec[flip_pos] <- !cand_vec[flip_pos]
-        
-        test_s_df <- st$struct_df
-        rem_vec <- c()
-        for (idx in seq_along(st$removable_paths)) {
-          rp <- st$removable_paths[[idx]]
-          if (!cand_vec[idx]) {
-            test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-            rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
-          }
-        }
-        if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) {
-          c_score <- Inf
-        } else {
-          k_str <- make_key_local(test_s_df)
-          if (!k_str %in% names(st$candidates_map)) {
-            rem_label <- paste(rem_vec, collapse = "; ")
-            st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
-          }
-          c_score <- score_of(st$candidates_map[[k_str]])
-        }
-
-        if (is.finite(c_score)) {
-          curr_score_step <- c_score
-          curr_score <- score_of(st$candidates_map[[make_key_local(st$curr_df)]])
-
-          dE <- as.numeric(c_score - curr_score)
-          if (!is.na(dE) && !is.nan(dE)) {
-            eff_T <- max(st$T_val, 1e-6)
-            prob <- if (dE < 0) 1.0 else exp(-dE / eff_T)
-            if (!is.na(prob) && !is.nan(prob) && runif(1) < prob) {
-              st$curr_vec <- cand_vec
-              st$curr_df <- test_s_df
-            }
-          }
-        } else {
-          curr_score_step <- Inf
-        }
-        st$T_val <- max(st$T_val * st$sa_alpha, 1e-6)
-        st$scores_hist <- c(st$scores_hist, curr_score_step)
-        if (is.finite(curr_score_step) && curr_score_step < best_curr) {
-          best_curr <- curr_score_step
-        }
-        st$best_scores_hist <- c(st$best_scores_hist, best_curr)
-      }
-      step_advance <- chunk_size
-    } else if (st$eff_strategy == "regsem") {
-      # Regularized SEM (cv_regsem / regsem)
-      if (is.null(st$reg_params_mat)) {
-        pen_type <- st$regsem_type %||% "lasso"
-        n_lambda <- st$regsem_n_lambda %||% 30
-
-        # Resolve regsem functions dynamically so ShinyLive does not detect it as a startup dependency
-        regsem_loaded <- ensure_regsem_loaded()
-        reg_obj <- NULL
-        if (regsem_loaded) {
-          reg_obj <- tryCatch({
-            getExportedValue(regsem_pkg, "cv_regsem")(st$base_fit, type = pen_type, pars_pen = "regressions",
-                                                    n.lambda = n_lambda, jump = 0.04)
-          }, error = function(e) {
-            tryCatch({
-              getExportedValue(regsem_pkg, "regsem")(st$base_fit, type = pen_type, pars_pen = "regressions", lambda = 0.05)
-            }, error = function(e2) NULL)
-          })
-        }
-
-        params_mat <- NULL
-        if (!is.null(reg_obj)) {
-          if (!is.null(reg_obj$parameters)) {
-            params_mat <- reg_obj$parameters
-          } else if (!is.null(reg_obj$coefficients)) {
-            params_mat <- matrix(reg_obj$coefficients, nrow = 1, dimnames = list(NULL, names(reg_obj$coefficients)))
-          }
-        }
-
-        # Fallback if regsem is unavailable or failed: soft-threshold the STANDARDIZED regression
-        # coefficients so the result does not depend on variable scales. Clearly labelled as approximate.
-        # Column names follow regsem's "predictor -> dependent" convention.
-        if (is.null(params_mat)) {
-          note <- if (!regsem_loaded) {
-            "Regularized SEM engine (regsem) could not be loaded"
-          } else {
-            "regsem could not estimate this model (for example because of its missing-data setting)"
-          }
-          st$fallback_note <- paste0(note, "; results use an approximate soft-threshold path on standardized coefficients, NOT regsem.")
-          showNotification(st$fallback_note, type = "warning", duration = 10)
-          ss <- tryCatch(lavaan::standardizedSolution(st$base_fit), error = function(e) NULL)
-          if (!is.null(ss)) {
-            reg_ss <- ss[ss$op == "~", , drop = FALSE]
-            lambdas <- seq(0.01, 0.5, length.out = n_lambda)
-            params_mat <- matrix(0, nrow = n_lambda, ncol = nrow(reg_ss))
-            colnames(params_mat) <- paste0(reg_ss$rhs, " -> ", reg_ss$lhs)
-            for (li in seq_along(lambdas)) {
-              for (ci in seq_len(nrow(reg_ss))) {
-                b <- reg_ss$est.std[ci]
-                params_mat[li, ci] <- sign(b) * max(0, abs(b) - lambdas[li])
-              }
-            }
-          }
-        }
-
-        st$reg_params_mat <- params_mat
-        st$reg_n_steps <- if (!is.null(params_mat)) nrow(params_mat) else 1L
-        st$max_steps <- max(1L, st$reg_n_steps)
-      }
-
-      curr_lambda_idx <- step + 1L
-      curr_score_step <- Inf
-
-      if (!is.null(st$reg_params_mat) && curr_lambda_idx <= nrow(st$reg_params_mat)) {
-        p_row <- st$reg_params_mat[curr_lambda_idx, ]
-        p_names <- names(p_row)
-        test_s_df <- st$struct_df
-
-        for (rp in st$removable_paths) {
-          # Exact (not regex) match on regsem's "predictor -> dependent" parameter names
-          match_idx <- which(p_names == paste0(rp$pred, " -> ", rp$dep))
-          if (length(match_idx) > 0) {
-            val <- abs(p_row[match_idx[1]])
-            if (!is.na(val) && val < 1e-4) {
-              test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-            }
-          }
-        }
-
-        if (check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) {
-          k_str <- make_key_local(test_s_df)
-          if (!k_str %in% names(st$candidates_map)) {
-            rem_vec <- c()
-            for (rp in st$removable_paths) {
-              if (!isTRUE(as.logical(test_s_df[test_s_df$Dependent == rp$dep, rp$pred]))) {
-                rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
-              }
-            }
-            st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, paste(rem_vec, collapse = "; "))
-          }
-          curr_score_step <- score_of(st$candidates_map[[k_str]])
-        }
-      }
-
-      if (!is.finite(curr_score_step)) {
-        curr_score_step <- if (length(st$scores_hist) > 0) tail(st$scores_hist, 1) else st$base_score
-      }
-
-      st$scores_hist <- c(st$scores_hist, curr_score_step)
-      if (is.finite(curr_score_step) && curr_score_step < best_curr) {
-        best_curr <- curr_score_step
-      }
-      st$best_scores_hist <- c(st$best_scores_hist, best_curr)
-      step_advance <- 1L
-    }
-    
-    if (!isTRUE(isolate(opt_running()))) {
-      return()
-    }
-
-    opt_state(st)
-
-    cur_step_display <- min(step + step_advance, st$max_steps)
-    fmt_score <- function(x) if (is.finite(x)) sprintf("%.2f", x) else "-"
-    detail_msg <- if (is.finite(st$base_score)) {
-      sprintf(
-        "Step %d / %d | Current %s: %.2f | Best: %.2f (Δ %+.2f)",
-        cur_step_display, st$max_steps, st$criterion,
-        curr_score_step, best_curr, best_curr - st$base_score
-      )
-    } else {
-      sprintf("Step %d / %d | Current %s: %s | Best: %s",
-              cur_step_display, st$max_steps, st$criterion, fmt_score(curr_score_step), fmt_score(best_curr))
-    }
-
-    session$sendCustomMessage("update_optimization_live_chart", list(
-      step = cur_step_display,
-      maxIter = st$max_steps,
-      scores = st$scores_hist,
-      best_scores = st$best_scores_hist,
-      baseScore = st$base_score,
-      detail = detail_msg
-    ))
-
-    opt_step(step + step_advance)
+      opt_step(step + step_advance)
     }, error = function(e) {
+      # req()/validate()/cancelOutput() conditions all inherit from shiny.silent.error: re-raise them as flow control
       if (inherits(e, "shiny.silent.error")) stop(e)
       opt_running(FALSE)
-      removeModal()
+      # opt_state() still holds the state of the last successful tick: show what was found so far
+      st_saved <- isolate(opt_state())
+      shown <- FALSE
+      if (!is.null(st_saved) && length(st_saved$candidates_map) > 1) {
+        shown <- tryCatch({
+          finalize_prune_results(st_saved, current_step = isolate(opt_step()), stopped_early = TRUE)
+          TRUE
+        }, error = function(e2) FALSE)
+      }
+      if (!shown) {
+        opt_state(NULL)
+        removeModal()
+      }
       showNotification(
         paste0("Auto-Optimize stopped because of an unexpected error: ", conditionMessage(e),
-               ". Check the optimization settings (empty or invalid fields) and run it again."),
+               if (shown) ". The results found so far are shown. " else ". ",
+               "Re-run with different settings or model, or try another search strategy (e.g. Stepwise)."),
         type = "error", duration = 12)
     })
   })
