@@ -158,7 +158,7 @@
 .s2-model-row { display: flex; align-items: stretch; }
 .s2-model-row::before, .s2-model-row::after { display: none; }
 .s2-sticky-toolbar {
-  position: sticky; top: 0; z-index: 20;
+  position: sticky; top: 0; z-index: 1000; /* above Handsontable headers (z-index up to ~150) */
   background: #fff; padding: 6px 0; margin-bottom: 8px;
   border-bottom: 1px solid var(--s2-border);
 }
