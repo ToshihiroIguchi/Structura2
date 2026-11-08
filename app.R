@@ -5301,10 +5301,23 @@ server <- function(input, output, session) {
       # req()/validate()/cancelOutput() conditions all inherit from shiny.silent.error: re-raise them as flow control
       if (inherits(e, "shiny.silent.error")) stop(e)
       opt_running(FALSE)
-      removeModal()
+      # opt_state() still holds the state of the last successful tick: show what was found so far
+      st_saved <- isolate(opt_state())
+      shown <- FALSE
+      if (!is.null(st_saved) && length(st_saved$candidates_map) > 1) {
+        shown <- tryCatch({
+          finalize_prune_results(st_saved, current_step = isolate(opt_step()), stopped_early = TRUE)
+          TRUE
+        }, error = function(e2) FALSE)
+      }
+      if (!shown) {
+        opt_state(NULL)
+        removeModal()
+      }
       showNotification(
         paste0("Auto-Optimize stopped because of an unexpected error: ", conditionMessage(e),
-               ". Check the optimization settings (empty or invalid fields) and run it again."),
+               if (shown) ". The results found so far are shown. " else ". ",
+               "Re-run with different settings or model, or try another search strategy (e.g. Stepwise)."),
         type = "error", duration = 12)
     })
   })
