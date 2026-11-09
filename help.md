@@ -32,6 +32,7 @@
    - [Graphviz Layout Engines](#71-graphviz-layout-engines)
    - [Diagram Visual Conventions](#72-diagram-visual-conventions)
    - [Vector SVG & High-Resolution PNG Export](#73-vector-svg--high-resolution-png-export)
+   - [Predicted vs Observed Plots](#73b-predicted-vs-observed-plots)
    - [Browser-Rendered A4 PDF Analysis Report](#74-browser-rendered-a4-pdf-analysis-report)
    - [Results ZIP Download](#75-results-zip-download)
 8. [Troubleshooting & Common Lavaan Errors](#8-troubleshooting--common-lavaan-errors)
@@ -352,6 +353,17 @@ Buttons located immediately above the path diagram provide instant image downloa
   Exports clean vector graphics (`structura2_path_diagram.svg`). Can be scaled infinitely without pixelation, ideal for inclusion in LaTeX documents, Microsoft Word, Adobe Illustrator, or web pages.
 * **Save PNG**:
   Exports a crisp, double-resolution ($2\times$ scale, 300 DPI equivalent) bitmap (`structura2_path_diagram.png`) with a clean white background, ready for journal submissions and slide presentations.
+
+### 7.3b Predicted vs Observed Plots
+After a successful fit, the **Predicted vs Observed** button appears under the path diagram. It opens a dialog with one scatter plot per observed outcome variable (observed values on the horizontal axis, predicted values on the vertical axis). The dashed line is perfect agreement; the title shows the squared correlation $r^2$ between observed and predicted values and the number of rows used. Use it to spot systematic bias (curved patterns), outliers, or ranges where the model over- or under-predicts, which a single $R^2$ value cannot show.
+* **Direct predictors** (default):
+  Each outcome is predicted from its own predictors, using their observed values. The $r^2$ corresponds to the model $R^2$ (shown next to it).
+* **Exogenous variables only (reduced form)**:
+  Predictions follow the paths through the other outcomes, so they depend on the exogenous variables only. This shows the predictive power of the whole model and is lower than the direct $R^2$ for chains such as `x → m → y`. It is not available for models with a feedback loop (a note explains this).
+* **Latent predictors**:
+  A latent variable has no observed values, so its factor score is used. Such plots are marked `(factor scores)`. They are approximate and tend to look better than the real fit, because lavaan's factor scores are also computed from the outcome's own indicators.
+* **Notes**:
+  The plots always use the data of the fitted model (not later changes on the Data or Variables tabs). Rows with a missing value in the outcome or its predictors are left out of that plot (the title shows `n` of the total). The predictions are in-sample, not a test on new data. In standardized mode the axes are in standardized units.
 
 ### 7.4 Browser-Rendered A4 PDF Analysis Report
 Clicking the **PDF** button on the Model tab synthesizes your entire analysis session into a standardized A4 document:
