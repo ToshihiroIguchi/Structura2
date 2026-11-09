@@ -949,6 +949,18 @@ pred_obs_data <- function(fit, mode = c("direct", "reduced")) {
   })
 }
 
+# Title texts of one Predicted vs Observed plot. They are shown as HTML above the plot, NOT drawn inside the R
+# graphics device: the WebR device has no CJK font, so a variable name such as "結果" would turn into boxes there.
+# Returns list(main = "<variable> [(factor scores)]", sub = "r2 = ..., [model R2 = ...,] n = ...").
+pred_obs_title <- function(it, mode = "direct") {
+  r2_txt <- if (is.finite(it$r2_emp)) sprintf("r² = %.3f", it$r2_emp) else "r² = NA"
+  if (identical(mode, "direct") && is.finite(it$r2_model))
+    r2_txt <- paste0(r2_txt, sprintf(", model R² = %.3f", it$r2_model))
+  list(main = paste0(it$var, if (isTRUE(it$uses_factor_scores)) " (factor scores)" else ""),
+       sub  = sprintf("%s, n = %d%s", r2_txt, it$n,
+                      if (it$n < it$n_total) sprintf(" of %d", it$n_total) else ""))
+}
+
 # ---- Beginner-oriented diagnostics ----
 # Principle: block only what is mathematically impossible (errors); report "estimated but unreliable"
 # situations as warnings. Detection uses lavInspect() values and linear algebra, never lavaan warning text.
@@ -3541,7 +3553,7 @@ server <- function(input, output, session) {
                      selected = isolate(input$pred_obs_mode) %||% "direct", inline = TRUE),
         uiOutput("pred_obs_notes"),
         div(style = "max-height: 70vh; overflow-y: auto;",
-            plotOutput("pred_obs_plot", height = "auto")),
+            uiOutput("pred_obs_grid")),
         footer = modalButton("Close")
       ))
     }, error = function(e) {
@@ -3581,34 +3593,56 @@ server <- function(input, output, session) {
     list(ncols = ncols, nrows = max(1L, ceiling(n_items / ncols)))
   }
 
-  output$pred_obs_plot <- renderPlot({
-    res <- pred_obs_result()
-    items <- res$items
-    validate(need(length(items) > 0, "Nothing to plot. See the notes above."))
-    lay <- pred_obs_layout(length(items))
-    op <- graphics::par(mfrow = c(lay$nrows, lay$ncols), mar = c(4.2, 4.2, 3, 1), mgp = c(2.4, 0.8, 0))
-    on.exit(graphics::par(op), add = TRUE)
-    suffix <- if (isTRUE(res$std)) " (standardized)" else ""
-    for (it in items) {
-      lim <- range(c(it$obs, it$pred), finite = TRUE)
-      graphics::plot(it$obs, it$pred, xlim = lim, ylim = lim, pch = 16,
-                     col = grDevices::adjustcolor("#2563eb", 0.5), asp = 1,
-                     xlab = paste0("Observed", suffix), ylab = paste0("Predicted", suffix),
-                     main = "", las = 1)
-      graphics::abline(0, 1, lty = 2, col = "#64748b")
-      r2_txt <- if (is.finite(it$r2_emp)) sprintf("r² = %.3f", it$r2_emp) else "r² = NA"
-      if (identical(input$pred_obs_mode %||% "direct", "direct") && is.finite(it$r2_model))
-        r2_txt <- paste0(r2_txt, sprintf(", model R² = %.3f", it$r2_model))
-      title_txt <- paste0(it$var, if (isTRUE(it$uses_factor_scores)) " (factor scores)" else "")
-      graphics::mtext(title_txt, side = 3, line = 1.6, font = 2, cex = 0.95)
-      graphics::mtext(sprintf("%s, n = %d%s", r2_txt, it$n,
-                              if (it$n < it$n_total) sprintf(" of %d", it$n_total) else ""),
-                      side = 3, line = 0.4, cex = 0.8)
-    }
-  }, height = function() {
-    n_items <- tryCatch(length(pred_obs_result()$items), error = function(e) 0L)
-    lay <- pred_obs_layout(max(1L, n_items))
-    lay$nrows * 340L
+  # One cell per outcome variable. The title (variable name, r2, n) is plain HTML so that the browser fonts draw
+  # it; the R plot itself contains only numbers and ASCII axis labels, because the WebR graphics device has no CJK
+  # font (a variable name such as "結果" would be drawn as boxes there). The plot outputs are registered here, one
+  # per item, and are replaced whenever the grid is rebuilt (e.g. after switching the prediction mode).
+  output$pred_obs_grid <- renderUI({
+    tryCatch({
+      res <- pred_obs_result()
+      items <- res$items
+      if (!length(items))
+        return(p(style = "color: #666; font-style: italic;", "Nothing to plot. See the notes above."))
+      mode <- input$pred_obs_mode %||% "direct"
+      lay <- pred_obs_layout(length(items))
+      cells <- lapply(seq_along(items), function(i) {
+        ii <- i
+        out_id <- paste0("pred_obs_plot_", ii)
+        output[[out_id]] <- renderPlot({
+          tryCatch({
+            cur <- pred_obs_result()
+            it <- cur$items[[ii]]
+            if (is.null(it)) return(invisible(NULL))
+            suffix <- if (isTRUE(cur$std)) " (standardized)" else ""
+            # Square plotting region with identical limits on both axes: the dashed line is a true 45 degree line
+            op <- graphics::par(pty = "s", mar = c(4.2, 4.2, 0.8, 0.8), mgp = c(2.4, 0.8, 0))
+            on.exit(graphics::par(op), add = TRUE)
+            lim <- range(c(it$obs, it$pred), finite = TRUE)
+            if (!all(is.finite(lim))) lim <- c(-1, 1)
+            if (lim[1] == lim[2]) lim <- lim[1] + c(-1, 1)
+            graphics::plot(it$obs, it$pred, xlim = lim, ylim = lim, pch = 16,
+                           col = grDevices::adjustcolor("#2563eb", 0.5),
+                           xlab = paste0("Observed", suffix), ylab = paste0("Predicted", suffix),
+                           main = "", las = 1)
+            graphics::abline(0, 1, lty = 2, col = "#64748b")
+          }, error = function(e) {
+            graphics::par(mar = c(0, 0, 0, 0)); graphics::plot.new()
+            graphics::text(0.5, 0.5, "This plot could not be drawn.", col = "#b91c1c")
+          })
+        })
+        ttl <- pred_obs_title(items[[ii]], mode)
+        div(style = "min-width: 0;",
+            div(style = "font-weight: 600; text-align: center;", ttl$main),
+            div(style = "color: #475569; font-size: 12px; text-align: center;", ttl$sub),
+            plotOutput(out_id, height = "300px"))
+      })
+      div(style = paste0("display: grid; gap: 12px; grid-template-columns: repeat(", lay$ncols, ", minmax(0, 1fr));",
+                         if (lay$ncols == 1L) " max-width: 440px; margin: 0 auto;" else ""),
+          cells)
+    }, error = function(e) {
+      div(class = "alert alert-danger",
+          paste("The plots could not be drawn:", conditionMessage(e), "Run the model again and retry."))
+    })
   })
 
   # ----------------- Export PDF Analysis Report ------------------
