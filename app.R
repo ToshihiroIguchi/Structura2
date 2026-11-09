@@ -989,6 +989,26 @@ optimization_baseline <- function(model) {
   list(usable = FALSE, fit = NULL, identified = FALSE, msg = model$msg_friendly %||% "")
 }
 
+# TRUE when lavaan needs meanstructure = TRUE (raw analysis, or FIML-type missing-data handling).
+# Single definition shared by the main fit, the MI helper fit and Auto-Optimize.
+needs_meanstructure_for <- function(analysis_mode, missing_method) {
+  isTRUE(identical(analysis_mode, "raw") ||
+           missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
+}
+
+# Why a fitted result no longer describes the current inputs: character(0) when it still does.
+# "structure" = lavaan syntax changed, "data" = processed data changed (row filter, transforms, standardization,
+# another file), "settings" = missing-data handling changed. `model` is a fit_model_safe() result whose $ctx
+# holds the data and settings that were in force when it was fitted.
+fit_stale_reasons <- function(model, syntax, data, missing_method) {
+  if (is.null(model) || is.null(model$syntax) || is.null(model$ctx)) return("structure")
+  r <- character(0)
+  if (!identical(model$syntax, syntax)) r <- c(r, "structure")
+  if (!identical(model$ctx$data, data)) r <- c(r, "data")
+  if (!identical(model$ctx$missing_method, missing_method)) r <- c(r, "settings")
+  r
+}
+
 # Checks run BEFORE estimation. Returns a character vector of blocking messages (empty = OK) with an
 # attribute `kind`: "data" (missing variable, too few rows, linear dependency: nothing can be estimated) or
 # "identification" (df < 0: estimable, and Auto-Optimize can search for an identified submodel).
@@ -2922,17 +2942,17 @@ server <- function(input, output, session) {
     # Modification indices of an unidentified fit are not meaningful
     if (isFALSE(model_res$identified)) return(NULL)
     items <- tryCatch(model_items(), error = function(e) character(0))
-    df <- tryCatch(processed_data(), error = function(e) NULL)
+    # Data and settings come from the fit itself, never from the current inputs
+    ctx <- model_res$ctx
+    df <- ctx$data
     if (is.null(df)) return(model_res$fit)
     fitted_ov <- lavaan::lavNames(model_res$fit, "ov")
     unused <- setdiff(items, fitted_ov)
     unused <- unused[unused %in% names(df)]
     unused <- unused[vapply(unused, function(v) is.numeric(df[[v]]), logical(1))]
     if (!length(unused) || !length(fitted_ov)) return(model_res$fit)
-    needs_meanstructure <- (isolate(input$analysis_mode) == "raw" ||
-                            isolate(input$missing_method) %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
-    ctx <- list(data = df, missing_method = isolate(input$missing_method),
-                needs_meanstructure = needs_meanstructure)
+    ctx <- list(data = df, missing_method = ctx$missing_method,
+                needs_meanstructure = ctx$needs_meanstructure)
     endo_ov <- lavaan::lavNames(model_res$fit, "ov.y")
     anchor_var <- if (length(endo_ov)) endo_ov[1] else fitted_ov[1]
     aug <- tryCatch(fit_suggestion_model(model_res$syntax, unused, anchor_var, ctx), error = function(e) NULL)
@@ -2972,14 +2992,16 @@ server <- function(input, output, session) {
   output$suggestion_status_ui <- renderUI({
     if (!isTRUE(input$show_suggested_paths)) return(NULL)
     model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
-    current <- tryCatch(lavaan_model_str(), error = function(e) NULL)
     if (is.null(model_res) || !isTRUE(model_res$ok) || is.null(model_res$syntax)) {
       return(div(class = "alert alert-info", style = "font-size: 12px; padding: 6px 10px; margin-bottom: 8px;",
                  "Suggestions appear after the model has been fitted successfully (Run)."))
     }
-    if (!identical(model_res$syntax, current)) {
+    stale <- fit_staleness()
+    if (length(stale) > 0) {
+      what <- if ("structure" %in% stale) "The structure has changed"
+              else "The data or analysis settings have changed"
       return(div(class = "alert alert-warning", style = "font-size: 12px; padding: 6px 10px; margin-bottom: 8px;",
-                 "The structure has changed since the last fit. Highlighted suggestions are from the previous fit; ",
+                 what, " since the last fit. Highlighted suggestions are from the previous fit; ",
                  "click ", tags$b("Run"), " to refresh them."))
     }
     NULL
@@ -3117,7 +3139,8 @@ server <- function(input, output, session) {
 
   # ---------- lavaan syntax --------------------------------------
 
-  lavaan_model_str <- reactive({
+  # The three syntax parts (measurement, structural, manual equations); Auto-Optimize needs them separately
+  model_parts <- reactive({
     req(input$input_table, struct_table_data())
     meas <- hot_to_r(input$input_table)
     mlines <- build_meas_lines(meas)
@@ -3127,7 +3150,12 @@ server <- function(input, output, session) {
     extra <- strsplit(input$extra_eq, "\\n")[[1]]
     extra <- trimws(extra)
     extra <- extra[nzchar(extra)]
-    unlist(c(mlines, slines, extra))
+    list(meas = mlines, struct = slines, extra = extra)
+  })
+
+  lavaan_model_str <- reactive({
+    p <- model_parts()
+    unlist(c(p$meas, p$struct, p$extra))
   })
 
   output$lavaan_model <- renderText({
@@ -3180,11 +3208,11 @@ server <- function(input, output, session) {
     }
     tryCatch({
       # Use meanstructure = TRUE if FIML is selected to prevent lavaan error
-      needs_meanstructure <- (input$analysis_mode == "raw" || 
-                              input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
+      needs_meanstructure <- needs_meanstructure_for(input$analysis_mode, input$missing_method)
 
       snapshot_error <- NULL
       df_fit <- processed_data()
+      parts_fit <- isolate(model_parts())
       syntax_chr <- paste(ln, collapse = "\n")
 
       # Impossible situations are reported before estimation, naming the variables involved.
@@ -3258,6 +3286,14 @@ server <- function(input, output, session) {
            # Data and model spec as they were at fit time: autosave, ZIP and PDF describe this fit,
            # not whatever the inputs say when the export button is pressed
            fit_data = df_fit,
+           # Everything that was in force at fit time. Auto-Optimize and the MI helper fit read ONLY this,
+           # so they can never mix an old baseline fit with the current inputs (see fit_stale_reasons()).
+           ctx = list(data = df_fit,
+                      missing_method = input$missing_method,
+                      needs_meanstructure = needs_meanstructure,
+                      analysis_mode = input$analysis_mode,
+                      meas_lines = parts_fit$meas,
+                      extra_lines = parts_fit$extra),
            snapshot = if (converged) tryCatch(make_model_spec(df_fit), error = function(e) {
              snapshot_error <<- conditionMessage(e)
              NULL
@@ -4327,7 +4363,22 @@ server <- function(input, output, session) {
   })
 
   # ----------------- Auto-Optimize Model Server Observers ---------------
+  # Single source of truth for "the last fit no longer describes the current inputs" (see fit_stale_reasons()).
+  # Used by the Optimize button, the suggestion status banner and the Optimize handlers.
+  fit_staleness <- reactive({
+    model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
+    current_syntax <- tryCatch(lavaan_model_str(), error = function(e) NULL)
+    current_data <- tryCatch(processed_data(), error = function(e) NULL)
+    if (is.null(model_res) || is.null(current_syntax) || is.null(current_data)) return("structure")
+    fit_stale_reasons(model_res, current_syntax, current_data, input$missing_method)
+  })
+
   prune_lock_table_data <- reactiveVal(NULL)
+  # Every opening of the Step 1 dialog gets its own lock-table input/output id (prune_lock_table_<n>). The browser
+  # keeps the last value of an input after its dialog closes and re-sends it when the dialog is opened again, so a
+  # fixed id would let a stale table (old locks, columns that no longer exist) overwrite the freshly built one.
+  prune_lock_open_id <- reactiveVal(0L)
+  prune_lock_table_id <- function(n = prune_lock_open_id()) paste0("prune_lock_table_", n)
   prune_results <- reactiveVal(NULL)
   applied_prune_info <- reactiveVal(NULL)   # candidate applied to the UI + the syntax it should produce (PDF history)
   selected_prune_cand <- reactiveVal(NULL)
@@ -4338,12 +4389,12 @@ server <- function(input, output, session) {
     has_active_path <- has_active_struct_path(struct_table_data())
 
     model_res <- fit_model_safe()
-    current_syntax <- lavaan_model_str()
-    # A model that only fails identification (df < 0) can still be optimized: removing paths may fix it
+    # A model that only fails identification (df < 0) can still be optimized: removing paths may fix it.
+    # The fit must also still match the current syntax, data and settings (otherwise the baseline would be
+    # compared with candidates estimated on different data).
     is_model_ready <- !is.null(model_res) &&
                       isTRUE(optimization_baseline(model_res)$usable) &&
-                      !is.null(model_res$syntax) &&
-                      identical(model_res$syntax, current_syntax)
+                      length(fit_staleness()) == 0
     
     if (has_active_path && is_model_ready) {
       shinyjs::show("prune_model_btn")
@@ -4361,6 +4412,22 @@ server <- function(input, output, session) {
     df <- tryCatch(processed_data(), error = function(e) NULL)
     shinyjs::toggle("saved_models_btn", condition = is.data.frame(df) && ncol(df) > 0)
   })
+
+  # Safety net for the Optimize handlers (the button is already hidden while the fit is stale, but the visibility
+  # toggle is asynchronous). Shows a warning and returns FALSE when the last fit no longer matches the inputs.
+  warn_if_fit_stale <- function() {
+    stale <- isolate(fit_staleness())
+    if (length(stale) == 0) return(TRUE)
+    showModal(modalDialog(
+      title = "Auto-Optimize Warning",
+      div(class = "alert alert-warning",
+          "The model, data or analysis settings have changed since the last Run, so the baseline no longer ",
+          "matches. Click Run to refit the current model, then start Optimize again."),
+      easyClose = TRUE,
+      footer = modalButton("Dismiss")
+    ))
+    FALSE
+  }
 
   # Trigger Auto-Optimize Step 1 Modal
   observeEvent(input$prune_model_btn, {
@@ -4389,6 +4456,7 @@ server <- function(input, output, session) {
       ))
       return()
     }
+    if (!warn_if_fit_stale()) return()
     base_unidentified_info <- if (!isTRUE(base_info$identified)) {
       base_df <- fit_identification(base_info$fit)$df
       div(style = "background-color: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 10px 14px; margin-bottom: 15px; font-size: 13px; color: #1e3a8a;",
@@ -4436,6 +4504,9 @@ server <- function(input, output, session) {
       }
     }
     prune_lock_table_data(lock_df)
+    lock_id <- prune_lock_table_id(isolate(prune_lock_open_id()) + 1L)
+    output[[lock_id]] <- render_prune_lock_table()
+    prune_lock_open_id(isolate(prune_lock_open_id()) + 1L)
 
     active_preds <- active_pred_cols
 
@@ -4473,7 +4544,7 @@ server <- function(input, output, session) {
         p("Select structural paths to lock (protect from pruning).", style = "font-size: 13px; color: #334155; margin-bottom: 4px;"),
         p("Highlighted cells represent active paths in your current model. Unchecked active paths will be evaluated for optimization.",
           style = "font-size: 12px; color: #64748b;"),
-        rHandsontableOutput("prune_lock_table"),
+        rHandsontableOutput(lock_id),
         tags$hr(),
         fluidRow(
           column(width = 6,
@@ -4536,7 +4607,7 @@ server <- function(input, output, session) {
   })
 
   # Render Lock Table in Modal 1
-  output$prune_lock_table <- renderRHandsontable({
+  render_prune_lock_table <- function() renderRHandsontable({
     lock_df <- prune_lock_table_data(); req(lock_df)
     struct_df <- struct_table_data(); req(struct_df)
     
@@ -4593,8 +4664,9 @@ server <- function(input, output, session) {
     rh
   })
 
-  observeEvent(input$prune_lock_table, {
-    tbl <- hot_to_r(input$prune_lock_table); req(tbl)
+  # Only the table of the current opening is read (see prune_lock_open_id)
+  observeEvent(input[[prune_lock_table_id()]], {
+    tbl <- hot_to_r(input[[prune_lock_table_id()]]); req(tbl)
     prune_lock_table_data(tbl)
   })
 
@@ -4843,6 +4915,7 @@ server <- function(input, output, session) {
       ))
       return()
     }
+    if (!warn_if_fit_stale()) return()
     base_fit <- base_info$fit
     base_identified <- isTRUE(base_info$identified)
     if (!base_identified && identical(strategy, "regsem")) {
@@ -4945,13 +5018,9 @@ server <- function(input, output, session) {
     }
     base_score <- as.numeric(base_ms[criterion_field(criterion)])
 
-    meas_syntax <- hot_to_r(input$input_table)
-    mlines <- build_meas_lines(meas_syntax)
-
-    extra <- strsplit(input$extra_eq, "\\n")[[1]]
-    extra <- trimws(extra); extra <- extra[nzchar(extra)]
-    needs_meanstructure <- (input$analysis_mode == "raw" || 
-                            input$missing_method %in% c("ml", "ml.x", "two.stage", "robust.two.stage"))
+    # Data, settings and measurement/manual-equation lines are those of the baseline fit (fit_staleness() has
+    # just confirmed they match the current inputs), so baseline and candidates are always estimated alike.
+    fit_ctx <- base_model$ctx
 
     tryCatch({
       # Display Progress Modal with live HTML5 Canvas Chart
@@ -5004,11 +5073,12 @@ server <- function(input, output, session) {
       # base_edges) and are removed from the model when the candidate is applied.
       droppable_vars <- droppable_struct_vars(struct_df, base_fit)
       ctx <- list(
-        data = processed_data(),
-        missing_method = input$missing_method,
-        needs_meanstructure = needs_meanstructure,
-        meas_lines = mlines,
-        extra_lines = extra,
+        data = fit_ctx$data,
+        missing_method = fit_ctx$missing_method,
+        needs_meanstructure = fit_ctx$needs_meanstructure,
+        analysis_mode = fit_ctx$analysis_mode,
+        meas_lines = fit_ctx$meas_lines,
+        extra_lines = fit_ctx$extra_lines,
         droppable_vars = droppable_vars,
         base_edges = struct_edges(struct_df),
         required_vars = setdiff(required_struct_vars(struct_df, base_fit), droppable_vars),
@@ -5709,8 +5779,10 @@ server <- function(input, output, session) {
       selected_prune_cand(cand)   # cache so Apply and re-selection reuse it
       return()
     }
-    
-    std_for_plot <- if (input$analysis_mode == "std") TRUE else input$diagram_std
+
+    # The candidates were estimated with the analysis mode of the baseline fit, not necessarily the current input
+    fit_mode <- isolate(prune_results())$ctx$analysis_mode %||% input$analysis_mode
+    std_for_plot <- if (identical(fit_mode, "std")) TRUE else input$diagram_std
     parts <- strsplit(input$layout_style, "_", fixed = TRUE)[[1]]
     eng   <- parts[1]
     rank  <- ifelse(length(parts) == 2, parts[2], "LR")
