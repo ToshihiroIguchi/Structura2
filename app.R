@@ -831,6 +831,124 @@ run_lavaan_sem <- function(syntax_str, data, missing_method, needs_meanstructure
               ...)
 }
 
+# ---- Predicted vs Observed helper -------------------------------------------
+# Predictions are computed from the regression coefficients (op "~") rather than lavPredict(type = "ov"/"yhat"):
+# for an observed-only path model lavaan represents every observed variable through internal phantom latent
+# variables, so lavPredict would simply reproduce the observed values. lavPredict(type = "lv") is used only to get
+# factor scores for latent predictors, which have no observed values.
+#  mode "direct":  y_hat = a + sum(b * predictor), each predictor taken as observed (or its factor score).
+#  mode "reduced": endogenous predictors are replaced by their own predictions, so y_hat depends on the
+#                  exogenous variables only (reduced form). Models with feedback loops cannot be evaluated this way.
+# The data are taken from the fitted object (lavInspect "data"), so they always match the estimation, even if
+# the data tab or the analysis settings were changed after Run. Rows with a missing value in the target or in any
+# variable needed for the prediction are dropped from that plot.
+# Returns list(items = list(<one entry per observed endogenous variable>), notes = character()).
+pred_obs_data <- function(fit, mode = c("direct", "reduced")) {
+  mode  <- match.arg(mode)
+  notes <- character(0)
+  empty <- function(msg) list(items = list(), notes = c(notes, msg))
+  tryCatch({
+    dat <- lavaan::lavInspect(fit, "data")
+    if (is.list(dat) && !is.matrix(dat))
+      return(empty("Multiple-group models are not supported by this plot."))
+    dat <- as.matrix(dat)
+    if (is.null(colnames(dat)) || nrow(dat) == 0)
+      return(empty("No data are available in the fitted model."))
+    pe <- lavaan::parameterEstimates(fit, standardized = FALSE, remove.def = FALSE)
+    reg <- pe[pe$op == "~", c("lhs", "rhs", "est"), drop = FALSE]
+    reg <- reg[is.finite(reg$est), , drop = FALSE]
+    ov <- colnames(dat)
+    lv <- lavaan::lavNames(fit, "lv")
+    targets <- intersect(unique(reg$lhs), ov)
+    if (!length(targets))
+      return(empty("The model has no observed outcome variable with a regression path."))
+    has_ms <- isTRUE(lavaan::lavInspect(fit, "options")$meanstructure)
+    # Without a mean structure there are no intercepts: work on centered columns and add the mean back at the end
+    col_mean <- colMeans(dat, na.rm = TRUE)
+    if (!has_ms) dat <- sweep(dat, 2, col_mean, "-")
+    intercepts <- pe[pe$op == "~1", c("lhs", "est"), drop = FALSE]
+    get_int <- function(v) {
+      if (!has_ms) return(0)
+      i <- intercepts$est[intercepts$lhs == v]
+      if (length(i) && is.finite(i[1])) i[1] else 0
+    }
+    # Factor scores are only computed when a latent variable is used as a predictor
+    needs_lv <- any(reg$rhs %in% lv) || any(reg$lhs %in% lv)
+    scores <- NULL
+    if (needs_lv && length(lv)) {
+      scores <- tryCatch(as.matrix(lavaan::lavPredict(fit, type = "lv")), error = function(e) NULL)
+      if (is.null(scores) || nrow(scores) != nrow(dat)) {
+        scores <- NULL
+        notes <- c(notes, "Factor scores could not be computed, so outcomes that depend on latent variables are not shown.")
+      }
+    }
+    leaf_value <- function(v) {
+      if (v %in% ov) return(dat[, v])
+      if (!is.null(scores) && v %in% colnames(scores)) return(scores[, v])
+      stop("no values for ", v)
+    }
+    # Value of v for every row; also reports the leaf variables it was built from
+    memo <- new.env(parent = emptyenv())
+    value_of <- function(v, stack = character(0), as_leaf = FALSE) {
+      is_endo <- v %in% reg$lhs
+      if (as_leaf || !is_endo) return(list(val = leaf_value(v), leaves = v))
+      if (v %in% stack) stop("loop")
+      if (exists(v, envir = memo, inherits = FALSE)) return(get(v, envir = memo, inherits = FALSE))
+      rr <- reg[reg$lhs == v, , drop = FALSE]
+      val <- rep(get_int(v), nrow(dat))
+      leaves <- character(0)
+      for (k in seq_len(nrow(rr))) {
+        sub <- value_of(rr$rhs[k], c(stack, v))
+        val <- val + rr$est[k] * sub$val
+        leaves <- union(leaves, sub$leaves)
+      }
+      out <- list(val = val, leaves = leaves)
+      assign(v, out, envir = memo)
+      out
+    }
+    r2_model <- tryCatch(lavaan::lavInspect(fit, "r2"), error = function(e) NULL)
+    items <- list()
+    for (y in targets) {
+      res <- tryCatch({
+        rr <- reg[reg$lhs == y, , drop = FALSE]
+        if (mode == "direct") {
+          val <- rep(get_int(y), nrow(dat))
+          for (k in seq_len(nrow(rr))) val <- val + rr$est[k] * value_of(rr$rhs[k], as_leaf = TRUE)$val
+          leaves <- rr$rhs
+        } else {
+          sub <- value_of(y)
+          val <- sub$val
+          leaves <- sub$leaves
+        }
+        list(ok = TRUE, val = val, leaves = leaves)
+      }, error = function(e) {
+        if (identical(conditionMessage(e), "loop"))
+          list(ok = FALSE, msg = paste0(y, ": the reduced form cannot be evaluated because the model contains a feedback loop (use Direct predictors)."))
+        else
+          list(ok = FALSE, msg = paste0(y, ": not shown (", conditionMessage(e), ")."))
+      })
+      if (!isTRUE(res$ok)) { notes <- c(notes, res$msg); next }
+      pred <- res$val
+      obs  <- dat[, y]
+      if (!has_ms) pred <- pred + col_mean[[y]]
+      if (!has_ms) obs <- obs + col_mean[[y]]
+      keep <- is.finite(obs) & is.finite(pred)
+      n <- sum(keep)
+      if (n < 3) { notes <- c(notes, paste0(y, ": fewer than 3 complete rows, not shown.")); next }
+      r2e <- suppressWarnings(stats::cor(obs[keep], pred[keep])^2)
+      if (!is.finite(r2e)) r2e <- NA_real_
+      r2m <- if (!is.null(r2_model) && y %in% names(r2_model)) unname(r2_model[[y]]) else NA_real_
+      items[[y]] <- list(var = y, obs = obs[keep], pred = pred[keep], n = n, n_total = nrow(dat),
+                         r2_emp = r2e, r2_model = r2m,
+                         uses_factor_scores = any(res$leaves %in% lv))
+    }
+    if (!length(items) && !length(notes)) notes <- "No predicted-vs-observed plot could be built for this model."
+    list(items = items, notes = notes)
+  }, error = function(e) {
+    list(items = list(), notes = c(notes, paste("Predicted values could not be computed:", conditionMessage(e))))
+  })
+}
+
 # ---- Beginner-oriented diagnostics ----
 # Principle: block only what is mathematically impossible (errors); report "estimated but unreliable"
 # situations as warnings. Detection uses lavInspect() values and linear algebra, never lavaan warning text.
@@ -2180,7 +2298,14 @@ ui <- fluidPage(
                       div(class = "s2-diagram-box",
                           tags$div(id = "sem_plot_container", 
                                    style = "width:100%; height:100%; display: flex; align-items: center; justify-content: center; color: #666;",
-                                   "Define a model to view the path diagram."))
+                                   "Define a model to view the path diagram.")),
+                      # Opens the Predicted vs Observed dialog; shown only after a successful fit (see the visibility observer)
+                      shinyjs::hidden(
+                        div(id = "pred_obs_btn_box", style = "margin-top: 6px;",
+                            actionButton("pred_obs_btn", "Predicted vs Observed",
+                                         class = "btn btn-default btn-xs",
+                                         title = "Scatter plots of predicted vs observed values for each observed outcome variable"))
+                      )
                  )
                )
              )),
@@ -3389,6 +3514,103 @@ server <- function(input, output, session) {
     ))
   })
 
+  # ---- Predicted vs Observed ----------------------------------------------
+  # Dialog opened from the button under the path diagram. The data always come from the fitted object, so the plot
+  # matches the model shown even if settings were changed after Run (see pred_obs_data()).
+  pred_obs_result <- reactive({
+    model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
+    if (is.null(model_res) || !isTRUE(model_res$ok) || is.null(model_res$fit))
+      return(list(items = list(), notes = "Run and fit a model first.", identified = TRUE, std = FALSE))
+    mode <- input$pred_obs_mode %||% "direct"
+    if (!mode %in% c("direct", "reduced")) mode <- "direct"
+    res <- pred_obs_data(model_res$fit, mode)
+    res$identified <- !isFALSE(model_res$identified)
+    res$std <- identical(model_res$snapshot$settings$analysis_mode %||% input$analysis_mode, "std")
+    res
+  })
+
+  observeEvent(input$pred_obs_btn, {
+    tryCatch({
+      showModal(modalDialog(
+        title = "Predicted vs Observed",
+        size = "l",
+        easyClose = TRUE,
+        radioButtons("pred_obs_mode", "Prediction:",
+                     choices = c("Direct predictors" = "direct",
+                                 "Exogenous variables only (reduced form)" = "reduced"),
+                     selected = isolate(input$pred_obs_mode) %||% "direct", inline = TRUE),
+        uiOutput("pred_obs_notes"),
+        div(style = "max-height: 70vh; overflow-y: auto;",
+            plotOutput("pred_obs_plot", height = "auto")),
+        footer = modalButton("Close")
+      ))
+    }, error = function(e) {
+      showNotification(paste("Could not open the plot:", conditionMessage(e)), type = "error")
+    })
+  })
+
+  output$pred_obs_notes <- renderUI({
+    tryCatch({
+      res <- pred_obs_result()
+      mode <- input$pred_obs_mode %||% "direct"
+      intro <- if (identical(mode, "reduced"))
+        "Reduced form: each outcome is predicted from the exogenous variables only, following the paths through the other outcomes. This shows the predictive power of the whole model, so it differs from the R-squared of the model."
+      else
+        "Direct predictors: each outcome is predicted from its own predictors, using their observed values. This corresponds to the R-squared of the model."
+      any_fs <- any(vapply(res$items, function(it) isTRUE(it$uses_factor_scores), logical(1)))
+      tagList(
+        p(style = "color: #475569; font-size: 13px;", intro),
+        p(style = "color: #475569; font-size: 13px;",
+          "The dashed line is perfect agreement (predicted = observed). Predictions are in-sample (the data used to fit the model).",
+          if (isTRUE(res$std)) " Values are standardized." else NULL),
+        if (!isTRUE(res$identified))
+          div(class = "alert alert-warning", "The model is not identified, so these predictions are for inspection only."),
+        if (any_fs)
+          div(class = "alert alert-info",
+              "Plots marked (factor scores) use factor scores for latent predictors. They are approximate and tend to look better than the real fit, because lavaan's factor scores also use the outcome itself."),
+        if (length(res$notes))
+          div(class = "alert alert-warning", lapply(res$notes, function(x) div(x)))
+      )
+    }, error = function(e) {
+      div(class = "alert alert-danger", paste("Could not prepare the plot notes:", conditionMessage(e)))
+    })
+  })
+
+  pred_obs_layout <- function(n_items) {
+    ncols <- if (n_items <= 1) 1L else if (n_items <= 4) 2L else 3L
+    list(ncols = ncols, nrows = max(1L, ceiling(n_items / ncols)))
+  }
+
+  output$pred_obs_plot <- renderPlot({
+    res <- pred_obs_result()
+    items <- res$items
+    validate(need(length(items) > 0, "Nothing to plot. See the notes above."))
+    lay <- pred_obs_layout(length(items))
+    op <- graphics::par(mfrow = c(lay$nrows, lay$ncols), mar = c(4.2, 4.2, 3, 1), mgp = c(2.4, 0.8, 0))
+    on.exit(graphics::par(op), add = TRUE)
+    suffix <- if (isTRUE(res$std)) " (standardized)" else ""
+    for (it in items) {
+      lim <- range(c(it$obs, it$pred), finite = TRUE)
+      graphics::plot(it$obs, it$pred, xlim = lim, ylim = lim, pch = 16,
+                     col = grDevices::adjustcolor("#2563eb", 0.5), asp = 1,
+                     xlab = paste0("Observed", suffix), ylab = paste0("Predicted", suffix),
+                     main = "", las = 1)
+      graphics::abline(0, 1, lty = 2, col = "#64748b")
+      r2_txt <- if (is.finite(it$r2_emp)) sprintf("r² = %.3f", it$r2_emp) else "r² = NA"
+      if (identical(input$pred_obs_mode %||% "direct", "direct") && is.finite(it$r2_model))
+        r2_txt <- paste0(r2_txt, sprintf(", model R² = %.3f", it$r2_model))
+      title_txt <- paste0(it$var, if (isTRUE(it$uses_factor_scores)) " (factor scores)" else "")
+      graphics::mtext(title_txt, side = 3, line = 1.6, font = 2, cex = 0.95)
+      graphics::mtext(sprintf("%s, n = %d%s", r2_txt, it$n,
+                              if (it$n < it$n_total) sprintf(" of %d", it$n_total) else ""),
+                      side = 3, line = 0.4, cex = 0.8)
+    }
+  }, height = function() {
+    n_items <- tryCatch(length(pred_obs_result()$items), error = function(e) 0L)
+    lay <- pred_obs_layout(max(1L, n_items))
+    lay$nrows * 340L
+  })
+
   # ----------------- Export PDF Analysis Report ------------------
   observeEvent(input$export_pdf_btn, {
     model_res <- fit_model_safe()
@@ -4101,6 +4323,7 @@ server <- function(input, output, session) {
     model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
     shinyjs::toggle("export_pdf_btn", condition = !is.null(model_res) && isTRUE(model_res$ok) && !is.null(model_res$fit))
     shinyjs::toggle("export_zip_btn", condition = !is.null(model_res) && isTRUE(model_res$ok) && !is.null(model_res$fit))
+    shinyjs::toggle("pred_obs_btn_box", condition = !is.null(model_res) && isTRUE(model_res$ok) && !is.null(model_res$fit))
     df <- tryCatch(processed_data(), error = function(e) NULL)
     shinyjs::toggle("saved_models_btn", condition = is.data.frame(df) && ncol(df) > 0)
   })
