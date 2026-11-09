@@ -2,7 +2,7 @@
 # Run: Rscript tests/test_pred_obs.R   (from the project root)
 suppressMessages(library(lavaan))
 exprs <- parse("app.R")
-wanted <- c("pred_obs_data", "run_lavaan_sem", "%||%")
+wanted <- c("pred_obs_data", "pred_obs_title", "run_lavaan_sem", "%||%")
 for (e in exprs) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && as.character(e[[2]]) %in% wanted) eval(e)
 }
@@ -65,4 +65,19 @@ dc <- d; dc$x2 <- 1
 fit_c <- tryCatch(run_lavaan_sem("y ~ m + x2", dc, "listwise", FALSE), error = function(e) NULL, warning = function(w) NULL)
 ok(is.null(fit_c) || is.list(pred_obs_data(fit_c, "direct")), "constant column does not crash the helper")
 ok(is.list(pred_obs_data(NULL, "direct")) && length(pred_obs_data(NULL, "direct")$notes) > 0, "invalid fit returns a note instead of an error")
+# --- plot titles (drawn as HTML, so CJK variable names must pass through untouched) ---
+t_direct <- pred_obs_title(yy, "direct")
+ok(identical(t_direct$main, "y"), "title: plain variable name")
+ok(grepl("model R", t_direct$sub, fixed = TRUE) && grepl(sprintf("n = %d", n), t_direct$sub, fixed = TRUE),
+   "title: direct mode shows model R2 and n")
+ok(!grepl("model R", pred_obs_title(ry, "reduced")$sub, fixed = TRUE), "title: reduced form has no model R2")
+ok(grepl(sprintf("n = %d of %d", rm$items$y$n, rm$items$y$n_total), pred_obs_title(rm$items$y, "direct")$sub, fixed = TRUE),
+   "title: 'n of total' when rows were dropped")
+t_fs <- pred_obs_title(rl$items$z, "direct")
+ok(identical(t_fs$main, "z (factor scores)"), "title: factor-score marker")
+jp_item <- yy; jp_item$var <- "結果"
+ok(identical(pred_obs_title(jp_item, "direct")$main, "結果"), "title: Japanese variable name is kept as is")
+na_item <- yy; na_item$r2_emp <- NA_real_; na_item$r2_model <- NA_real_
+ok(grepl("= NA, n = ", pred_obs_title(na_item, "direct")$sub, fixed = TRUE) && !grepl("model R", pred_obs_title(na_item, "direct")$sub, fixed = TRUE),
+   "title: NA r2 is shown as NA without the model R2")
 cat("All pred_obs tests passed\n")
