@@ -2218,11 +2218,12 @@ ui <- fluidPage(
                                           title = "Save, load or delete models kept in this browser; import / export JSON")
                            )
                        ),
-                      conditionalPanel(
-                        condition = "input.analysis_mode == 'raw'",
-                        checkboxInput("diagram_std",
-                                      "Show standardized coefficients in diagram",
-                                      value = TRUE)),
+                      # Shown only when the fitted model is raw; toggled server-side from the fit's mode
+                      shinyjs::hidden(
+                        div(id = "diagram_std_box",
+                            checkboxInput("diagram_std",
+                                          "Show standardized coefficients in diagram",
+                                          value = TRUE))),
                       shinyjs::hidden(
                         div(id = "latent_error_box",
                             class = "alert alert-danger",
@@ -3401,9 +3402,10 @@ server <- function(input, output, session) {
 
   # ----------------- Approximate Equations ----------------------
   output$approx_eq <- renderText({
-    if (input$analysis_mode == "std")
-      return("— Hidden in Standardized mode —")
     model <- fit_model_safe()
+    # Use the mode the fit was made with, not the current radio button
+    if (identical(model$ctx$analysis_mode %||% input$analysis_mode, "std"))
+      return("— Hidden in Standardized mode —")
     validate(need(model$ok, unavailable_msg(model)))
     if (!is.null(model$equations)) {
       paste(model$equations, collapse = "\n")
@@ -3503,12 +3505,23 @@ server <- function(input, output, session) {
     })
   }, server = FALSE)  # client-side table: the Copy / CSV buttons then export every row, not only the visible page
 
+  # The "standardized coefficients" option only applies to a raw fit; follow the
+  # mode the fit was made with (before any fit, follow the radio button)
+  observe({
+    m <- tryCatch(fit_model_safe(), error = function(e) NULL)
+    mode <- if (!is.null(m) && isTRUE(m$ok)) m$ctx$analysis_mode else NULL
+    mode <- mode %||% input$analysis_mode
+    shinyjs::toggle("diagram_std_box", condition = identical(mode, "raw"))
+  })
+
   # ----------------- Path diagram server observer ---------------
   observe({
     # Reactive dependencies to trigger redraw
     model <- fit_model_safe()
-    std_for_plot <- if (input$analysis_mode == "std") TRUE else input$diagram_std
-    
+    # Use the mode the fit was made with, not the current radio button
+    fit_mode <- model$ctx$analysis_mode %||% input$analysis_mode
+    std_for_plot <- if (identical(fit_mode, "std")) TRUE else input$diagram_std
+
     # Parse layout_style into engine / rankdir
     parts  <- strsplit(input$layout_style, "_", fixed = TRUE)[[1]]
     eng    <- parts[1]
