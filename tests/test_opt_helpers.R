@@ -7,7 +7,7 @@ wanted <- c("struct_pred_cols", "build_struct_lines", "make_struct_key", "active
             "check_variable_isolation", "fit_is_proper", "candidate_score", "criterion_field", "aicc_from_fit", "fit_candidate_model",
             "droppable_struct_vars", "orphaned_struct_vars", "orphan_zero_lines",
             "struct_descendants", "struct_dependents", "struct_edges", "fit_suggestion_model", "fit_cutoff_violations", "get_modification_suggestions", "get_suggested_structural_paths",
-            "%||%", "safe_num")
+            "%||%", "safe_num", "needs_meanstructure_for", "fit_stale_reasons")
 for (e in exprs) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && as.character(e[[2]]) %in% wanted) eval(e)
 }
@@ -38,6 +38,26 @@ ok(safe_num(1e10, 150, 20, 500) == 500, "safe_num: huge value clamps to max")
 ok(safe_num(-5, 150, 20, 500) == 20, "safe_num: negative value clamps to min")
 ok(safe_num(100, 150, 20, 500) == 100, "safe_num: in-range value is kept")
 ok(!is.na(as.integer(safe_num(1e10, 1, 1, .Machine$integer.max))), "safe_num: integer cast of clamped seed is not NA")
+
+# --- needs_meanstructure_for: raw analysis or FIML-type missing handling
+ok(!needs_meanstructure_for("std", "listwise"), "meanstructure: std + listwise is not needed")
+ok(needs_meanstructure_for("raw", "listwise"), "meanstructure: raw analysis needs it")
+ok(needs_meanstructure_for("std", "ml"), "meanstructure: FIML needs it")
+ok(needs_meanstructure_for("std", "two.stage"), "meanstructure: two.stage needs it")
+ok(!needs_meanstructure_for(NULL, NULL), "meanstructure: NULL inputs do not need it")
+
+# --- fit_stale_reasons: a fitted result is stale as soon as syntax, data or missing-data handling differ
+fit_d <- data.frame(a = rnorm(20), b = rnorm(20))
+fit_res <- list(syntax = c("b ~ a"), ctx = list(data = fit_d, missing_method = "listwise"))
+ok(length(fit_stale_reasons(fit_res, "b ~ a", fit_d, "listwise")) == 0, "stale: identical inputs are not stale")
+ok(identical(fit_stale_reasons(fit_res, "a ~ b", fit_d, "listwise"), "structure"), "stale: changed syntax -> structure")
+ok(identical(fit_stale_reasons(fit_res, "b ~ a", fit_d[1:15, ], "listwise"), "data"), "stale: row filter -> data")
+ok(identical(fit_stale_reasons(fit_res, "b ~ a", as.data.frame(scale(fit_d)), "listwise"), "data"), "stale: standardized data -> data")
+ok(identical(fit_stale_reasons(fit_res, "b ~ a", fit_d, "ml"), "settings"), "stale: missing method -> settings")
+ok(setequal(fit_stale_reasons(fit_res, "a ~ b", fit_d[1:15, ], "ml"), c("structure", "data", "settings")),
+   "stale: all reasons are reported together")
+ok(identical(fit_stale_reasons(NULL, "b ~ a", fit_d, "listwise"), "structure"), "stale: no fit -> stale")
+ok(identical(fit_stale_reasons(list(syntax = "b ~ a"), "b ~ a", fit_d, "listwise"), "structure"), "stale: fit without ctx -> stale")
 
 # --- syntax / key round trip
 ok(identical(build_struct_lines(base_df), c("m ~ x1", "y ~ x2 + x3 + m")) ||
