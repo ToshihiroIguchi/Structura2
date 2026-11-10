@@ -29,4 +29,12 @@ ln <- build_meas_lines(meas)
 ok(identical(ln, c("My.Latent =~ y1 + y2", "X1st =~ y2")), "latent names normalized, empty latent skipped")
 ok(length(build_meas_lines(meas[, 1:3])) == 0, "3-column table returns character(0)")
 ok(length(build_meas_lines(NULL)) == 0, "NULL table returns character(0)")
+# 4. Zero coefficients are drawn in a neutral gray, not blue (positive) or red (negative)
+m0 <- "dem60 =~ y1 + y2 + y3
+y5 ~ dem60
+y5 ~ 0*y4"
+fit0 <- suppressWarnings(sem(m0, data = PoliticalDemocracy))
+dot0 <- semDiagram(fit0)
+ok(grepl("#7F7F7F", dot0, fixed = TRUE), "fixed-zero path is drawn in gray")
+ok(grepl("#0000FF", dot0, fixed = TRUE), "positive paths stay blue")
 cat("All diagram/syntax tests done\n")

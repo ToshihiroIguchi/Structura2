@@ -153,7 +153,8 @@ semDiagram <- function(
     max_width         = 5,
     pos_color         = "blue",
     neg_color         = "red",
-    fontname          = "Helvetica",
+    zero_color        = "gray50",
+    fontname         = "Helvetica",
     node_fontsize     = 11,
     edge_fontsize     = 9,
     show_residuals    = FALSE,
@@ -305,7 +306,11 @@ semDiagram <- function(
       if (!is.finite(pen)) pen <- min_width
 
       alpha_edge <- if (is.na(p$pvalue)) low_alpha else if (p$pvalue < alpha) 1 else low_alpha
-      col <- alpha_color(if (value >= 0) pos_color else neg_color, alpha_edge)
+      # Coefficients that display as zero (fixed-zero paths, NA estimates, tiny values) get a neutral color
+      # so they are not read as positive (blue) or negative (red) effects.
+      shown_value <- round(value, digits)
+      base_col <- if (shown_value == 0) zero_color else if (value > 0) pos_color else neg_color
+      col <- alpha_color(base_col, alpha_edge)
 
       e_base <- switch(p$op,
                        "=~" = list(from = p$lhs, to = p$rhs, arrowhead = "vee"),
