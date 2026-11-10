@@ -37,4 +37,8 @@ fit0 <- suppressWarnings(sem(m0, data = PoliticalDemocracy))
 dot0 <- semDiagram(fit0)
 ok(grepl("#7F7F7F", dot0, fixed = TRUE), "fixed-zero path is drawn in gray")
 ok(grepl("#0000FF", dot0, fixed = TRUE), "positive paths stay blue")
+zero_line <- grep("label=\"0.000\"", strsplit(dot0, "\n")[[1]], value = TRUE)
+ok(length(zero_line) == 1 && grepl("fontcolor=\"gray50\"", zero_line, fixed = TRUE), "zero label is gray")
+ok(!any(grepl("fontcolor=\"gray50\"", grep("label=\"0.000\"", strsplit(dot0, "\n")[[1]], value = TRUE, invert = TRUE), fixed = TRUE)),
+   "nonzero labels keep the default color")
 cat("All diagram/syntax tests done\n")
