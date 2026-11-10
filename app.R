@@ -2535,7 +2535,8 @@ server <- function(input, output, session) {
     req(data())
     df <- data()
     dt <- datatable(df, filter = "top", editable = FALSE,
-                    options = list(pageLength = 30, autoWidth = TRUE, scrollX = TRUE),
+                    options = list(pageLength = 30, autoWidth = TRUE, scrollX = TRUE,
+                                   scrollY = "65vh", scrollCollapse = TRUE),
                     rownames = FALSE)
     
     # Format floating-point numeric columns to 3 decimal places while preserving integers (e.g., ID, grade)
@@ -2705,7 +2706,8 @@ server <- function(input, output, session) {
       df <- df[, intersect(input$display_columns, names(df)), drop = FALSE]
     
     dt <- datatable(df, filter = "top", editable = FALSE,
-                    options = list(pageLength = 30, autoWidth = TRUE, scrollX = TRUE),
+                    options = list(pageLength = 30, autoWidth = TRUE, scrollX = TRUE,
+                                   scrollY = "65vh", scrollCollapse = TRUE),
                     rownames = FALSE)
     
     # Format floating-point numeric columns to 3 decimal places with aligned trailing zeros
@@ -3468,7 +3470,8 @@ server <- function(input, output, session) {
       if (digits_input == "all") {
         return(datatable(pe,
                          extensions = 'Buttons',
-                         options = list(pageLength = 15, dom = 'Bfrtip', buttons = c('copy', 'csv')),
+                         options = list(pageLength = 15, dom = 'Bfrtip', buttons = c('copy', 'csv'),
+                                        scrollX = TRUE, scrollY = "60vh", scrollCollapse = TRUE),
                          rownames = FALSE))
       }
       
@@ -3502,6 +3505,7 @@ server <- function(input, output, session) {
                       extensions = 'Buttons',
                       options = list(
                         pageLength = 15,
+                        scrollX = TRUE, scrollY = "60vh", scrollCollapse = TRUE,
                         dom = 'Bfrtip',
                         buttons = c('copy', 'csv'),
                         columnDefs = col_defs
