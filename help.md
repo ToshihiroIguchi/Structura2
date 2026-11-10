@@ -343,6 +343,7 @@ Rendered diagrams strictly adhere to standard SEM graphical conventions:
 * **Color Schemes**:
   - **Blue Arrows**: Positive parameter estimates ($+ \beta$).
   - **Red Arrows**: Negative parameter estimates ($-\beta$).
+  - **Gray Arrows**: Coefficients that are zero at the displayed precision (e.g., paths fixed to zero).
 * **Line Width & Opacity**:
   - Arrow stroke width is proportional to effect magnitude ($|\beta|$).
   - Statistically significant paths ($p < 0.05$) are rendered fully opaque; non-significant paths are rendered with lower opacity.
