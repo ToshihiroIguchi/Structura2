@@ -4547,10 +4547,16 @@ server <- function(input, output, session) {
               tags$b("Variable Isolation Prevention (Keep in Model)", style = "color: #1e293b; font-size: 14px;"),
               span(style = "font-size: 11px; color: #64748b;", "At least one connecting path will be retained")
           ),
-          p("Every dependent variable always keeps at least one incoming path (otherwise it would become exogenous and lavaan would replace the paths with covariances). ",
-            "A predictor that has no incoming path may lose all of its paths: it is then scored with those paths fixed to zero (so the scores stay comparable) and is removed from the model when the candidate is applied. ",
-            "Select predictor variables below to require an outgoing path, which keeps them in the model.",
-            style = "font-size: 12px; color: #64748b; margin-bottom: 10px;"),
+          p("Dependent variables always keep at least one incoming path. ",
+            "Tick a predictor below to keep it in the model; unticked predictors may lose all paths and are then removed on apply.",
+            style = "font-size: 12px; color: #64748b; margin-bottom: 6px;"),
+          tags$details(
+            style = "font-size: 12px; color: #64748b; margin-bottom: 10px;",
+            tags$summary(style = "cursor: pointer;", "Why?"),
+            p("Without an incoming path a dependent variable would become exogenous and lavaan would replace its paths with covariances. ",
+              "A predictor that loses all paths is scored with those paths fixed to zero (so scores stay comparable) and is removed from the model when the candidate is applied.",
+              style = "margin: 4px 0 0 0;")
+          ),
           fluidRow(
             column(width = 12,
                    div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;",
@@ -4564,11 +4570,8 @@ server <- function(input, output, session) {
             )
           )
         ),
-        p("Only paths from the structural matrix are optimized. Equations typed under Manual Equations are kept unchanged in every candidate.",
-          style = "font-size: 12px; color: #64748b; margin-bottom: 8px;"),
-        p("Select structural paths to lock (protect from pruning).", style = "font-size: 13px; color: #334155; margin-bottom: 4px;"),
-        p("Highlighted cells represent active paths in your current model. Unchecked active paths will be evaluated for optimization.",
-          style = "font-size: 12px; color: #64748b;"),
+        p("Check paths to lock (protect from removal). Highlighted cells are active paths; unchecked ones are optimized. Manual Equations are kept unchanged.",
+          style = "font-size: 12px; color: #64748b; margin-bottom: 4px;"),
         rHandsontableOutput(lock_id),
         tags$hr(),
         fluidRow(
@@ -4827,17 +4830,19 @@ server <- function(input, output, session) {
                     if (stopped_early) sprintf(" (halted early at step %d of %d; best candidates so far are shown)", current_step, st$max_steps) else "",
                     res$criterion),
             style = if (stopped_early) "margin: 0; font-size: 13px; color: #92400e;" else "margin: 0; font-size: 13px; color: #334155;"),
-          p("Scores are computed on the same data used for the search, so they are optimistic; ",
-            "differences of about 2 or less are not reliable, so prefer the theoretically most defensible candidate. ",
-            "Notes: Improper = negative variances; Replaced = lavaan freed a covariance in place of the removed path; ",
-            "Variable Dropped = a variable lost all its paths; Not Identified = no scores. ",
-            "Fit lists the indices that would be red on the path diagram (p, SRMR, RMSEA, GFI, AGFI, NFI, CFI); it is evaluated for the top 20 candidates only. ",
-            "A dash means the score could not be computed (for AICc: too many parameters for the sample size).",
+          p("Scores are optimistic (computed on the search data); differences of about 2 or less are not reliable, so prefer the most defensible candidate.",
             style = "margin: 6px 0 0 0; font-size: 12px; color: #64748b;"),
+          tags$details(
+            style = "margin-top: 4px; font-size: 12px; color: #64748b;",
+            tags$summary(style = "cursor: pointer;", "Column notes"),
+            p("Improper = negative variances; Replaced = lavaan freed a covariance in place of the removed path; ",
+              "Variable Dropped = a variable lost all its paths; Not Identified = no scores. ",
+              "Fit lists the indices that would be red on the path diagram (p, SRMR, RMSEA, GFI, AGFI, NFI, CFI), evaluated for the top 20 candidates only. ",
+              "A dash means the score could not be computed (for AICc: too many parameters for the sample size).",
+              style = "margin: 4px 0 0 0;")
+          ),
           if (any(vapply(res$candidates, function(cd) length(cd$excluded_vars) > 0, logical(1))))
-            p("Note: a predictor that lost every path is scored with its removed paths fixed to zero so that the scores stay comparable. ",
-              "Applying such a candidate removes the predictor from the model, so the scores (AIC/BIC/AICc) after applying will differ from the values in this table ",
-              "(they are computed on fewer variables) and cannot be compared with the model before optimization.",
+            p("Applying a candidate that drops a predictor changes the scores (fewer variables), so they cannot be compared with the table or the model before optimization.",
               style = "margin: 6px 0 0 0; font-size: 12px; color: #b45309; font-weight: 600;"),
           if (nzchar(res$fallback_note %||% ""))
             p(res$fallback_note, style = "margin: 6px 0 0 0; font-size: 12px; color: #b45309; font-weight: 600;")
