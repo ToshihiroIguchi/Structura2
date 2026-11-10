@@ -190,6 +190,8 @@ details.s2-legend summary { cursor: pointer; color: var(--s2-primary); margin-bo
 .s2-prune-layout { display: flex; gap: 16px; align-items: flex-start; }
 .s2-prune-left { flex: 1 1 58%; min-width: 0; }
 .s2-prune-right { flex: 1 1 42%; min-width: 0; position: sticky; top: 70px; }
+/* Candidate table: compact rows so more candidates fit on screen */
+#prune_candidates_table table.dataTable td { padding: 4px 6px; font-size: 12px; line-height: 1.3; }
 @media (max-width: 991px) {
   .s2-prune-layout { display: block; }
   .s2-prune-right { position: static; margin-top: 12px; }

@@ -4697,7 +4697,8 @@ server <- function(input, output, session) {
   opt_running <- reactiveVal(FALSE)
   opt_step <- reactiveVal(0)
   opt_state <- reactiveVal(NULL)
-  pending_prune_check <- reactiveVal(NULL)   # AIC/BIC of an applied candidate, verified after the main refit
+  pending_prune_check <- reactiveVal(NULL)   # AIC/BIC/AICc of an applied candidate, verified after the main refit
+  prune_page_length <- 15L                   # rows per page of the candidate ranking table
 
   finalize_prune_results <- function(st, current_step = 0, stopped_early = FALSE) {
     opt_running(FALSE)
@@ -5706,7 +5707,7 @@ server <- function(input, output, session) {
       tbl,
       selection = list(mode = "single", selected = isolate(selected_prune_idx())),
       rownames = FALSE,
-      options = list(pageLength = 6, dom = 'tp', scrollX = TRUE)
+      options = list(pageLength = prune_page_length, dom = 'itp', scrollX = TRUE)
     )
   }, server = FALSE)
 
@@ -5730,7 +5731,7 @@ server <- function(input, output, session) {
       new_idx <- curr_idx - 1
       selected_prune_idx(new_idx)
       selected_prune_cand(res$candidates[[new_idx]])
-      target_page <- ceiling(new_idx / 6)
+      target_page <- ceiling(new_idx / prune_page_length)
       dataTableProxy("prune_candidates_table") %>% 
         selectRows(new_idx) %>% 
         selectPage(target_page)
@@ -5746,7 +5747,7 @@ server <- function(input, output, session) {
       new_idx <- curr_idx + 1
       selected_prune_idx(new_idx)
       selected_prune_cand(res$candidates[[new_idx]])
-      target_page <- ceiling(new_idx / 6)
+      target_page <- ceiling(new_idx / prune_page_length)
       dataTableProxy("prune_candidates_table") %>% 
         selectRows(new_idx) %>% 
         selectPage(target_page)
@@ -5844,7 +5845,7 @@ server <- function(input, output, session) {
     # With excluded predictors the applied model has fewer variables, so its scores cannot match the table.
     excluded_vars <- cand$excluded_vars %||% character(0)
     pending_prune_check(if (isTRUE(cand$converged) && isTRUE(cand$vars_ok) && !is.na(cand$aic) && !length(excluded_vars))
-                          list(aic = cand$aic, bic = cand$bic) else NULL)
+                          list(aic = cand$aic, bic = cand$bic, aicc = cand$aicc) else NULL)
     if (length(excluded_vars)) {
       showNotification(
         paste0("Removed from the model: ", paste(excluded_vars, collapse = ", "),
@@ -5885,7 +5886,11 @@ server <- function(input, output, session) {
     if (!isTRUE(res$ok) || is.null(res$fit)) return()
     ms <- tryCatch(lavaan::fitMeasures(res$fit, c("aic", "bic")), error = function(e) NULL)
     if (is.null(ms) || anyNA(ms)) return()
-    if (abs(ms["aic"] - chk$aic) > 0.01 || abs(ms["bic"] - chk$bic) > 0.01) {
+    # AICc is compared only when it is defined both in the table and for the refitted model
+    refit_aicc <- aicc_from_fit(res$fit, as.numeric(ms["aic"]))
+    aicc_differs <- !is.null(chk$aicc) && isTRUE(is.finite(chk$aicc)) && is.finite(refit_aicc) &&
+      abs(refit_aicc - chk$aicc) > 0.01
+    if (abs(ms["aic"] - chk$aic) > 0.01 || abs(ms["bic"] - chk$bic) > 0.01 || aicc_differs) {
       showNotification(
         sprintf("The refitted model differs from the candidate table (AIC %.2f vs %.2f). Treat the table scores for this model with caution.",
                 ms["aic"], chk$aic),
