@@ -323,6 +323,8 @@ semDiagram <- function(
       e_base$color    <- col
       e_base$fontsize <- edge_fontsize
       e_base$fontname <- fontname
+      # The label of a zero coefficient is gray too (opaque, so it stays readable), matching its line.
+      if (shown_value == 0) e_base$fontcolor <- zero_color
       if (p$op == "~~") {
         e_base$constraint <- FALSE
         e_base$dir        <- "both"
