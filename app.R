@@ -2602,6 +2602,12 @@ server <- function(input, output, session) {
     })
   })
 
+  # Observed variables whose complete rows the main fit must keep (listwise only). Set when an optimization
+  # candidate that removes predictors is applied: the removed predictors no longer restrict the rows, but the
+  # applied model must still be estimated on the rows the candidates were compared on.
+  row_pin <- reactiveVal(NULL)
+  observeEvent(list(data(), input$missing_method), row_pin(NULL), ignoreInit = TRUE)
+
   processed_data <- reactive({
     req(data())
     tryCatch({
@@ -3213,6 +3219,12 @@ server <- function(input, output, session) {
 
       snapshot_error <- NULL
       df_fit <- processed_data()
+      # Keep the rows an applied optimization candidate was compared on (see row_pin)
+      pin <- isolate(row_pin())
+      if (!is.null(pin) && identical(input$missing_method, "listwise")) {
+        pin_vars <- intersect(pin, names(df_fit))
+        if (length(pin_vars)) df_fit <- df_fit[stats::complete.cases(df_fit[, pin_vars, drop = FALSE]), , drop = FALSE]
+      }
       parts_fit <- isolate(model_parts())
       syntax_chr <- paste(ln, collapse = "\n")
 
@@ -4562,10 +4574,10 @@ server <- function(input, output, session) {
         fluidRow(
           column(width = 6,
                  selectInput("prune_criterion", "Optimization Criterion:",
-                             choices = c("AICc (Small-Sample Corrected / Recommended)" = "AICc",
-                                         "AIC (Predictive Accuracy / Balanced)" = "AIC",
-                                         "BIC (Stronger Sparsity Penalty)" = "BIC"),
-                             selected = "AICc")
+                             choices = c("BIC (Stronger Sparsity Penalty / Recommended)" = "BIC",
+                                         "AICc (Small-Sample Corrected AIC)" = "AICc",
+                                         "AIC (Predictive Accuracy)" = "AIC"),
+                             selected = "BIC")
           ),
           column(width = 6,
                  selectInput("prune_strategy", "Search Algorithm Strategy:",
@@ -4901,7 +4913,7 @@ server <- function(input, output, session) {
       }
       v
     }
-    criterion <- choice_input("prune_criterion", "Optimization Criterion", c("AICc", "AIC", "BIC"), "AICc")
+    criterion <- choice_input("prune_criterion", "Optimization Criterion", c("BIC", "AICc", "AIC"), "BIC")
     strategy <- choice_input("prune_strategy", "Search Algorithm Strategy",
                              c("adaptive", "regsem", "stepwise", "exhaustive", "sa"), "adaptive")
     max_comb <- num_input("max_exhaustive_comb", "Exhaustive Search Max Combinations", 1024, 64, 8192)
@@ -5856,6 +5868,23 @@ server <- function(input, output, session) {
 
     res_applied <- isolate(prune_results())
     ctx_applied <- res_applied$ctx
+
+    # Listwise deletion: dropping a predictor would let rows with a missing value only in that predictor back
+    # in, so the applied model would be estimated on a different sample than the one the candidates were
+    # compared on. The main refit is pinned to the rows complete on the optimization's variable set.
+    if (length(excluded_vars) && identical(ctx_applied$missing_method, "listwise") && length(ctx_applied$base_ov)) {
+      pin_vars <- union(isolate(row_pin()), ctx_applied$base_ov)
+      row_pin(pin_vars)
+      d_all <- ctx_applied$data
+      n_fixed <- sum(stats::complete.cases(d_all[, intersect(pin_vars, names(d_all)), drop = FALSE]))
+      n_free  <- sum(stats::complete.cases(d_all[, intersect(setdiff(pin_vars, excluded_vars), names(d_all)), drop = FALSE]))
+      if (n_free > n_fixed) {
+        showNotification(
+          sprintf("Rows kept at %d (the rows used while optimizing). %d more rows would become usable without the removed predictor(s), but the model is estimated on the same rows so it stays comparable.",
+                  n_fixed, n_free - n_fixed),
+          type = "message", duration = 15)
+      }
+    }
     applied_prune_info(list(
       res = res_applied,
       cand = cand,
