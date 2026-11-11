@@ -2,7 +2,7 @@
 # Run: Rscript tests/test_opt_helpers.R   (from the project root)
 suppressMessages(library(lavaan))
 exprs <- parse("app.R")
-wanted <- c("struct_pred_cols", "build_struct_lines", "make_struct_key", "active_struct_vars",
+wanted <- c("struct_pred_cols", "row_checked", "build_struct_lines", "make_struct_key", "active_struct_vars",
             "run_lavaan_sem", "free_cov_pairs", "required_struct_vars", "candidate_structure_check",
             "check_variable_isolation", "fit_is_proper", "candidate_score", "criterion_field", "aicc_from_fit", "fit_candidate_model",
             "droppable_struct_vars", "orphaned_struct_vars", "orphan_zero_lines",
@@ -27,6 +27,27 @@ mk <- function(paths) {
   s
 }
 base_df <- mk(list(c("m", "x1"), c("y", "m"), c("y", "x2"), c("y", "x3")))
+
+# --- struct_edges is the single source for "which paths are active"; the other helpers are derived from it
+e0 <- struct_edges(base_df)
+ok(identical(e0$dep, c("m", "y", "y", "y")) && identical(e0$pred, c("x1", "x2", "x3", "m")),
+   "struct_edges: row-major order, predictors in column order")
+ok(nrow(struct_edges(mk(list()))) == 0, "struct_edges: all-FALSE table has no edges")
+ok(nrow(struct_edges(base_df[0, ])) == 0, "struct_edges: zero-row table has no edges")
+ok(nrow(struct_edges(NULL)) == 0 && nrow(struct_edges(base_df[, 1:2])) == 0, "struct_edges: NULL / no predictor columns")
+na_df <- base_df; na_df[na_df$Dependent == "y", "x2"] <- NA
+ok(!"x2" %in% struct_edges(na_df)$pred, "struct_edges: NA cell is not a path")
+blank_df <- base_df; blank_df$Dependent[blank_df$Dependent == "m"] <- ""
+ok(!"" %in% struct_edges(blank_df)$dep && nrow(struct_edges(blank_df)) == 3, "struct_edges: row with empty Dependent is skipped")
+ok(identical(build_struct_lines(base_df), c("m ~ x1", "y ~ x2 + x3 + m")), "build_struct_lines: one line per dependent")
+ok(identical(build_struct_lines(mk(list())), character(0)), "build_struct_lines: empty model")
+ok(identical(make_struct_key(base_df), "m~x1;y~m,x2,x3"), "make_struct_key: sorted, canonical")
+ok(identical(make_struct_key(mk(list())), "EMPTY_PATH"), "make_struct_key: empty model")
+ok(identical(active_struct_vars(base_df), c("m", "x1", "y", "x2", "x3")), "active_struct_vars: dependent then its predictors, unique")
+ok(identical(struct_dependents(base_df), c("m", "y")), "struct_dependents: dependents with an incoming path")
+ok(identical(struct_descendants(base_df, "x1"), c("m", "y")), "struct_descendants: transitive through m")
+ok(identical(row_checked(base_df, 5, struct_pred_cols(base_df)), c("x2", "x3", "m")), "row_checked: ticked columns of one row, in column order")
+ok(identical(row_checked(base_df, 1, character(0)), character(0)), "row_checked: no columns")
 
 # --- safe_num: sanitises numericInput values (NA when cleared, huge or out-of-range when typed)
 ok(safe_num(NA, 150, 20, 500) == 150, "safe_num: NA falls back to default")

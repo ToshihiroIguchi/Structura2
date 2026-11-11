@@ -423,17 +423,7 @@ lavaan_to_equations <- function(fit, digits = 3, cached_pe = NULL) {
 
 # ---------- Helper: Retained Path String Generator -----------------
 build_retained_str <- function(struct_df) {
-  if (is.null(struct_df) || ncol(struct_df) < 3) return("None (Empty Model)")
-  pred_cols <- names(struct_df)[3:ncol(struct_df)]
-  lines <- c()
-  for (i in seq_len(nrow(struct_df))) {
-    dp <- struct_df$Dependent[i]
-    if (!nzchar(dp)) next
-    ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
-    if (length(ps) > 0) {
-      lines <- c(lines, paste0(dp, " ~ ", paste(ps, collapse = " + ")))
-    }
-  }
+  lines <- build_struct_lines(struct_df)
   if (length(lines) > 0) paste(lines, collapse = " ; ") else "None (Empty Model)"
 }
 
@@ -445,34 +435,16 @@ build_retained_str <- function(struct_df) {
 # a variable that has lost every path, which changes the likelihood and makes AIC/BIC incomparable.
 check_variable_isolation <- function(s_df, retain_deps, retain_preds, pred_cols, required_vars = character(0)) {
   if (is.null(s_df) || nrow(s_df) == 0) return(FALSE)
+  edges <- struct_edges(s_df)
 
-  if (length(required_vars) > 0) {
-    edges <- struct_edges(s_df)
-    if (!all(required_vars %in% c(edges$dep, edges$pred))) return(FALSE)
-  }
+  if (length(required_vars) > 0 && !all(required_vars %in% c(edges$dep, edges$pred))) return(FALSE)
 
-  if (length(retain_deps) > 0) {
-    for (dep in retain_deps) {
-      dep_r <- which(s_df$Dependent == dep)
-      if (length(dep_r) == 0) return(FALSE)
-      has_in_path <- any(vapply(pred_cols, function(p) {
-        if (!p %in% names(s_df)) return(FALSE)
-        isTRUE(as.logical(s_df[dep_r[1], p]))
-      }, logical(1)))
-      if (!has_in_path) return(FALSE)
-    }
-  }
-  
-  if (length(retain_preds) > 0) {
-    for (pred in retain_preds) {
-      if (!pred %in% names(s_df)) return(FALSE)
-      has_out_path <- any(vapply(seq_len(nrow(s_df)), function(r) {
-        isTRUE(as.logical(s_df[r, pred]))
-      }, logical(1)))
-      if (!has_out_path) return(FALSE)
-    }
-  }
-  
+  # In-degree >= 1, counting only predictor columns in `pred_cols`
+  if (length(retain_deps) > 0 && !all(retain_deps %in% edges$dep[edges$pred %in% pred_cols])) return(FALSE)
+
+  # Out-degree >= 1
+  if (length(retain_preds) > 0 && !all(retain_preds %in% edges$pred)) return(FALSE)
+
   TRUE
 }
 
@@ -494,71 +466,62 @@ build_meas_lines <- function(meas) {
     lt <- trimws(as.character(meas$Latent[i]))
     if (!nzchar(lt)) return(NULL)
     lt <- make.names(lt)
-    inds <- vars[vapply(meas[i, vars], function(x) isTRUE(as.logical(x)), logical(1))]
+    inds <- row_checked(meas, i, vars)
     if (!length(inds)) return(NULL)
     paste0(lt, " =~ ", paste(inds, collapse = " + "))
   })
   as.character(unlist(lines))
 }
 
-build_struct_lines <- function(struct_df) {
-  pred_cols <- struct_pred_cols(struct_df)
-  if (!length(pred_cols)) return(character(0))
-  lines <- lapply(seq_len(nrow(struct_df)), function(i) {
-    dp <- struct_df$Dependent[i]
-    if (!nzchar(dp)) return(NULL)
-    ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
-    if (!length(ps)) return(NULL)
-    paste0(dp, " ~ ", paste(ps, collapse = " + "))
-  })
-  unlist(lines)
+# Names of the columns in `cols` that are ticked in row `i` of a checkbox table.
+row_checked <- function(df, i, cols) {
+  if (!length(cols)) return(character(0))
+  cols[vapply(df[i, cols], function(x) isTRUE(as.logical(x)), logical(1))]
 }
 
-make_struct_key <- function(struct_df) {
+# Active structural paths as a data.frame(dep, pred), in row-major order (each row's predictors in column
+# order). Rows with an empty Dependent are skipped. This is the single source for every "which paths are
+# active" question; it is vectorized because the optimizer calls it for thousands of candidates.
+struct_edges <- function(struct_df) {
   pred_cols <- struct_pred_cols(struct_df)
-  lines <- c()
-  for (i in seq_len(nrow(struct_df))) {
-    dp <- struct_df$Dependent[i]
-    ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
-    if (length(ps)) lines <- c(lines, paste0(dp, "~", paste(sort(ps), collapse = ",")))
-  }
-  res <- paste(sort(lines), collapse = ";")
-  if (!nzchar(res)) "EMPTY_PATH" else res
+  empty <- data.frame(dep = character(0), pred = character(0), stringsAsFactors = FALSE)
+  if (!length(pred_cols) || nrow(struct_df) == 0) return(empty)
+  ticked <- vapply(pred_cols, function(p) vapply(struct_df[[p]], function(x) isTRUE(as.logical(x)), logical(1)),
+                   logical(nrow(struct_df)))
+  ticked <- matrix(ticked, nrow = nrow(struct_df), dimnames = list(NULL, pred_cols))
+  k <- which(t(ticked))                      # row-major positions of the ticked cells
+  if (!length(k)) return(empty)
+  rows <- (k - 1L) %/% length(pred_cols) + 1L
+  deps <- as.character(struct_df$Dependent[rows])
+  keep <- nzchar(deps)
+  data.frame(dep = deps[keep], pred = pred_cols[(k - 1L) %% length(pred_cols) + 1L][keep], stringsAsFactors = FALSE)
+}
+
+# One "dep ~ p1 + p2" line per dependent that has at least one active predictor.
+build_struct_lines <- function(struct_df) {
+  e <- struct_edges(struct_df)
+  if (!nrow(e)) return(character(0))
+  deps <- unique(e$dep)
+  vapply(deps, function(d) paste0(d, " ~ ", paste(e$pred[e$dep == d], collapse = " + ")), character(1), USE.NAMES = FALSE)
+}
+
+# Canonical, order-independent key of the active paths (used to cache candidate fits).
+make_struct_key <- function(struct_df) {
+  e <- struct_edges(struct_df)
+  if (!nrow(e)) return("EMPTY_PATH")
+  lines <- vapply(unique(e$dep), function(d) paste0(d, "~", paste(sort(e$pred[e$dep == d]), collapse = ",")), character(1))
+  paste(sort(lines), collapse = ";")
 }
 
 # Variables that take part in at least one active structural path (as dependent or predictor).
 active_struct_vars <- function(struct_df) {
-  pred_cols <- struct_pred_cols(struct_df)
-  if (!length(pred_cols)) return(character(0))
-  vars <- character(0)
-  for (i in seq_len(nrow(struct_df))) {
-    ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
-    if (length(ps)) vars <- c(vars, struct_df$Dependent[i], ps)
-  }
-  unique(vars)
+  e <- struct_edges(struct_df)
+  unique(c(rbind(e$dep, e$pred)))
 }
 
 # Dependent variables that have at least one active incoming path.
 struct_dependents <- function(struct_df) {
-  pred_cols <- struct_pred_cols(struct_df)
-  if (!length(pred_cols) || is.null(struct_df) || nrow(struct_df) == 0) return(character(0))
-  has_path <- vapply(seq_len(nrow(struct_df)), function(i) {
-    any(vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1)))
-  }, logical(1))
-  unique(struct_df$Dependent[has_path])
-}
-
-# Active structural paths as a data.frame(dep, pred).
-struct_edges <- function(struct_df) {
-  pred_cols <- struct_pred_cols(struct_df)
-  out <- list()
-  if (length(pred_cols)) {
-    for (i in seq_len(nrow(struct_df))) {
-      ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
-      if (length(ps) && nzchar(struct_df$Dependent[i])) out[[length(out) + 1]] <- data.frame(dep = struct_df$Dependent[i], pred = ps, stringsAsFactors = FALSE)
-    }
-  }
-  if (length(out)) do.call(rbind, out) else data.frame(dep = character(0), pred = character(0), stringsAsFactors = FALSE)
+  unique(struct_edges(struct_df)$dep)
 }
 
 # ---- Model Spec & Export Helpers ---------------------------------------------
@@ -579,21 +542,13 @@ build_model_spec <- function(meas, struct_df, extra_eq, settings, data_info, nam
     vars <- names(meas)[4:ncol(meas)]
     for (i in seq_len(nrow(meas))) {
       lt   <- trimws(as.character(meas$Latent[i]))
-      inds <- vars[vapply(meas[i, vars], function(x) isTRUE(as.logical(x)), logical(1))]
+      inds <- row_checked(meas, i, vars)
       if (!nzchar(lt) && !length(inds)) next
       measurement[[length(measurement) + 1]] <- list(latent = lt, indicators = as.list(inds))
     }
   }
-  structural <- list()
-  pred_cols <- struct_pred_cols(struct_df)
-  if (length(pred_cols) && nrow(struct_df) > 0) {
-    for (i in seq_len(nrow(struct_df))) {
-      ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
-      if (length(ps) && nzchar(struct_df$Dependent[i])) {
-        structural[[length(structural) + 1]] <- list(dependent = struct_df$Dependent[i], predictors = as.list(ps))
-      }
-    }
-  }
+  edges <- struct_edges(struct_df)
+  structural <- lapply(unique(edges$dep), function(d) list(dependent = d, predictors = as.list(edges$pred[edges$dep == d])))
   list(
     format           = SPEC_FORMAT,
     version          = SPEC_VERSION,
@@ -955,9 +910,7 @@ fmt_var_list <- function(x) paste(x, collapse = ", ")
 
 # TRUE when the structural matrix has at least one active path (what Auto-Optimize works on)
 has_active_struct_path <- function(struct_df) {
-  if (is.null(struct_df) || nrow(struct_df) == 0 || ncol(struct_df) < 3) return(FALSE)
-  m <- struct_df[, 3:ncol(struct_df), drop = FALSE]
-  any(vapply(m, function(col) any(as.logical(col), na.rm = TRUE), logical(1)))
+  nrow(struct_edges(struct_df)) > 0
 }
 
 # One-line pointer shown under an identification error when the model has structural paths to prune
@@ -1272,13 +1225,12 @@ fit_candidate_model <- function(struct_df, ctx) {
 
 # ---------- Helper: Reachability on the structural graph (edges: predictor -> dependent) ----------
 struct_descendants <- function(struct_df, from) {
+  edges <- struct_edges(struct_df)
   seen <- character(0)
   queue <- from
   while (length(queue)) {
     cur <- queue[1]; queue <- queue[-1]
-    if (!cur %in% names(struct_df)) next
-    flags <- vapply(struct_df[[cur]], function(x) isTRUE(as.logical(x)), logical(1))
-    kids <- setdiff(struct_df$Dependent[flags], seen)
+    kids <- setdiff(edges$dep[edges$pred == cur], seen)
     seen <- c(seen, kids)
     queue <- c(queue, kids)
   }
@@ -4480,32 +4432,11 @@ server <- function(input, output, session) {
     } else NULL
 
     # Initialize lock table data (filtered to active rows and active predictor columns)
-    pred_cols <- names(struct_df)[3:ncol(struct_df)]
-    
-    active_row_indices <- c()
-    for (i in seq_len(nrow(struct_df))) {
-      has_active <- FALSE
-      for (col in pred_cols) {
-        if (isTRUE(as.logical(struct_df[i, col]))) {
-          has_active <- TRUE
-          break
-        }
-      }
-      if (has_active) active_row_indices <- c(active_row_indices, i)
-    }
-    
-    active_pred_cols <- c()
-    for (col in pred_cols) {
-      has_active <- FALSE
-      for (i in seq_len(nrow(struct_df))) {
-        if (isTRUE(as.logical(struct_df[i, col]))) {
-          has_active <- TRUE
-          break
-        }
-      }
-      if (has_active) active_pred_cols <- c(active_pred_cols, col)
-    }
-    
+    pred_cols <- struct_pred_cols(struct_df)
+    active_edges <- struct_edges(struct_df)
+    active_row_indices <- which(struct_df$Dependent %in% active_edges$dep)
+    active_pred_cols <- intersect(pred_cols, active_edges$pred)
+
     if (length(active_row_indices) == 0 || length(active_pred_cols) == 0) {
       lock_df <- struct_df
       for (col in pred_cols) lock_df[[col]] <- FALSE
@@ -4943,27 +4874,17 @@ server <- function(input, output, session) {
 
     struct_df <- struct_table_data()
     lock_df <- prune_lock_table_data()
-    pred_cols <- names(struct_df)[3:ncol(struct_df)]
-    active_paths <- list()
+    pred_cols <- struct_pred_cols(struct_df)
+    base_edges <- struct_edges(struct_df)
 
-    for (i in seq_len(nrow(struct_df))) {
-      dep <- struct_df$Dependent[i]
-      if (!nzchar(dep)) next
-      for (p in pred_cols) {
-        if (isTRUE(as.logical(struct_df[i, p]))) {
-          is_locked <- FALSE
-          if (!is.null(lock_df) && dep %in% lock_df$Dependent && p %in% names(lock_df)) {
-            lock_r_idx <- which(lock_df$Dependent == dep)
-            if (length(lock_r_idx) > 0) {
-              is_locked <- isTRUE(as.logical(lock_df[lock_r_idx[1], p]))
-            }
-          }
-          active_paths[[length(active_paths) + 1]] <- list(
-            dep = dep, pred = p, locked = is_locked
-          )
-        }
-      }
+    is_path_locked <- function(dep, p) {
+      if (is.null(lock_df) || !p %in% names(lock_df)) return(FALSE)
+      lock_r_idx <- which(lock_df$Dependent == dep)
+      length(lock_r_idx) > 0 && isTRUE(as.logical(lock_df[lock_r_idx[1], p]))
     }
+    active_paths <- lapply(seq_len(nrow(base_edges)), function(k) {
+      list(dep = base_edges$dep[k], pred = base_edges$pred[k], locked = is_path_locked(base_edges$dep[k], base_edges$pred[k]))
+    })
 
     removable_paths <- Filter(function(x) !x$locked, active_paths)
     M <- length(removable_paths)
@@ -4980,7 +4901,7 @@ server <- function(input, output, session) {
 
     # Every dependent variable of the baseline always keeps an incoming path: losing all of them makes it
     # exogenous and lavaan replaces the paths with covariances, so such candidates are never comparable.
-    retain_deps <- unique(struct_edges(struct_df)$dep)
+    retain_deps <- unique(base_edges$dep)
     retain_preds <- input$prune_retain_preds %||% character(0)
 
     if (!check_variable_isolation(struct_df, retain_deps, retain_preds, pred_cols)) {

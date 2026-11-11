@@ -2,7 +2,7 @@
 # Run: Rscript tests/test_diagram_and_syntax.R   (from the project root)
 suppressMessages(library(lavaan))
 exprs <- parse("app.R")
-wanted <- c("semDiagram", "build_meas_lines", "%||%")
+wanted <- c("semDiagram", "build_meas_lines", "row_checked", "%||%")
 for (e in exprs) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && as.character(e[[2]]) %in% wanted) eval(e)
 }
