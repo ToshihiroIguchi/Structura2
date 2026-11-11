@@ -45,7 +45,7 @@ ok(!any(grepl("fontcolor=\"gray50\"", grep("label=\"0.000\"", strsplit(dot0, "\n
 # 5. One cutoff table: a value exactly on a cutoff passes, in every place that judges fit
 ok(fit_index_ok("cfi", 0.90) && !fit_index_ok("cfi", 0.899) && fit_index_ok("rmsea", 0.08) && !fit_index_ok("rmsea", 0.081),
    "fit_index_ok: boundary values pass")
-ok(fit_index_ok("pvalue", 0.05) && is.na(fit_index_ok("aic", 1)) && is.na(fit_index_ok("cfi", NA)), "fit_index_ok: NA cases")
+ok(!fit_index_ok("pvalue", 0.05) && fit_index_ok("pvalue", 0.051) && is.na(fit_index_ok("aic", 1)) && is.na(fit_index_ok("cfi", NA)), "fit_index_ok: NA cases")
 ok(identical(unname(fit_cutoff_violations(c(cfi = 0.90, rmsea = 0.08, srmr = 0.08))), c(FALSE, FALSE, FALSE)), "cutoff violations: boundary passes")
 ok(identical(unname(fit_cutoff_violations(c(cfi = 0.85, rmsea = 0.09, srmr = 0.01))), c(TRUE, TRUE, FALSE)), "cutoff violations: failures")
 ok(is.character(fit_threshold_violations(fit)), "threshold violations: character result")

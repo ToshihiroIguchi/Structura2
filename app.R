@@ -173,6 +173,8 @@ FIT_CUTOFFS <- data.frame(
 fit_index_ok <- function(index, value) {
   k <- match(index, FIT_CUTOFFS$index)
   if (is.na(k) || length(value) != 1 || is.na(value)) return(NA)
+  # The p-value is the one exception: p = .05 exactly is a rejection at alpha = .05 (as before the unification).
+  if (index == "pvalue") return(value > FIT_CUTOFFS$cutoff[k])
   if (FIT_CUTOFFS$higher_better[k]) value >= FIT_CUTOFFS$cutoff[k] else value <= FIT_CUTOFFS$cutoff[k]
 }
 
@@ -631,9 +633,8 @@ parse_model_spec_json <- function(txt) {
   })
 }
 
-# Measurement table for a spec: same layout as the initial table built when data is loaded
-# (Latent / Indicator / Operator + one logical column per displayed variable). Indicators that are
-# not among `inds` are reported in `dropped` instead of being silently lost.
+# Fills the Indicator column of a measurement table: each non-empty latent gets a name that does not clash
+# with an observed variable (or another latent).
 with_indicator_names <- function(tbl, obs_names) {
   valid_latents <- ifelse(nzchar(tbl$Latent), tbl$Latent, "latent")
   convs <- make.unique(c(obs_names, valid_latents))
@@ -641,6 +642,9 @@ with_indicator_names <- function(tbl, obs_names) {
   tbl
 }
 
+# Measurement table for a spec: same layout as the initial table built when data is loaded
+# (Latent / Indicator / Operator + one logical column per displayed variable). Indicators that are
+# not among `inds` are reported in `dropped` instead of being silently lost.
 spec_to_meas_table <- function(spec, inds, obs_names) {
   rows <- spec$measurement
   if (!length(rows)) rows <- list(list(latent = "LatentVariable1", indicators = character(0)))
