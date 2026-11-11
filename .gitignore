@@ -11,3 +11,6 @@ test_browser/error_*.png
 test_webr/
 
 .playwright-mcp/
+
+# Ad-hoc browser test captures
+test_browser/shots/
