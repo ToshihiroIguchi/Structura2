@@ -196,3 +196,12 @@ details.s2-legend summary { cursor: pointer; color: var(--s2-primary); margin-bo
   .s2-prune-layout { display: block; }
   .s2-prune-right { position: static; margin-top: 12px; }
 }
+
+/* Data tables with column filters: one scroll area (DT's scrollX/scrollY swap
+   scroll containers when a filter gets focus, which shifts the table) */
+.s2-table-scroll { overflow: auto; max-height: 65vh; min-height: 160px; clear: both; }
+/* Right margin leaves room for the last column's filter popup (about 200px wide) */
+.s2-table-scroll table.dataTable { margin: 0 110px 0 0 !important; }
+.s2-table-scroll table.dataTable thead { position: sticky; top: 0; z-index: 3; }
+.s2-table-scroll table.dataTable thead th,
+.s2-table-scroll table.dataTable thead td { background: #fff; }

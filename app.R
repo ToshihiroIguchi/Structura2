@@ -2541,11 +2541,13 @@ server <- function(input, output, session) {
   output$datatable <- renderDT({
     req(data())
     df <- data()
+    # Single scroll area (.s2-table-scroll) instead of DT scrollX/scrollY, which swap
+    # scroll containers when a column filter gets focus and shift the table.
     dt <- datatable(df, filter = "top", editable = FALSE,
-                    options = list(pageLength = 30, autoWidth = TRUE, scrollX = TRUE,
-                                   scrollY = "65vh", scrollCollapse = TRUE),
+                    options = list(pageLength = 30, autoWidth = TRUE,
+                                   dom = 'lfr<"s2-table-scroll"t>ip'),
                     rownames = FALSE)
-    
+
     # Format floating-point numeric columns to 3 decimal places while preserving integers (e.g., ID, grade)
     is_float_col <- function(x) is.numeric(x) && any(!is.na(x) & (x %% 1 != 0))
     float_cols <- names(df)[sapply(df, is_float_col)]
@@ -2712,11 +2714,12 @@ server <- function(input, output, session) {
     if (!is.null(input$display_columns))
       df <- df[, intersect(input$display_columns, names(df)), drop = FALSE]
     
+    # Single scroll area (see output$datatable above)
     dt <- datatable(df, filter = "top", editable = FALSE,
-                    options = list(pageLength = 30, autoWidth = TRUE, scrollX = TRUE,
-                                   scrollY = "65vh", scrollCollapse = TRUE),
+                    options = list(pageLength = 30, autoWidth = TRUE,
+                                   dom = 'lfr<"s2-table-scroll"t>ip'),
                     rownames = FALSE)
-    
+
     # Format floating-point numeric columns to 3 decimal places with aligned trailing zeros
     is_float_col <- function(x) is.numeric(x) && any(!is.na(x) & (x %% 1 != 0))
     float_cols <- names(df)[sapply(df, is_float_col)]
