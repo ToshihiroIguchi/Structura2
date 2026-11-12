@@ -9,6 +9,7 @@
 
 /* Shared utilities */
 .s2-section-title { margin: 0; font-weight: 600; }
+.s2-row-between { display: flex; justify-content: space-between; align-items: center; }
 .s2-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .s2-empty { color: var(--s2-muted); padding: 10px; text-align: center; }
 .s2-error { color: var(--s2-danger); padding: 10px; text-align: center; }
@@ -39,6 +40,7 @@
 
 /* Results of the previous fit are dimmed while a new fit is running */
 .structura-stale { opacity: 0.35; pointer-events: none; transition: opacity 0.15s; }
+@keyframes structura-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 .structura-busy-spinner {
   border: 3px solid rgba(100,116,139,0.25);
   border-left-color: #2563eb;

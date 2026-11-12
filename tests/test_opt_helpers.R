@@ -2,7 +2,7 @@
 # Run: Rscript tests/test_opt_helpers.R   (from the project root)
 suppressMessages(library(lavaan))
 exprs <- parse("app.R")
-wanted <- c("FIT_CUTOFFS", "fit_index_ok", "fit_threshold_violations", "struct_pred_cols", "row_checked", "build_struct_lines", "make_struct_key", "active_struct_vars",
+wanted <- c("OPT_DEFAULTS", "FIT_CUTOFFS", "fit_index_ok", "fit_threshold_violations", "struct_pred_cols", "row_checked", "build_struct_lines", "make_struct_key", "active_struct_vars",
             "run_lavaan_sem", "free_cov_pairs", "required_struct_vars", "candidate_structure_check",
             "check_variable_isolation", "fit_is_proper", "candidate_score", "criterion_field", "aicc_from_fit", "fit_candidate_model", "fit_converged", "try_run_sem", "candidate_syntax",
             "droppable_struct_vars", "orphaned_struct_vars", "orphan_zero_lines",
@@ -281,5 +281,32 @@ cyc <- sug[[r_x1]][[c_y]]
 if (!is.null(cyc)) ok(isTRUE(cyc$cyclic), "x1 ~ y flagged as feedback loop")
 mi_all <- get_modification_suggestions(sug_fit, 3.84, 0)
 ok(!is.null(mi_all) && all(mi_all$op %in% c("~", "~~", "=~")), "MI list limited to supported operators")
+# --- OPT_DEFAULTS: every default lies inside its own limits / choices
+for (nm in names(OPT_DEFAULTS)) {
+  d <- OPT_DEFAULTS[[nm]]
+  if (!is.null(d$choices)) ok(d$default %in% d$choices, paste("OPT_DEFAULTS$", nm, ": default is a choice"))
+  else ok(d$min <= d$default && d$default <= d$max && d$step > 0, paste("OPT_DEFAULTS$", nm, ": default within min/max"))
+}
+# --- vectorized tick reading equals the per-cell definition (isTRUE(as.logical(x))) for every cell type
+cell_ok <- function(x) isTRUE(as.logical(x))
+mixed <- data.frame(Dependent = c("a", "b", "c"), Operator = "~", stringsAsFactors = FALSE)
+mixed$p1 <- c(TRUE, NA, FALSE)
+mixed$p2 <- c("TRUE", "false", "T")
+mixed$p3 <- c(1, 0, NA)
+mixed$p4 <- factor(c("TRUE", "FALSE", "TRUE"))
+mixed$p5 <- c(NA, NA, NA)
+for (i in 1:3) {
+  cols <- struct_pred_cols(mixed)
+  want <- cols[vapply(cols, function(p) cell_ok(mixed[[p]][i]), logical(1))]
+  ok(identical(row_checked(mixed, i, cols), want), sprintf("row_checked row %d matches the per-cell definition", i))
+}
+e_mixed <- struct_edges(mixed)
+want_e <- do.call(rbind, lapply(1:3, function(i) {
+  p <- struct_pred_cols(mixed); p <- p[vapply(p, function(q) cell_ok(mixed[[q]][i]), logical(1))]
+  if (length(p)) data.frame(dep = mixed$Dependent[i], pred = p, stringsAsFactors = FALSE)
+}))
+rownames(want_e) <- NULL
+ok(identical(e_mixed, want_e), "struct_edges matches the per-cell definition for logical/text/number/factor/NA cells")
+ok(nrow(struct_edges(mixed[0, ])) == 0 && length(row_checked(mixed, 1, character(0))) == 0, "empty table / no columns")
 cat("ALL PASSED
 ")

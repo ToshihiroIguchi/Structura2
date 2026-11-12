@@ -138,7 +138,7 @@ const fs = require('fs');
   });
 
   console.log('Waiting for Step 1 Modal (Parameters & Locking)...');
-  await targetFrame.waitForSelector('#prune_lock_table', { timeout: 20000 });
+  await targetFrame.waitForSelector('[id^="prune_lock_table_"]', { timeout: 20000 });
 
   console.log('Selecting Simulated Annealing (SA) strategy...');
   await targetFrame.select('#prune_strategy', 'sa');

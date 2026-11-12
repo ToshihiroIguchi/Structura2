@@ -494,7 +494,8 @@ build_meas_lines <- function(meas) {
 # Names of the columns in `cols` that are ticked in row `i` of a checkbox table.
 row_checked <- function(df, i, cols) {
   if (!length(cols)) return(character(0))
-  cols[vapply(df[i, cols], function(x) isTRUE(as.logical(x)), logical(1))]
+  l <- vapply(cols, function(p) as.logical(df[[p]][i]), logical(1), USE.NAMES = FALSE)
+  cols[!is.na(l) & l]
 }
 
 # Active structural paths as a data.frame(dep, pred), in row-major order (each row's predictors in column
@@ -504,8 +505,7 @@ struct_edges <- function(struct_df) {
   pred_cols <- struct_pred_cols(struct_df)
   empty <- data.frame(dep = character(0), pred = character(0), stringsAsFactors = FALSE)
   if (!length(pred_cols) || nrow(struct_df) == 0) return(empty)
-  ticked <- vapply(pred_cols, function(p) vapply(struct_df[[p]], function(x) isTRUE(as.logical(x)), logical(1)),
-                   logical(nrow(struct_df)))
+  ticked <- vapply(pred_cols, function(p) { l <- as.logical(struct_df[[p]]); !is.na(l) & l }, logical(nrow(struct_df)))
   ticked <- matrix(ticked, nrow = nrow(struct_df), dimnames = list(NULL, pred_cols))
   k <- which(t(ticked))                      # row-major positions of the ticked cells
   if (!length(k)) return(empty)
@@ -1266,6 +1266,37 @@ fit_is_proper <- function(fit) {
   tryCatch(isTRUE(suppressWarnings(lavaan::lavInspect(fit, "post.check"))), error = function(e) TRUE)
 }
 
+# Auto-Optimize settings: the Step 1 dialog inputs and the validation of the submitted values both read this
+# table. Choices are label = value; numbers carry default / min / max / step.
+OPT_DEFAULTS <- list(
+  criterion  = list(default = "BIC",
+                    choices = c("BIC (Stronger Sparsity Penalty / Recommended)" = "BIC",
+                                "AICc (Small-Sample Corrected AIC)" = "AICc",
+                                "AIC (Predictive Accuracy)" = "AIC")),
+  strategy   = list(default = "adaptive",
+                    choices = c("Adaptive Auto-Switch (Recommended)" = "adaptive",
+                                "Regularized SEM (Lasso / Elastic Net - Modern Standard)" = "regsem",
+                                "Stepwise Search (Fast & Deterministic)" = "stepwise",
+                                "Exhaustive Search (100% Exact All-Subset)" = "exhaustive",
+                                "Simulated Annealing (SA - Fast Trajectory Search)" = "sa")),
+  max_exhaustive_comb = list(default = 1024, min = 64, max = 8192, step = 64),
+  sa_max_iter         = list(default = 150, min = 20, max = 500, step = 10),
+  sa_temp_init        = list(default = 10, min = 1, max = 100, step = 1),
+  sa_seed             = list(default = 1, min = 1, max = .Machine$integer.max, step = 1),
+  regsem_type         = list(default = "lasso", choices = c("Lasso (L1)" = "lasso", "Elastic Net" = "enet")),
+  regsem_n_lambda     = list(default = 30, min = 10, max = 100, step = 5)
+)
+
+# Step 1 dialog inputs built from OPT_DEFAULTS (`key` names the entry, `id` the input).
+opt_select_input <- function(key, id, label) {
+  d <- OPT_DEFAULTS[[key]]
+  selectInput(id, label, choices = d$choices, selected = d$default)
+}
+opt_numeric_input <- function(id, label) {
+  d <- OPT_DEFAULTS[[id]]
+  numericInput(id, label, value = d$default, min = d$min, max = d$max, step = d$step)
+}
+
 # Fit indices shown in the Fit Indices table and on the diagram title, in display order.
 FIT_INDEX_NAMES <- c("pvalue", "srmr", "rmsea", "aic", "bic", "gfi", "agfi", "nfi", "cfi")
 
@@ -1538,7 +1569,6 @@ ui <- fluidPage(
   animation: structura-spin 1s linear infinite;
   margin-bottom: 24px;
 }
-@keyframes structura-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 .structura-preload-progress {
   width: 280px;
   background-color: #334155;
@@ -1742,20 +1772,21 @@ ui <- fluidPage(
         setTimeout(function() { URL.revokeObjectURL(url); }, 2000);
       };
 
-      window.downloadSemDiagramSvg = function() {
+      // The diagram for an export button; tells the user and returns null when there is none.
+      window.structuraRequireDiagram = function() {
         var d = window.structuraDiagramSvg();
-        if (!d) {
-          alert('No path diagram available to export. Please run and fit a model first.');
-          return;
-        }
+        if (!d) alert('No path diagram available to export. Please run and fit a model first.');
+        return d;
+      };
+
+      window.downloadSemDiagramSvg = function() {
+        var d = window.structuraRequireDiagram();
+        if (!d) return;
         window.structuraSaveBlob(new Blob([d.text], { type: 'image/svg+xml;charset=utf-8' }), 'structura2_path_diagram.svg');
       };
 
       window.downloadSemDiagramPng = function(scale) {
-        if (!window.structuraDiagramSvg()) {
-          alert('No path diagram available to export. Please run and fit a model first.');
-          return;
-        }
+        if (!window.structuraRequireDiagram()) return;
         window.structuraDiagramPng(scale || 2).then(function(blob) {
           window.structuraSaveBlob(blob, 'structura2_path_diagram.png');
         }).catch(function(err) {
@@ -1957,11 +1988,9 @@ ui <- fluidPage(
           var reportDiv = document.getElementById('structura-print-report');
           if (!reportDiv) return;
           
-          var plotContainer = document.getElementById('sem_plot_container');
-          var svgElem = plotContainer ? plotContainer.querySelector('svg') : null;
-          var svgHtml = svgElem ? svgElem.outerHTML : '<p style=\"color:#666; font-style:italic;\">No diagram available</p>';
+          var diagram = window.structuraDiagramSvg();
+          var svgHtml = diagram ? diagram.text : '<p style=\"color:#666; font-style:italic;\">No diagram available</p>';
 
-          var sectionIdx = 1;
           var html = '<div class=\"print-header\">' +
             '<div>' +
               '<h1>Structura2 Analysis Report</h1>' +
@@ -1972,62 +2001,32 @@ ui <- fluidPage(
               '<div><b>Mode:</b> ' + msg.analysis_mode + ' | <b>Missing:</b> ' + msg.missing_method + '</div>' +
             '</div>' +
           '</div>' +
-          (msg.warning_html || '') +
-          '<div class=\"print-avoid-break\">' +
-            '<div class=\"print-section-title\">' + (sectionIdx++) + '. Model Fit Summary & Diagnostics</div>' +
-            msg.fit_table_html +
-          '</div>';
+          (msg.warning_html || '');
 
-          if (msg.opt_history_html && msg.opt_history_html.trim() !== '') {
-            html += '<div class=\"print-avoid-break\">' +
-              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Model Optimization History</div>' +
-              msg.opt_history_html +
+          // Numbered report sections; `opts.style` adds inline style, `opts.avoidBreak === false` allows page breaks inside
+          var sectionIdx = 1;
+          var addSection = function(title, bodyHtml, opts) {
+            opts = opts || {};
+            html += '<div' + (opts.avoidBreak === false ? '' : ' class=\"print-avoid-break\"') +
+              (opts.style ? ' style=\"' + opts.style + '\"' : '') + '>' +
+              '<div class=\"print-section-title\">' + (sectionIdx++) + '. ' + title + '</div>' +
+              bodyHtml +
             '</div>';
-          }
+          };
+          var filled = function(h) { return h && h.trim() !== ''; };
 
-          if (msg.var_stats_html && msg.var_stats_html.trim() !== '') {
-            html += '<div class=\"print-avoid-break\">' +
-              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Variable Summary Statistics</div>' +
-              msg.var_stats_html +
-            '</div>';
-          }
-
-          if (msg.latent_rel_html && msg.latent_rel_html.trim() !== '') {
-            html += '<div class=\"print-avoid-break\">' +
-              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Latent Variable Reliability & Validity</div>' +
-              msg.latent_rel_html +
-            '</div>';
-          }
-
-          html += '<div class=\"print-avoid-break\">' +
-            '<div class=\"print-section-title\">' + (sectionIdx++) + '. Path Diagram</div>' +
-            '<div class=\"print-diagram-box\">' +
-              svgHtml +
-            '</div>' +
-          '</div>' +
-          '<div class=\"print-page-break\"></div>' +
-          '<div class=\"print-avoid-break\">' +
-            '<div class=\"print-section-title\">' + (sectionIdx++) + '. Parameter Estimates</div>' +
-            msg.param_table_html +
-          '</div>';
-
-          if (msg.defined_effects_html && msg.defined_effects_html.trim() !== '') {
-            html += '<div class=\"print-avoid-break\" style=\"margin-top: 14px;\">' +
-              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Defined & Indirect Effects</div>' +
-              msg.defined_effects_html +
-            '</div>';
-          }
-
-          html += '<div class=\"print-avoid-break\" style=\"margin-top: 14px;\">' +
-            '<div class=\"print-section-title\">' + (sectionIdx++) + '. Model Syntax (lavaan)</div>' +
-            '<pre class=\"print-syntax-box\">' + msg.syntax_text + '</pre>' +
-          '</div>';
-
-          if (msg.summary_text && msg.summary_text.trim() !== '') {
-            html += '<div style=\"margin-top: 14px;\">' +
-              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Model Summary (lavaan)</div>' +
-              '<pre class=\"print-syntax-box\">' + msg.summary_text + '</pre>' +
-            '</div>';
+          addSection('Model Fit Summary & Diagnostics', msg.fit_table_html);
+          if (filled(msg.opt_history_html)) addSection('Model Optimization History', msg.opt_history_html);
+          if (filled(msg.var_stats_html)) addSection('Variable Summary Statistics', msg.var_stats_html);
+          if (filled(msg.latent_rel_html)) addSection('Latent Variable Reliability & Validity', msg.latent_rel_html);
+          addSection('Path Diagram', '<div class=\"print-diagram-box\">' + svgHtml + '</div>');
+          html += '<div class=\"print-page-break\"></div>';
+          addSection('Parameter Estimates', msg.param_table_html);
+          if (filled(msg.defined_effects_html)) addSection('Defined & Indirect Effects', msg.defined_effects_html, { style: 'margin-top: 14px;' });
+          addSection('Model Syntax (lavaan)', '<pre class=\"print-syntax-box\">' + msg.syntax_text + '</pre>', { style: 'margin-top: 14px;' });
+          if (filled(msg.summary_text)) {
+            addSection('Model Summary (lavaan)', '<pre class=\"print-syntax-box\">' + msg.summary_text + '</pre>',
+                       { avoidBreak: false, style: 'margin-top: 14px;' });
           }
 
           reportDiv.innerHTML = html;
@@ -2054,14 +2053,9 @@ ui <- fluidPage(
               if (++tries < 50) setTimeout(render, 100);
               return;
             }
-            renderPrunePreview(message);
+            window.structuraRenderDot(document.getElementById('prune_preview_container'), message);
           })();
         });
-
-        function renderPrunePreview(message) {
-          var container = document.getElementById('prune_preview_container');
-          if (container) window.structuraRenderDot(container, message);
-        }
 
         // Real-time Optimization Live Canvas Line Chart Renderer
         Shiny.addCustomMessageHandler('update_optimization_live_chart', function(msg) {
@@ -2331,7 +2325,7 @@ ui <- fluidPage(
                           actionButton("add_row", "Add Row", class = "btn btn-primary", style = "margin-top: 10px;")
                       ),
                       tags$hr(),
-                      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; flex-wrap: wrap; gap: 8px;",
+                      div(class = "s2-row-between", style = "margin-bottom: 4px; flex-wrap: wrap; gap: 8px;",
                           h4("Structural Model", class = "s2-section-title"),
                           div(style = "display: flex; align-items: center; gap: 12px; flex-wrap: wrap;",
                               div(style = "margin-bottom: 0;",
@@ -2413,7 +2407,7 @@ ui <- fluidPage(
                                            verbatimTextOutput("approx_eq"))
                       ),
                       # ---------- Path diagram --------------------
-                      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; margin-top: 10px;",
+                      div(class = "s2-row-between", style = "margin-bottom: 6px; margin-top: 10px;",
                           h4("Path Diagram", style = "margin: 0; font-weight: 600;"),
                           div(style = "display: flex; gap: 6px;",
                               actionButton("save_diagram_svg", "Save SVG", class = "btn btn-default btn-xs",
@@ -2439,7 +2433,7 @@ ui <- fluidPage(
 
     # ---------------- Details tab --------------------------------
     tabPanel("Details",
-             div(style = "display: flex; justify-content: space-between; align-items: center; margin-top: 10px; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;",
+             div(class = "s2-row-between", style = "margin-top: 10px; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;",
                  h4("Parameter Estimates", style = "margin: 0; font-weight: 600;"),
                  div(style = "display: flex; gap: 20px; align-items: center;",
                      div(style = "margin-bottom: 0;",
@@ -4401,7 +4395,7 @@ server <- function(input, output, session) {
         base_unidentified_info,
         div(
           style = "background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 12px; margin-bottom: 15px;",
-          div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;",
+          div(class = "s2-row-between", style = "margin-bottom: 6px;",
               tags$b("Variable Isolation Prevention (Keep in Model)", style = "color: #1e293b; font-size: 14px;"),
               span(style = "font-size: 11px; color: #64748b;", "At least one connecting path will be retained")
           ),
@@ -4417,7 +4411,7 @@ server <- function(input, output, session) {
           ),
           fluidRow(
             column(width = 12,
-                   div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;",
+                   div(class = "s2-row-between", style = "margin-bottom: 4px;",
                        tags$label("Predictor Variables:", style = "font-size: 12px; font-weight: 600; margin: 0; color: #334155;"),
                        div(actionLink("retain_preds_all", "All", style = "font-size: 11px; margin-right: 6px; cursor: pointer;"),
                            actionLink("retain_preds_none", "None", style = "font-size: 11px; cursor: pointer;"))
@@ -4433,22 +4427,8 @@ server <- function(input, output, session) {
         rHandsontableOutput(lock_id),
         tags$hr(),
         fluidRow(
-          column(width = 6,
-                 selectInput("prune_criterion", "Optimization Criterion:",
-                             choices = c("BIC (Stronger Sparsity Penalty / Recommended)" = "BIC",
-                                         "AICc (Small-Sample Corrected AIC)" = "AICc",
-                                         "AIC (Predictive Accuracy)" = "AIC"),
-                             selected = "BIC")
-          ),
-          column(width = 6,
-                 selectInput("prune_strategy", "Search Algorithm Strategy:",
-                             choices = c("Adaptive Auto-Switch (Recommended)" = "adaptive",
-                                         "Regularized SEM (Lasso / Elastic Net - Modern Standard)" = "regsem",
-                                         "Stepwise Search (Fast & Deterministic)" = "stepwise",
-                                         "Exhaustive Search (100% Exact All-Subset)" = "exhaustive",
-                                         "Simulated Annealing (SA - Fast Trajectory Search)" = "sa"),
-                             selected = "adaptive")
-          )
+          column(width = 6, opt_select_input("criterion", "prune_criterion", "Optimization Criterion:")),
+          column(width = 6, opt_select_input("strategy", "prune_strategy", "Search Algorithm Strategy:"))
         ),
         tags$details(
           style = "margin-top: 15px; border: 1px solid #ddd; padding: 10px; border-radius: 4px; background-color: #fafafa;",
@@ -4460,25 +4440,22 @@ server <- function(input, output, session) {
             style = "margin-top: 10px;",
             conditionalPanel(
               condition = "input.prune_strategy == 'adaptive' || input.prune_strategy == 'exhaustive'",
-              numericInput("max_exhaustive_comb", "Exhaustive Search Max Combinations Threshold:",
-                           value = 1024, min = 64, max = 8192, step = 64)
+              opt_numeric_input("max_exhaustive_comb", "Exhaustive Search Max Combinations Threshold:")
             ),
             conditionalPanel(
               condition = "input.prune_strategy == 'sa' || input.prune_strategy == 'adaptive'",
               fluidRow(
-                column(4, numericInput("sa_max_iter", "SA Max Iterations:", value = 150, min = 20, max = 500, step = 10)),
-                column(4, numericInput("sa_temp_init", "SA Initial Temp (in criterion units):", value = 10.0, min = 1.0, max = 100.0, step = 1.0)),
-                column(4, numericInput("sa_seed", "Random Seed:", value = 1, min = 1, step = 1))
+                column(4, opt_numeric_input("sa_max_iter", "SA Max Iterations:")),
+                column(4, opt_numeric_input("sa_temp_init", "SA Initial Temp (in criterion units):")),
+                column(4, opt_numeric_input("sa_seed", "Random Seed:"))
               ),
               helpText("The cooling rate is derived automatically so the temperature falls to 0.1 at the final iteration.")
             ),
             conditionalPanel(
               condition = "input.prune_strategy == 'regsem'",
               fluidRow(
-                column(6, selectInput("regsem_type", "Regularization Penalty:",
-                                     choices = c("Lasso (L1)" = "lasso", "Elastic Net" = "enet"),
-                                     selected = "lasso")),
-                column(6, numericInput("regsem_n_lambda", "Number of Lambda Steps:", value = 30, min = 10, max = 100, step = 5))
+                column(6, opt_select_input("regsem_type", "regsem_type", "Regularization Penalty:")),
+                column(6, opt_numeric_input("regsem_n_lambda", "Number of Lambda Steps:"))
               ),
               helpText("Regularized structural equation modeling using L1/L2 penalties across varying lambda thresholds.")
             )
@@ -4644,7 +4621,7 @@ server <- function(input, output, session) {
     
     showModal(modalDialog(
       title = div(
-        style = "display: flex; justify-content: space-between; align-items: center; width: calc(100% - 30px); margin-right: 15px;",
+        class = "s2-row-between", style = "width: calc(100% - 30px); margin-right: 15px;",
         span(paste0("Auto-Optimize Model: Step 2 - Candidate Ranking Catalog", stopped_badge), style = "font-weight: bold;"),
         div(
           style = "display: flex; gap: 8px; align-items: center;",
@@ -4697,7 +4674,7 @@ server <- function(input, output, session) {
           div(class = "s2-prune-left", DTOutput("prune_candidates_table")),
           div(class = "s2-prune-right",
         div(
-          style = "display: flex; justify-content: space-between; align-items: center; margin-top: 0; margin-bottom: 10px;",
+          class = "s2-row-between", style = "margin-top: 0; margin-bottom: 10px;",
           h5("Path Diagram Preview for Selected Candidate:", style = "margin: 0; font-weight: 600;"),
           uiOutput("prune_cand_indicator_ui", inline = TRUE)
         ),
@@ -4769,32 +4746,33 @@ server <- function(input, output, session) {
     # Validate every optimizer input up front (before any modal is shown): cleared fields arrive as NA and
     # typed values can bypass the UI limits. Corrected fields are reported together in one notification.
     adjusted <- character(0)
-    num_input <- function(id, label, default, min_val, max_val) {
+    num_input <- function(id, label) {
+      d <- OPT_DEFAULTS[[id]]
       raw <- input[[id]]
-      v <- safe_num(raw, default, min_val, max_val)
+      v <- safe_num(raw, d$default, d$min, d$max)
       raw_num <- suppressWarnings(as.numeric(raw))
       if (!(length(raw_num) == 1 && is.finite(raw_num) && raw_num == v)) {
         adjusted <<- c(adjusted, sprintf("%s -> %s", label, format(v, scientific = FALSE)))
       }
       v
     }
-    choice_input <- function(id, label, allowed, default) {
+    choice_input <- function(key, id, label) {
+      d <- OPT_DEFAULTS[[key]]
       v <- input[[id]]
-      if (length(v) != 1 || is.na(v) || !(v %in% allowed)) {
-        adjusted <<- c(adjusted, sprintf("%s -> %s", label, default))
-        return(default)
+      if (length(v) != 1 || is.na(v) || !(v %in% d$choices)) {
+        adjusted <<- c(adjusted, sprintf("%s -> %s", label, d$default))
+        return(d$default)
       }
       v
     }
-    criterion <- choice_input("prune_criterion", "Optimization Criterion", c("BIC", "AICc", "AIC"), "BIC")
-    strategy <- choice_input("prune_strategy", "Search Algorithm Strategy",
-                             c("adaptive", "regsem", "stepwise", "exhaustive", "sa"), "adaptive")
-    max_comb <- num_input("max_exhaustive_comb", "Exhaustive Search Max Combinations", 1024, 64, 8192)
-    sa_max_iter <- as.integer(num_input("sa_max_iter", "SA Max Iterations", 150, 20, 500))
-    sa_T0 <- num_input("sa_temp_init", "SA Initial Temp", 10, 1, 100)
-    sa_seed <- as.integer(num_input("sa_seed", "Random Seed", 1, 1, .Machine$integer.max))
-    regsem_type <- choice_input("regsem_type", "Regularization Penalty", c("lasso", "enet"), "lasso")
-    regsem_n_lambda <- as.integer(num_input("regsem_n_lambda", "Number of Lambda Steps", 30, 10, 100))
+    criterion <- choice_input("criterion", "prune_criterion", "Optimization Criterion")
+    strategy <- choice_input("strategy", "prune_strategy", "Search Algorithm Strategy")
+    max_comb <- num_input("max_exhaustive_comb", "Exhaustive Search Max Combinations")
+    sa_max_iter <- as.integer(num_input("sa_max_iter", "SA Max Iterations"))
+    sa_T0 <- num_input("sa_temp_init", "SA Initial Temp")
+    sa_seed <- as.integer(num_input("sa_seed", "Random Seed"))
+    regsem_type <- choice_input("regsem_type", "regsem_type", "Regularization Penalty")
+    regsem_n_lambda <- as.integer(num_input("regsem_n_lambda", "Number of Lambda Steps"))
     if (length(adjusted) > 0) {
       showNotification(
         paste0("Some optimizer settings were empty or out of range and were adjusted: ",
@@ -4885,13 +4863,13 @@ server <- function(input, output, session) {
       showModal(modalDialog(
         title = "Auto-Optimize Model: Optimizing Model Space...",
         footer = div(
-          style = "display: flex; justify-content: space-between; align-items: center; width: 100%;",
+          class = "s2-row-between", style = "width: 100%;",
           actionButton("cancel_prune_explore", "Cancel", class = "btn btn-default", `data-dismiss` = "modal"),
           actionButton("stop_prune_explore", "Stop & View Results", class = "btn btn-warning")
         ),
         div(
           style = "text-align: center; padding: 15px;",
-          div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;",
+          div(class = "s2-row-between", style = "margin-bottom: 8px;",
               span(style = "font-weight: bold; color: #475569; font-size: 13px;",
                    sprintf("Strategy: %s | Criterion: %s", toupper(eff_strategy), criterion)),
               span(id = "prune_iter_badge", class = "badge badge-primary", style = "font-size: 12px; background-color: #2563eb;", "Step 0")

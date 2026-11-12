@@ -100,7 +100,7 @@ function expectedBest(protect) {
 
   // Open Auto-Optimize, choose strategy, optionally protect x1
   await ui.evaluate(() => document.getElementById('prune_model_btn').click());
-  await ui.waitForSelector('#prune_lock_table', { timeout: 15000 });
+  await ui.waitForSelector('[id^="prune_lock_table_"]', { timeout: 15000 });
   await ui.evaluate((s) => {
     if (window.Shiny) window.Shiny.setInputValue('prune_strategy', s);
     const sel = document.getElementById('prune_strategy');
@@ -128,10 +128,10 @@ function expectedBest(protect) {
   res.rows.slice(0, 8).forEach(r => console.log('ROW:', r.join(' | ')));
   const col = n => res.headers.indexOf(n);
   const top = res.rows[0];
-  const statuses = res.rows.map(r => r[col('Status')]);
-  ok(!statuses.some(s => s.includes('[Variable Dropped]')), 'no candidate is labelled [Variable Dropped]');
-  ok(top[col('Status')].includes('[Optimal]'), 'rank 1 is [Optimal]: ' + top[col('Status')]);
-  ok(top[col('ΔAIC')] !== '—', 'rank 1 has a numeric ΔAIC: ' + top[col('ΔAIC')]);
+  const notes = res.rows.map(r => r[col('Note')]);
+  ok(!notes.some(s => s.includes('Variable Dropped')), 'no candidate is labelled Variable Dropped');
+  ok(top[col('Note')] === '—', 'rank 1 carries no warning note: ' + top[col('Note')]);
+  ok(top[col('AIC')] !== '—', 'rank 1 has a numeric AIC: ' + top[col('AIC')]);
 
   if (STRATEGY === 'exhaustive' || STRATEGY === 'adaptive') {
     const got = parseFloat(top[col('ΔAIC')]);
