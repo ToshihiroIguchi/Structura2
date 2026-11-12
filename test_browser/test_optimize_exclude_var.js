@@ -24,15 +24,15 @@ let failures = 0;
 const ok = (cond, msg) => { console.log((cond ? 'PASS' : 'FAIL') + ' - ' + msg); if (!cond) failures++; };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Reference: best non-empty subset of x1..x5 for x6 by plain regression AIC, relative to the full model.
+// Reference: best non-empty subset of x1..x5 for x6 by plain regression BIC (the default criterion), relative to the full model.
 function expectedBest(protect) {
   const code = `
     d <- lavaan::HolzingerSwineford1939; v <- paste0('x', 1:5)
-    full <- AIC(lm(x6 ~ ., d[, c(v, 'x6')]))
+    full <- BIC(lm(x6 ~ ., d[, c(v, 'x6')]))
     best <- Inf; bs <- NULL
     for (k in 1:31) { s <- v[bitwAnd(k, 2^(0:4)) > 0]
       ${protect ? "if (!('x1' %in% s)) next" : ''}
-      a <- AIC(lm(reformulate(s, 'x6'), d)) - full
+      a <- BIC(lm(reformulate(s, 'x6'), d)) - full
       if (a < best) { best <- a; bs <- s } }
     cat(sprintf('%.2f|%s', best, paste(bs, collapse=',')))`;
   const tmp = path.join(require('os').tmpdir(), 'structura2_expected_best.R');
@@ -44,7 +44,7 @@ function expectedBest(protect) {
 (async () => {
   console.log(`Strategy=${STRATEGY} Scenario=${SCENARIO} ${SHINYLIVE ? '(Shinylive)' : '(runApp)'}`);
   const exp = expectedBest(SCENARIO === 'D');
-  console.log('Reference best subset (lm):', exp.subset.join(' + '), 'delta AIC =', exp.delta.toFixed(2));
+  console.log('Reference best subset (lm):', exp.subset.join(' + '), 'delta BIC =', exp.delta.toFixed(2));
 
   const browser = await puppeteer.launch({
     executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -134,18 +134,17 @@ function expectedBest(protect) {
   ok(top[col('AIC')] !== '—', 'rank 1 has a numeric AIC: ' + top[col('AIC')]);
 
   if (STRATEGY === 'exhaustive' || STRATEGY === 'adaptive') {
-    const got = parseFloat(top[col('ΔAIC')]);
-    ok(Math.abs(got - exp.delta) < 0.011, `rank 1 ΔAIC ${got} equals lm best-subset ΔAIC ${exp.delta}`);
+    const current = res.rows.find(r => r[col('Note')].startsWith('Current model'));
+    const got = parseFloat(top[col('BIC')]) - parseFloat(current[col('BIC')]);
+    ok(Math.abs(got - exp.delta) < 0.011, `rank 1 BIC change ${got.toFixed(2)} equals lm best-subset change ${exp.delta}`);
     const retained = (top[col('Retained Paths')].match(/x[1-5]/g) || []).sort().join(',');
     ok(retained === exp.subset.slice().sort().join(','), `rank 1 retained predictors ${retained} = lm best subset ${exp.subset.join(',')}`);
   }
-  const hasExcl = !exp.subset.includes('x1') || exp.subset.length < 5;
   if (SCENARIO === 'D') {
     ok(!res.rows.some(r => !/x1/.test(r[col('Retained Paths')])), 'protected x1 is never stripped of all paths');
   }
-  // Other predictors (e.g. x2) can still lose every path in scenario D, so the notice is expected there too.
-  ok(res.modalText.includes('scored with its removed paths fixed to zero') === hasExcl,
-     'fixed-zero notice shown when a predictor can be removed');
+  // Some candidate always drops a predictor here (x6 ~ xk removed), so the notice is expected in every scenario.
+  ok(res.modalText.includes('drops a predictor changes the scores'), 'notice shown that dropping a predictor changes the scores');
 
   if (SCENARIO === 'CANCEL') {
     await ui.evaluate(() => { const b = Array.from(document.querySelectorAll('.modal-footer button, .modal-header button')).find(x => /Close/.test(x.innerText)); if (b) b.click(); });

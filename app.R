@@ -5048,7 +5048,8 @@ server <- function(input, output, session) {
         list(st = st, rec = rec, score = score_of(rec), fitted = fitted)
       }
 
-      # Appends one step to the score history; the best-so-far series follows (the baseline score is the start).
+      # Appends one step to the score history; the best-so-far series follows (the baseline score is the start;
+      # without one, an unidentified start, nothing has been achieved yet).
       record_score <- function(st, score) {
         best <- if (length(st$best_scores_hist) > 0) tail(st$best_scores_hist, 1)
                 else if (is.finite(st$base_score)) st$base_score else Inf
