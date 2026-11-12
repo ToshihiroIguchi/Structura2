@@ -78,6 +78,19 @@ When modifying this app, keep these WebR limitations in mind:
 - Any operation that depends on user-supplied data
 
 When an error occurs, display a user-friendly message instead of crashing the application.
+Never let an unhandled error crash the Shiny app, and make the message actionable (suggest a specific fix).
+
+## Code Style
+
+- Use consistent R coding style: `snake_case` for variable and function names.
+- Preserve all existing comments and docstrings unless they are directly contradicted by a code change.
+- When modifying `app.R`, maintain the existing section structure (marked with `# ---- Section Name ----` comments).
+
+## Testing
+
+- Always use port **8100** for local Shiny runs, tests and browser automation scripts (do not use 8080).
+- Before making changes to core functionality, verify that the current app runs without errors using `shiny::runApp(".")`.
+- After making changes, test with edge-case data (empty CSV, constant columns, perfect multicollinearity).
 
 ## Build Instructions
 
