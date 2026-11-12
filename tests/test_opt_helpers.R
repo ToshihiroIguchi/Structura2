@@ -2,11 +2,11 @@
 # Run: Rscript tests/test_opt_helpers.R   (from the project root)
 suppressMessages(library(lavaan))
 exprs <- parse("app.R")
-wanted <- c("FIT_CUTOFFS", "fit_index_ok", "fit_threshold_violations", "fit_cutoff_violations", "struct_pred_cols", "row_checked", "build_struct_lines", "make_struct_key", "active_struct_vars",
+wanted <- c("FIT_CUTOFFS", "fit_index_ok", "fit_threshold_violations", "struct_pred_cols", "row_checked", "build_struct_lines", "make_struct_key", "active_struct_vars",
             "run_lavaan_sem", "free_cov_pairs", "required_struct_vars", "candidate_structure_check",
             "check_variable_isolation", "fit_is_proper", "candidate_score", "criterion_field", "aicc_from_fit", "fit_candidate_model", "fit_converged", "try_run_sem", "candidate_syntax",
             "droppable_struct_vars", "orphaned_struct_vars", "orphan_zero_lines",
-            "struct_descendants", "struct_dependents", "struct_edges", "fit_suggestion_model", "fit_cutoff_violations", "get_modification_suggestions", "get_suggested_structural_paths",
+            "struct_descendants", "struct_dependents", "struct_edges", "fit_suggestion_model", "get_modification_suggestions", "get_suggested_structural_paths",
             "%||%", "safe_num", "needs_meanstructure_for", "fit_stale_reasons")
 for (e in exprs) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && as.character(e[[2]]) %in% wanted) eval(e)
@@ -281,11 +281,5 @@ cyc <- sug[[r_x1]][[c_y]]
 if (!is.null(cyc)) ok(isTRUE(cyc$cyclic), "x1 ~ y flagged as feedback loop")
 mi_all <- get_modification_suggestions(sug_fit, 3.84, 0)
 ok(!is.null(mi_all) && all(mi_all$op %in% c("~", "~~", "=~")), "MI list limited to supported operators")
-# --- relative degraded-fit flag
-v_bad  <- fit_cutoff_violations(c(cfi = .85, rmsea = .09, srmr = .05))
-v_good <- fit_cutoff_violations(c(cfi = .95, rmsea = .04, srmr = .04))
-ok(identical(unname(v_bad), c(TRUE, TRUE, FALSE)) && !any(v_good), "cutoff violations detected per index")
-ok(!any(v_bad & !v_bad), "a candidate that merely inherits the baseline violations is not flagged as degraded")
-ok(any(v_bad & !v_good), "a candidate that newly breaks cutoffs the baseline met is flagged")
 cat("ALL PASSED
 ")

@@ -813,14 +813,19 @@ preprocess_columns <- function(df, log_columns = NULL, reference = df) {
   df
 }
 
+# TRUE for a column without usable variation (all missing, a single value, or spread below 1e-12). The one
+# definition of "zero variance" for display choices, standardization and the linear-dependency check.
+is_constant_col <- function(x) {
+  s <- suppressWarnings(stats::sd(x, na.rm = TRUE))
+  is.na(s) || s < 1e-12
+}
+
 # Columns offered as "Display columns" for a preprocessed data set `full` (original data `orig`):
 # constant numeric columns are excluded, the default selection is the numeric columns (log-transformed
 # ones under their log_ names).
 display_column_choices <- function(full, orig, log_columns = NULL) {
   numeric_cols <- vapply(full, is.numeric, logical(1))
-  zero_var <- names(full)[numeric_cols][vapply(full[numeric_cols], function(x) {
-    v <- var(x, na.rm = TRUE); is.na(v) || v == 0
-  }, logical(1))]
+  zero_var <- names(full)[numeric_cols][vapply(full[numeric_cols], is_constant_col, logical(1))]
   available <- setdiff(names(full), zero_var)
   numeric_orig <- names(orig)[vapply(orig, is.numeric, logical(1))]
   logs <- if (length(log_columns)) paste0("log_", log_columns) else NULL
@@ -1117,8 +1122,7 @@ diagnose_fit_inputs <- function(syntax_str, data, missing_method, needs_meanstru
     } else if (ncol(X) >= 2) {
       # Exact linear dependency: smallest eigenvalue of the correlation matrix is ~0
       Xc <- stats::na.omit(X)
-      sds <- vapply(Xc, stats::sd, numeric(1))
-      Xc <- Xc[, !is.na(sds) & sds > 1e-12, drop = FALSE]
+      Xc <- Xc[, !vapply(Xc, is_constant_col, logical(1)), drop = FALSE]
       if (nrow(Xc) > 1 && ncol(Xc) >= 2) {
         eg <- eigen(stats::cor(Xc), symmetric = TRUE)
         if (min(eg$values) < 1e-8) {
@@ -1306,14 +1310,6 @@ fit_threshold_violations <- function(fit) {
   if (is.null(ms) || all(is.na(ms))) return(NA_character_)
   bad <- vapply(FIT_CUTOFFS$index, function(ix) isFALSE(fit_index_ok(ix, unname(ms[ix]))), logical(1))
   FIT_CUTOFFS$label[bad]
-}
-
-# Which of the CFI / RMSEA / SRMR cutoffs a set of fit measures violates.
-fit_cutoff_violations <- function(ms) {
-  get <- function(nm) if (nm %in% names(ms)) as.numeric(ms[nm]) else NA_real_
-  c(cfi   = isFALSE(fit_index_ok("cfi", get("cfi"))),
-    rmsea = isFALSE(fit_index_ok("rmsea", get("rmsea"))),
-    srmr  = isFALSE(fit_index_ok("srmr", get("srmr"))))
 }
 
 # Small-sample corrected AIC: AIC + 2k(k+1)/(n-k-1), k = free parameters, n = total observations.
@@ -2680,8 +2676,7 @@ server <- function(input, output, session) {
         num_cols <- names(df)[vapply(df, is.numeric, logical(1))]
         if (length(num_cols) > 0) {
           mat_vals <- as.matrix(df[, num_cols, drop = FALSE])
-          sds <- apply(mat_vals, 2, sd, na.rm = TRUE)
-          zero_var <- which(is.na(sds) | sds < 1e-12)
+          zero_var <- which(apply(mat_vals, 2, is_constant_col))
           non_zero_var <- setdiff(seq_along(num_cols), zero_var)
           if (length(non_zero_var) > 0) {
             mat_vals[, non_zero_var] <- scale(mat_vals[, non_zero_var, drop = FALSE])
@@ -4250,7 +4245,7 @@ server <- function(input, output, session) {
       readme <- c(
         if (isFALSE(model_res$identified)) c(
           paste0("WARNING: the model is NOT IDENTIFIED",
-                 if (is.finite(model_res$ident_df)) paste0(" (df = ", format(model_res$ident_df), ")") else "",
+                 ident_df_suffix(model_res$ident_df),
                  ". Estimates are for inspection only; standard errors and fit indices are unavailable or unreliable."),
           ""),
         "Structura2 results",
@@ -4369,7 +4364,7 @@ server <- function(input, output, session) {
       base_df <- fit_identification(base_info$fit)$df
       div(style = "background-color: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 10px 14px; margin-bottom: 15px; font-size: 13px; color: #1e3a8a;",
           tags$b("The current model is not identified"),
-          paste0(if (is.finite(base_df) && base_df < 0) sprintf(" (df = %d)", as.integer(base_df)) else "",
+          paste0(if (isTRUE(base_df < 0)) ident_df_suffix(base_df) else "",
                  ". Paths are removed first until the model is identified, then the best model is searched. "),
           "Models that are not identified are never ranked. Locked paths are never removed, and every variable keeps ",
           "at least one path, so lock fewer paths if no identified model can be found.")
@@ -4391,6 +4386,9 @@ server <- function(input, output, session) {
       }
     }
     prune_lock_table_data(lock_df)
+    # The previous opening's output is dropped (NULL destroys its observer); otherwise every old table would be
+    # re-rendered on each lock edit
+    output[[prune_lock_table_id()]] <- NULL
     lock_id <- prune_lock_table_id(isolate(prune_lock_open_id()) + 1L)
     output[[lock_id]] <- render_prune_lock_table()
     prune_lock_open_id(isolate(prune_lock_open_id()) + 1L)
@@ -4585,31 +4583,21 @@ server <- function(input, output, session) {
     ord <- order(scores, decreasing = FALSE)
     sorted_candidates <- candidates_list[ord]
     scores <- scores[ord]
-    if (length(sorted_candidates) > 0 && is.finite(scores[1]) && sorted_candidates[[1]]$status != "[Baseline]") {
-      sorted_candidates[[1]]$status <- "[Optimal]"
-    }
 
-    # Distance from the best candidate and Akaike-type weights (exp(-delta/2), normalized).
+    # Akaike-type weights (exp(-delta/2), normalized) from the distance to the best candidate.
     # Candidates within 2 units of the best are statistically hard to distinguish from it.
     best_score <- if (length(scores) > 0) scores[1] else Inf
     if (is.finite(best_score)) {
       delta_best <- scores - best_score
       w_raw <- ifelse(is.finite(delta_best), exp(-delta_best / 2), 0)
       weights <- w_raw / sum(w_raw)
-      for (k in seq_along(sorted_candidates)) {
-        sorted_candidates[[k]]$weight <- weights[k]
-        if (k > 1 && is.finite(delta_best[k]) && delta_best[k] < 2 &&
-            sorted_candidates[[k]]$status %in% c("[Good]", "[Improved]")) {
-          sorted_candidates[[k]]$status <- "[Equivalent]"
-        }
-      }
+      for (k in seq_along(sorted_candidates)) sorted_candidates[[k]]$weight <- weights[k]
     }
 
     # Post-compute detailed fit measures (CFI, RMSEA, SRMR) for the top candidates only. Keeping
     # every lavaan object (up to 2^M of them for the exhaustive search) exhausts memory in WebR,
     # so lower-ranked fits are released and re-estimated on demand when previewed.
     max_keep_fits <- 20L
-    base_violations <- fit_cutoff_violations(st$base_ms)
     if (length(sorted_candidates) > 0) {
       for (k in seq_along(sorted_candidates)) {
         cand_k <- sorted_candidates[[k]]
@@ -4624,14 +4612,6 @@ server <- function(input, output, session) {
             sorted_candidates[[k]]$cfi <- as.numeric(ms_k["cfi"])
             sorted_candidates[[k]]$rmsea <- as.numeric(ms_k["rmsea"])
             sorted_candidates[[k]]$srmr <- as.numeric(ms_k["srmr"])
-            # Flag only a NEW violation: a cutoff the baseline met but this candidate breaks. If the
-            # baseline already violates a cutoff, every candidate would otherwise be flagged as well.
-            # (no baseline fit measures exist when the start was not identified, so nothing can be "new")
-            if (isTRUE(st$base_identified %||% TRUE) && any(fit_cutoff_violations(ms_k) & !base_violations)) {
-              if (!sorted_candidates[[k]]$status %in% c("[Baseline]", "[Optimal]", "[Replaced]", "[Variable Dropped]", "[Not Identified]")) {
-                sorted_candidates[[k]]$status <- "[Degraded Fit]"
-              }
-            }
           }
         }
       }
@@ -4657,9 +4637,6 @@ server <- function(input, output, session) {
     prune_results(res)
     selected_prune_cand(res$candidates[[1]])
     selected_prune_idx(1)
-    # The search state is no longer needed: it holds every candidate fit (up to 2^M of them), while the results
-    # keep only the best ones
-    opt_state(NULL)
 
     stopped_badge <- if (stopped_early) {
       sprintf(" [Stopped Early at Step %d / %d]", current_step, st$max_steps)
@@ -4739,14 +4716,45 @@ server <- function(input, output, session) {
       ),
       footer = NULL
     ))
+    # The search state is no longer needed: it holds every candidate fit (up to 2^M of them), while the results
+    # keep only the best ones. It is released only after the dialog is up, so a failure while building the
+    # dialog can still fall back to the state (see abort_optimization / the tick error handler).
+    opt_state(NULL)
+  }
+
+  # Stops a running optimization after an error: shows the results found so far when the state still holds
+  # some, otherwise closes the dialog; always reports `what` and the error message.
+  abort_optimization <- function(what, e) {
+    opt_running(FALSE)
+    st_saved <- isolate(opt_state())
+    shown <- FALSE
+    if (!is.null(st_saved) && length(st_saved$candidates_map) > 1) {
+      shown <- tryCatch({
+        finalize_prune_results(st_saved, current_step = isolate(opt_step()), stopped_early = TRUE)
+        TRUE
+      }, error = function(e2) FALSE)
+    }
+    if (!shown) {
+      opt_state(NULL)
+      removeModal()
+    }
+    showNotification(
+      paste0(what, conditionMessage(e),
+             if (shown) ". The results found so far are shown. " else ". ",
+             "Re-run with different settings or model, or try another search strategy (e.g. Stepwise)."),
+      type = "error", duration = 12)
   }
 
   observeEvent(input$stop_prune_explore, {
     if (!isTRUE(opt_running())) return()
     st <- opt_state()
     if (is.null(st)) return()
-    curr_s <- opt_step()
-    finalize_prune_results(st, current_step = curr_s, stopped_early = TRUE)
+    tryCatch(
+      finalize_prune_results(st, current_step = opt_step(), stopped_early = TRUE),
+      error = function(e) {
+        if (inherits(e, "shiny.silent.error")) stop(e)
+        abort_optimization("Auto-Optimize could not show the results: ", e)
+      })
   })
 
   observeEvent(input$cancel_prune_explore, {
@@ -4943,7 +4951,6 @@ server <- function(input, output, session) {
         criterion = criterion,
         ctx = ctx,
         base_identified = base_identified,
-        base_ms = base_ms,
         base_score = base_score,
         removable_paths = removable_paths,
         M = M,
@@ -5037,10 +5044,7 @@ server <- function(input, output, session) {
           scores[] <- NA_real_
         }
 
-        stat <- "[Good]"
-        crit_field <- criterion_field(st$criterion)
-        d_crit <- scores[[crit_field]] - as.numeric(st$base_ms[crit_field])
-        if (isTRUE(d_crit < -0.01)) stat <- "[Improved]"
+        stat <- ""
         if (!proper) stat <- "[Improper]"
         if (!ident$identified) stat <- "[Not Identified]"
         if (chk$replaced) stat <- "[Replaced]"
@@ -5422,25 +5426,8 @@ server <- function(input, output, session) {
     }, error = function(e) {
       # req()/validate()/cancelOutput() conditions all inherit from shiny.silent.error: re-raise them as flow control
       if (inherits(e, "shiny.silent.error")) stop(e)
-      opt_running(FALSE)
       # opt_state() still holds the state of the last successful tick: show what was found so far
-      st_saved <- isolate(opt_state())
-      shown <- FALSE
-      if (!is.null(st_saved) && length(st_saved$candidates_map) > 1) {
-        shown <- tryCatch({
-          finalize_prune_results(st_saved, current_step = isolate(opt_step()), stopped_early = TRUE)
-          TRUE
-        }, error = function(e2) FALSE)
-      }
-      if (!shown) {
-        opt_state(NULL)
-        removeModal()
-      }
-      showNotification(
-        paste0("Auto-Optimize stopped because of an unexpected error: ", conditionMessage(e),
-               if (shown) ". The results found so far are shown. " else ". ",
-               "Re-run with different settings or model, or try another search strategy (e.g. Stepwise)."),
-        type = "error", duration = 12)
+      abort_optimization("Auto-Optimize stopped because of an unexpected error: ", e)
     })
   })
 

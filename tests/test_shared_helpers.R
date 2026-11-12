@@ -2,7 +2,7 @@
 # candidate records). Run: Rscript tests/test_shared_helpers.R   (from the project root)
 suppressMessages(library(lavaan))
 exprs <- parse("app.R")
-wanted <- c("preprocess_columns", "display_column_choices", "num_dash", "pe_cell_strings", "ident_df_suffix",
+wanted <- c("preprocess_columns", "display_column_choices", "is_constant_col", "num_dash", "pe_cell_strings", "ident_df_suffix",
             "model_usable", "print_table_html", "with_indicator_names", "fit_converged", "fit_failure",
             "candidate_record", "build_retained_str", "build_struct_lines", "struct_edges", "struct_pred_cols",
             "FIT_INDEX_NAMES", "collinearity_stats", "pe_with_std", "%||%")
@@ -35,6 +35,10 @@ ok(identical(ch$default, c("a", "z")), "display choices: default is the numeric 
 full <- preprocess_columns(dd, "z")
 ok(identical(display_column_choices(full, dd, "z")$default, c("a", "log_z")), "display choices: log-transformed column under its log_ name")
 ok(identical(display_column_choices(data.frame(), data.frame(), NULL)$available, character(0)), "display choices: empty data")
+ok(is_constant_col(c(0.3, 0.1 + 0.2)) && is_constant_col(c(NA_real_, NA)) && is_constant_col(5) &&
+     !is_constant_col(c(1, 2)) && is_constant_col(c(1, NA, 1)), "is_constant_col: single value, all NA, float noise")
+ok("w" %in% display_column_choices(data.frame(w = c(0.3, 0.1 + 0.2), z = c(1, 2)), NULL, NULL)$zero_var,
+   "display choices: float-noise column counts as constant")
 
 # --- formatting helpers
 ok(identical(num_dash(c(1.23456, NA)), c("1.235", "-")), "num_dash: NA becomes '-'")
@@ -75,7 +79,7 @@ sdf <- data.frame(Dependent = c("a", "b"), Operator = "~", a = c(FALSE, FALSE), 
 rec0 <- candidate_record(sdf, "")
 ok(identical(rec0$removed_str, "None (Baseline Model)") && identical(rec0$retained_str, "a ~ b") && !rec0$converged &&
      rec0$status == "[Non-converged]" && is.infinite(rec0$deficit), "candidate_record: non-converged defaults")
-rec1 <- candidate_record(sdf, "a ~ x", fit = fit, aic = 1, converged = TRUE, proper = TRUE, identified = TRUE, status = "[Good]",
+rec1 <- candidate_record(sdf, "a ~ x", fit = fit, aic = 1, converged = TRUE, proper = TRUE, identified = TRUE, status = "",
                          added_covs = NULL)
 ok(identical(names(rec0), names(rec1)), "candidate_record: same fields for every record")
 ok(rec1$aic == 1 && rec1$converged && identical(rec1$removed_str, "a ~ x") && identical(rec1$added_covs, character(0)),
