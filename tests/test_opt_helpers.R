@@ -2,11 +2,11 @@
 # Run: Rscript tests/test_opt_helpers.R   (from the project root)
 suppressMessages(library(lavaan))
 exprs <- parse("app.R")
-wanted <- c("struct_pred_cols", "build_struct_lines", "make_struct_key", "active_struct_vars",
+wanted <- c("OPT_DEFAULTS", "FIT_CUTOFFS", "fit_index_ok", "fit_threshold_violations", "struct_pred_cols", "row_checked", "build_struct_lines", "make_struct_key", "active_struct_vars",
             "run_lavaan_sem", "free_cov_pairs", "required_struct_vars", "candidate_structure_check",
-            "check_variable_isolation", "fit_is_proper", "candidate_score", "criterion_field", "aicc_from_fit", "fit_candidate_model",
+            "check_variable_isolation", "fit_is_proper", "candidate_score", "criterion_field", "aicc_from_fit", "fit_candidate_model", "fit_converged", "try_run_sem", "candidate_syntax",
             "droppable_struct_vars", "orphaned_struct_vars", "orphan_zero_lines",
-            "struct_descendants", "struct_dependents", "struct_edges", "fit_suggestion_model", "fit_cutoff_violations", "get_modification_suggestions", "get_suggested_structural_paths",
+            "struct_descendants", "struct_dependents", "struct_edges", "fit_suggestion_model", "get_modification_suggestions", "get_suggested_structural_paths",
             "%||%", "safe_num", "needs_meanstructure_for", "fit_stale_reasons")
 for (e in exprs) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && as.character(e[[2]]) %in% wanted) eval(e)
@@ -27,6 +27,27 @@ mk <- function(paths) {
   s
 }
 base_df <- mk(list(c("m", "x1"), c("y", "m"), c("y", "x2"), c("y", "x3")))
+
+# --- struct_edges is the single source for "which paths are active"; the other helpers are derived from it
+e0 <- struct_edges(base_df)
+ok(identical(e0$dep, c("m", "y", "y", "y")) && identical(e0$pred, c("x1", "x2", "x3", "m")),
+   "struct_edges: row-major order, predictors in column order")
+ok(nrow(struct_edges(mk(list()))) == 0, "struct_edges: all-FALSE table has no edges")
+ok(nrow(struct_edges(base_df[0, ])) == 0, "struct_edges: zero-row table has no edges")
+ok(nrow(struct_edges(NULL)) == 0 && nrow(struct_edges(base_df[, 1:2])) == 0, "struct_edges: NULL / no predictor columns")
+na_df <- base_df; na_df[na_df$Dependent == "y", "x2"] <- NA
+ok(!"x2" %in% struct_edges(na_df)$pred, "struct_edges: NA cell is not a path")
+blank_df <- base_df; blank_df$Dependent[blank_df$Dependent == "m"] <- ""
+ok(!"" %in% struct_edges(blank_df)$dep && nrow(struct_edges(blank_df)) == 3, "struct_edges: row with empty Dependent is skipped")
+ok(identical(build_struct_lines(base_df), c("m ~ x1", "y ~ x2 + x3 + m")), "build_struct_lines: one line per dependent")
+ok(identical(build_struct_lines(mk(list())), character(0)), "build_struct_lines: empty model")
+ok(identical(make_struct_key(base_df), "m~x1;y~m,x2,x3"), "make_struct_key: sorted, canonical")
+ok(identical(make_struct_key(mk(list())), "EMPTY_PATH"), "make_struct_key: empty model")
+ok(identical(active_struct_vars(base_df), c("m", "x1", "y", "x2", "x3")), "active_struct_vars: dependent then its predictors, unique")
+ok(identical(struct_dependents(base_df), c("m", "y")), "struct_dependents: dependents with an incoming path")
+ok(identical(struct_descendants(base_df, "x1"), c("m", "y")), "struct_descendants: transitive through m")
+ok(identical(row_checked(base_df, 5, struct_pred_cols(base_df)), c("x2", "x3", "m")), "row_checked: ticked columns of one row, in column order")
+ok(identical(row_checked(base_df, 1, character(0)), character(0)), "row_checked: no columns")
 
 # --- safe_num: sanitises numericInput values (NA when cleared, huge or out-of-range when typed)
 ok(safe_num(NA, 150, 20, 500) == 150, "safe_num: NA falls back to default")
@@ -260,11 +281,32 @@ cyc <- sug[[r_x1]][[c_y]]
 if (!is.null(cyc)) ok(isTRUE(cyc$cyclic), "x1 ~ y flagged as feedback loop")
 mi_all <- get_modification_suggestions(sug_fit, 3.84, 0)
 ok(!is.null(mi_all) && all(mi_all$op %in% c("~", "~~", "=~")), "MI list limited to supported operators")
-# --- relative degraded-fit flag
-v_bad  <- fit_cutoff_violations(c(cfi = .85, rmsea = .09, srmr = .05))
-v_good <- fit_cutoff_violations(c(cfi = .95, rmsea = .04, srmr = .04))
-ok(identical(unname(v_bad), c(TRUE, TRUE, FALSE)) && !any(v_good), "cutoff violations detected per index")
-ok(!any(v_bad & !v_bad), "a candidate that merely inherits the baseline violations is not flagged as degraded")
-ok(any(v_bad & !v_good), "a candidate that newly breaks cutoffs the baseline met is flagged")
+# --- OPT_DEFAULTS: every default lies inside its own limits / choices
+for (nm in names(OPT_DEFAULTS)) {
+  d <- OPT_DEFAULTS[[nm]]
+  if (!is.null(d$choices)) ok(d$default %in% d$choices, paste("OPT_DEFAULTS$", nm, ": default is a choice"))
+  else ok(d$min <= d$default && d$default <= d$max && d$step > 0, paste("OPT_DEFAULTS$", nm, ": default within min/max"))
+}
+# --- vectorized tick reading equals the per-cell definition (isTRUE(as.logical(x))) for every cell type
+cell_ok <- function(x) isTRUE(as.logical(x))
+mixed <- data.frame(Dependent = c("a", "b", "c"), Operator = "~", stringsAsFactors = FALSE)
+mixed$p1 <- c(TRUE, NA, FALSE)
+mixed$p2 <- c("TRUE", "false", "T")
+mixed$p3 <- c(1, 0, NA)
+mixed$p4 <- factor(c("TRUE", "FALSE", "TRUE"))
+mixed$p5 <- c(NA, NA, NA)
+for (i in 1:3) {
+  cols <- struct_pred_cols(mixed)
+  want <- cols[vapply(cols, function(p) cell_ok(mixed[[p]][i]), logical(1))]
+  ok(identical(row_checked(mixed, i, cols), want), sprintf("row_checked row %d matches the per-cell definition", i))
+}
+e_mixed <- struct_edges(mixed)
+want_e <- do.call(rbind, lapply(1:3, function(i) {
+  p <- struct_pred_cols(mixed); p <- p[vapply(p, function(q) cell_ok(mixed[[q]][i]), logical(1))]
+  if (length(p)) data.frame(dep = mixed$Dependent[i], pred = p, stringsAsFactors = FALSE)
+}))
+rownames(want_e) <- NULL
+ok(identical(e_mixed, want_e), "struct_edges matches the per-cell definition for logical/text/number/factor/NA cells")
+ok(nrow(struct_edges(mixed[0, ])) == 0 && length(row_checked(mixed, 1, character(0))) == 0, "empty table / no columns")
 cat("ALL PASSED
 ")

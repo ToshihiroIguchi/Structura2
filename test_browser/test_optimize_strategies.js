@@ -126,7 +126,7 @@ const STRATEGY = process.argv[2] || 'stepwise';
     document.getElementById('prune_model_btn').click();
   });
 
-  await ui.waitForSelector('#prune_lock_table', { timeout: 10000 });
+  await ui.waitForSelector('[id^="prune_lock_table_"]', { timeout: 10000 });
 
   console.log('Selecting strategy ' + STRATEGY + '...');
   await ui.evaluate((strategy) => {

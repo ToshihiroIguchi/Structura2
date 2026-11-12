@@ -139,10 +139,46 @@ patch_lavaan_option_cache <- function() {
   }, error = function(e) NULL)
 }
 
-# ---- Inlined Utilities (from utils.R) ----------------------------
+# ---- Inlined Utilities ----------------------------
 
+# Multicollinearity of the observed variables: condition number and maximum condition index of the sample
+# correlation matrix (both NA when the matrix is singular or cannot be read).
+collinearity_stats <- function(fit) {
+  out <- list(condition_number = NA_real_, max_cond_index = NA_real_)
+  tryCatch({
+    samp_cov <- lavaan::lavInspect(fit, "sampstat")$cov
+    if (!is.null(samp_cov) && nrow(samp_cov) > 0) {
+      eig_vals <- eigen(stats::cov2cor(samp_cov), symmetric = TRUE, only.values = TRUE)$values
+      if (length(eig_vals) > 0 && min(eig_vals) > 1e-12) {
+        out$condition_number <- max(eig_vals) / min(eig_vals)
+        out$max_cond_index <- max(sqrt(max(eig_vals) / eig_vals))
+      }
+    }
+  }, error = function(e) NULL)
+  out
+}
 
-# 2. semDiagram: Visual path diagrams robust against NA and multicollinearity
+# Conventional fit cutoffs, the single definition behind the diagram colors, the Fit Indices table and the
+# Auto-Optimize "Fit" column. An index is acceptable when it is at least the cutoff (`higher_better`) or at most
+# the cutoff; a value exactly on the cutoff is acceptable. Row order is the display order of the "Fit" column.
+FIT_CUTOFFS <- data.frame(
+  index         = c("pvalue", "srmr", "rmsea", "gfi", "agfi", "nfi", "cfi"),
+  label         = c("p", "SRMR", "RMSEA", "GFI", "AGFI", "NFI", "CFI"),
+  cutoff        = c(0.05, 0.08, 0.08, 0.90, 0.90, 0.90, 0.90),
+  higher_better = c(TRUE, FALSE, FALSE, TRUE, TRUE, TRUE, TRUE),
+  stringsAsFactors = FALSE)
+
+# TRUE / FALSE: does `value` of fit index `index` meet its cutoff? NA when the value is missing or the index has
+# no cutoff (AIC, BIC, ...).
+fit_index_ok <- function(index, value) {
+  k <- match(index, FIT_CUTOFFS$index)
+  if (is.na(k) || length(value) != 1 || is.na(value)) return(NA)
+  # The p-value is the one exception: p = .05 exactly is a rejection at alpha = .05 (as before the unification).
+  if (index == "pvalue") return(value > FIT_CUTOFFS$cutoff[k])
+  if (FIT_CUTOFFS$higher_better[k]) value >= FIT_CUTOFFS$cutoff[k] else value <= FIT_CUTOFFS$cutoff[k]
+}
+
+# semDiagram: Visual path diagrams robust against NA and multicollinearity
 semDiagram <- function(
     fitted_model,
     digits            = 3,
@@ -157,18 +193,15 @@ semDiagram <- function(
     fontname         = "Helvetica",
     node_fontsize     = 11,
     edge_fontsize     = 9,
-    show_residuals    = FALSE,
     show_intercepts   = FALSE,
     show_fit          = TRUE,
     show_collinearity = TRUE,
     layout            = "LR",
     ratio             = "fill",
-    curvature         = 0.3,
     engine            = "dot",
     twopi_compact     = TRUE,
     cached_params     = NULL,
     cached_fit_measures = NULL,
-    cached_n_obs      = NULL,
     ident_df          = NULL) {
 
   engine <- match.arg(engine, c("dot","neato","fdp","circo","twopi"))
@@ -181,10 +214,6 @@ semDiagram <- function(
 
   if (!inherits(fitted_model, "lavaan"))
     stop("`fitted_model` must be a lavaan object.")
-
-  invisible(lapply(c("lavaan"), function(p)
-    if (!requireNamespace(p, quietly = TRUE))
-      stop(sprintf("Package '%s' is required but not installed.", p))))
 
   params <- if (!is.null(cached_params)) {
     cached_params
@@ -200,28 +229,12 @@ semDiagram <- function(
       fitted_model,
       c("pvalue","srmr","rmsea","gfi","agfi","nfi","cfi","aic","bic"))
   }
-  n_obs <- if (!is.null(cached_n_obs)) {
-    cached_n_obs
-  } else if (!is.null(cached_fit_measures) && "nobs" %in% names(cached_fit_measures)) {
-    as.integer(cached_fit_measures["nobs"])
-  } else {
-    lavaan::lavInspect(fitted_model, "nobs")
-  }
+  # fitMeasures() has no "nobs" measure, so the sample size always comes from lavInspect().
+  n_obs <- lavaan::lavInspect(fitted_model, "nobs")
 
-  condition_number <- NA
-  max_cond_index <- NA
-  tryCatch({
-    samp_cov <- lavaan::lavInspect(fitted_model, "sampstat")$cov
-    if (!is.null(samp_cov) && nrow(samp_cov) > 0) {
-      samp_cor <- stats::cov2cor(samp_cov)
-      eig_vals <- eigen(samp_cor, symmetric = TRUE, only.values = TRUE)$values
-      if (length(eig_vals) > 0 && min(eig_vals) > 1e-12) {
-        condition_number <- max(eig_vals) / min(eig_vals)
-        condition_indices <- sqrt(max(eig_vals) / eig_vals)
-        max_cond_index <- max(condition_indices)
-      }
-    }
-  }, error = function(e) NULL)
+  collinearity <- collinearity_stats(fitted_model)
+  condition_number <- collinearity$condition_number
+  max_cond_index <- collinearity$max_cond_index
 
   edge_rows <- params[params$op %in% c("=~","~","~~") & params$lhs != params$rhs, ]
   vals <- abs(edge_rows[[scale_col]]); vals <- vals[!is.na(vals)]
@@ -230,14 +243,12 @@ semDiagram <- function(
   # Not identified (ident_df given): the p-value, NFI and CFI cannot be computed. They are drawn in red as NA
   # (instead of gray) together with the df, so the violation is visible; other values stay as lavaan reports them.
   unidentified <- !is.null(ident_df)
-  colorize_thresh <- function(v, thr, invert = FALSE) {
+  colorize_ok <- function(v, ok) {
     if (is.na(v)) (if (unidentified) "red" else "gray50")
-    else if (invert) {
-      if (v > thr) "red" else "gray20"
-    } else {
-      if (v <= thr) "red" else "gray20"
-    }
+    else if (isTRUE(ok)) "gray20" else "red"
   }
+  colorize_fit <- function(index) colorize_ok(fit_measures[index], fit_index_ok(index, unname(fit_measures[index])))
+  colorize_thresh <- function(v, thr) colorize_ok(v, !is.na(v) && v <= thr)
 
   fit_block <- if (show_fit) {
     paste0(
@@ -248,30 +259,24 @@ semDiagram <- function(
                 format(ident_df))
       } else {
         sprintf("<font color='%s'>p = %.3f</font> | ",
-                colorize_thresh(fit_measures["pvalue"], 0.05), fit_measures["pvalue"])
+                colorize_fit("pvalue"), fit_measures["pvalue"])
       },
-      sprintf("<font color='%s'>SRMR = %.3f</font> | ",
-              colorize_thresh(fit_measures["srmr"], 0.08, invert = TRUE), fit_measures["srmr"]),
-      sprintf("<font color='%s'>RMSEA = %.3f</font> | ",
-              colorize_thresh(fit_measures["rmsea"], 0.08, invert = TRUE), fit_measures["rmsea"]),
+      sprintf("<font color='%s'>SRMR = %.3f</font> | ", colorize_fit("srmr"), fit_measures["srmr"]),
+      sprintf("<font color='%s'>RMSEA = %.3f</font> | ", colorize_fit("rmsea"), fit_measures["rmsea"]),
       sprintf("AIC = %.1f | BIC = %.1f<BR/>", fit_measures["aic"], fit_measures["bic"]),
-      sprintf("<font color='%s'>GFI = %.3f</font> | ",
-              colorize_thresh(fit_measures["gfi"], 0.90), fit_measures["gfi"]),
-      sprintf("<font color='%s'>AGFI = %.3f</font> | ",
-              colorize_thresh(fit_measures["agfi"], 0.90), fit_measures["agfi"]),
-      sprintf("<font color='%s'>NFI = %.3f</font> | ",
-              colorize_thresh(fit_measures["nfi"], 0.90), fit_measures["nfi"]),
-      sprintf("<font color='%s'>CFI = %.3f</font>",
-              colorize_thresh(fit_measures["cfi"], 0.90), fit_measures["cfi"])
+      sprintf("<font color='%s'>GFI = %.3f</font> | ", colorize_fit("gfi"), fit_measures["gfi"]),
+      sprintf("<font color='%s'>AGFI = %.3f</font> | ", colorize_fit("agfi"), fit_measures["agfi"]),
+      sprintf("<font color='%s'>NFI = %.3f</font> | ", colorize_fit("nfi"), fit_measures["nfi"]),
+      sprintf("<font color='%s'>CFI = %.3f</font>", colorize_fit("cfi"), fit_measures["cfi"])
     )
   } else ""
 
   coll_block <- if (show_collinearity) {
     paste0(
       sprintf("<font color='%s'>Condition Number = %.1f</font>  | ",
-              colorize_thresh(condition_number, 30, invert = TRUE), condition_number),
+              colorize_thresh(condition_number, 30), condition_number),
       sprintf("<font color='%s'>Max Condition Index = %.1f</font>",
-              colorize_thresh(max_cond_index, 30, invert = TRUE), max_cond_index)
+              colorize_thresh(max_cond_index, 30), max_cond_index)
     )
   } else ""
 
@@ -279,7 +284,7 @@ semDiagram <- function(
   intercept_text <- if (show_intercepts) "Intercepts: <b>Shown</b>" else "Intercepts: <b>Hidden</b>"
   annot_block <- sprintf("%s   | %s", coeff_text, intercept_text)
 
-  label_parts <- c(annot_block, if (show_fit) fit_block else NULL, if (show_collinearity) coll_block else NULL)
+  label_parts <- c(annot_block, if (show_fit) fit_block, if (show_collinearity) coll_block)
   top_label <- sprintf("<%s>", paste(label_parts, collapse = "<BR/>"))
 
   # Only structural rows define nodes; defined parameters (:=), constraints and thresholds must not
@@ -325,10 +330,7 @@ semDiagram <- function(
       e_base$fontname <- fontname
       # The label of a zero coefficient is gray too (opaque, so it stays readable), matching its line.
       if (shown_value == 0) e_base$fontcolor <- zero_color
-      if (p$op == "~~") {
-        e_base$constraint <- FALSE
-        e_base$dir        <- "both"
-      }
+      if (p$op == "~~") e_base$constraint <- FALSE
       edges[[length(edges) + 1]] <- e_base
     }
   }
@@ -364,10 +366,6 @@ semDiagram <- function(
   # Return raw DOT graph code. Layout and rendering will be done on the client side via @hpcc-js/wasm
   return(graph_code)
 }
-
-
-
-# ------------------------------------------------------------------
 
 `%||%` <- function(x, y) if (!is.null(x)) x else y
 
@@ -443,17 +441,7 @@ lavaan_to_equations <- function(fit, digits = 3, cached_pe = NULL) {
 
 # ---------- Helper: Retained Path String Generator -----------------
 build_retained_str <- function(struct_df) {
-  if (is.null(struct_df) || ncol(struct_df) < 3) return("None (Empty Model)")
-  pred_cols <- names(struct_df)[3:ncol(struct_df)]
-  lines <- c()
-  for (i in seq_len(nrow(struct_df))) {
-    dp <- struct_df$Dependent[i]
-    if (!nzchar(dp)) next
-    ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
-    if (length(ps) > 0) {
-      lines <- c(lines, paste0(dp, " ~ ", paste(ps, collapse = " + ")))
-    }
-  }
+  lines <- build_struct_lines(struct_df)
   if (length(lines) > 0) paste(lines, collapse = " ; ") else "None (Empty Model)"
 }
 
@@ -465,40 +453,22 @@ build_retained_str <- function(struct_df) {
 # a variable that has lost every path, which changes the likelihood and makes AIC/BIC incomparable.
 check_variable_isolation <- function(s_df, retain_deps, retain_preds, pred_cols, required_vars = character(0)) {
   if (is.null(s_df) || nrow(s_df) == 0) return(FALSE)
+  edges <- struct_edges(s_df)
 
-  if (length(required_vars) > 0) {
-    edges <- struct_edges(s_df)
-    if (!all(required_vars %in% c(edges$dep, edges$pred))) return(FALSE)
-  }
+  if (length(required_vars) > 0 && !all(required_vars %in% c(edges$dep, edges$pred))) return(FALSE)
 
-  if (length(retain_deps) > 0) {
-    for (dep in retain_deps) {
-      dep_r <- which(s_df$Dependent == dep)
-      if (length(dep_r) == 0) return(FALSE)
-      has_in_path <- any(vapply(pred_cols, function(p) {
-        if (!p %in% names(s_df)) return(FALSE)
-        isTRUE(as.logical(s_df[dep_r[1], p]))
-      }, logical(1)))
-      if (!has_in_path) return(FALSE)
-    }
-  }
-  
-  if (length(retain_preds) > 0) {
-    for (pred in retain_preds) {
-      if (!pred %in% names(s_df)) return(FALSE)
-      has_out_path <- any(vapply(seq_len(nrow(s_df)), function(r) {
-        isTRUE(as.logical(s_df[r, pred]))
-      }, logical(1)))
-      if (!has_out_path) return(FALSE)
-    }
-  }
-  
+  # In-degree >= 1, counting only predictor columns in `pred_cols`
+  if (length(retain_deps) > 0 && !all(retain_deps %in% edges$dep[edges$pred %in% pred_cols])) return(FALSE)
+
+  # Out-degree >= 1
+  if (length(retain_preds) > 0 && !all(retain_preds %in% edges$pred)) return(FALSE)
+
   TRUE
 }
 
 # ---------- Helper: Structural Table <-> lavaan Syntax / Keys ----------
 # Single source of truth for turning the structural checkbox matrix into lavaan lines and
-# canonical candidate keys (previously duplicated in several server observers).
+# canonical candidate keys.
 struct_pred_cols <- function(struct_df) {
   if (is.null(struct_df) || ncol(struct_df) < 3) return(character(0))
   names(struct_df)[3:ncol(struct_df)]
@@ -514,71 +484,62 @@ build_meas_lines <- function(meas) {
     lt <- trimws(as.character(meas$Latent[i]))
     if (!nzchar(lt)) return(NULL)
     lt <- make.names(lt)
-    inds <- vars[vapply(meas[i, vars], function(x) isTRUE(as.logical(x)), logical(1))]
+    inds <- row_checked(meas, i, vars)
     if (!length(inds)) return(NULL)
     paste0(lt, " =~ ", paste(inds, collapse = " + "))
   })
   as.character(unlist(lines))
 }
 
-build_struct_lines <- function(struct_df) {
-  pred_cols <- struct_pred_cols(struct_df)
-  if (!length(pred_cols)) return(character(0))
-  lines <- lapply(seq_len(nrow(struct_df)), function(i) {
-    dp <- struct_df$Dependent[i]
-    if (!nzchar(dp)) return(NULL)
-    ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
-    if (!length(ps)) return(NULL)
-    paste0(dp, " ~ ", paste(ps, collapse = " + "))
-  })
-  unlist(lines)
+# Names of the columns in `cols` that are ticked in row `i` of a checkbox table.
+row_checked <- function(df, i, cols) {
+  if (!length(cols)) return(character(0))
+  l <- vapply(cols, function(p) as.logical(df[[p]][i]), logical(1), USE.NAMES = FALSE)
+  cols[!is.na(l) & l]
 }
 
-make_struct_key <- function(struct_df) {
+# Active structural paths as a data.frame(dep, pred), in row-major order (each row's predictors in column
+# order). Rows with an empty Dependent are skipped. This is the single source for every "which paths are
+# active" question; it is vectorized because the optimizer calls it for thousands of candidates.
+struct_edges <- function(struct_df) {
   pred_cols <- struct_pred_cols(struct_df)
-  lines <- c()
-  for (i in seq_len(nrow(struct_df))) {
-    dp <- struct_df$Dependent[i]
-    ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
-    if (length(ps)) lines <- c(lines, paste0(dp, "~", paste(sort(ps), collapse = ",")))
-  }
-  res <- paste(sort(lines), collapse = ";")
-  if (!nzchar(res)) "EMPTY_PATH" else res
+  empty <- data.frame(dep = character(0), pred = character(0), stringsAsFactors = FALSE)
+  if (!length(pred_cols) || nrow(struct_df) == 0) return(empty)
+  ticked <- vapply(pred_cols, function(p) { l <- as.logical(struct_df[[p]]); !is.na(l) & l }, logical(nrow(struct_df)))
+  ticked <- matrix(ticked, nrow = nrow(struct_df), dimnames = list(NULL, pred_cols))
+  k <- which(t(ticked))                      # row-major positions of the ticked cells
+  if (!length(k)) return(empty)
+  rows <- (k - 1L) %/% length(pred_cols) + 1L
+  deps <- as.character(struct_df$Dependent[rows])
+  keep <- nzchar(deps)
+  data.frame(dep = deps[keep], pred = pred_cols[(k - 1L) %% length(pred_cols) + 1L][keep], stringsAsFactors = FALSE)
+}
+
+# One "dep ~ p1 + p2" line per dependent that has at least one active predictor.
+build_struct_lines <- function(struct_df) {
+  e <- struct_edges(struct_df)
+  if (!nrow(e)) return(character(0))
+  deps <- unique(e$dep)
+  vapply(deps, function(d) paste0(d, " ~ ", paste(e$pred[e$dep == d], collapse = " + ")), character(1), USE.NAMES = FALSE)
+}
+
+# Canonical, order-independent key of the active paths (used to cache candidate fits).
+make_struct_key <- function(struct_df) {
+  e <- struct_edges(struct_df)
+  if (!nrow(e)) return("EMPTY_PATH")
+  lines <- vapply(unique(e$dep), function(d) paste0(d, "~", paste(sort(e$pred[e$dep == d]), collapse = ",")), character(1))
+  paste(sort(lines), collapse = ";")
 }
 
 # Variables that take part in at least one active structural path (as dependent or predictor).
 active_struct_vars <- function(struct_df) {
-  pred_cols <- struct_pred_cols(struct_df)
-  if (!length(pred_cols)) return(character(0))
-  vars <- character(0)
-  for (i in seq_len(nrow(struct_df))) {
-    ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
-    if (length(ps)) vars <- c(vars, struct_df$Dependent[i], ps)
-  }
-  unique(vars)
+  e <- struct_edges(struct_df)
+  unique(c(rbind(e$dep, e$pred)))
 }
 
 # Dependent variables that have at least one active incoming path.
 struct_dependents <- function(struct_df) {
-  pred_cols <- struct_pred_cols(struct_df)
-  if (!length(pred_cols) || is.null(struct_df) || nrow(struct_df) == 0) return(character(0))
-  has_path <- vapply(seq_len(nrow(struct_df)), function(i) {
-    any(vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1)))
-  }, logical(1))
-  unique(struct_df$Dependent[has_path])
-}
-
-# Active structural paths as a data.frame(dep, pred).
-struct_edges <- function(struct_df) {
-  pred_cols <- struct_pred_cols(struct_df)
-  out <- list()
-  if (length(pred_cols)) {
-    for (i in seq_len(nrow(struct_df))) {
-      ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
-      if (length(ps) && nzchar(struct_df$Dependent[i])) out[[length(out) + 1]] <- data.frame(dep = struct_df$Dependent[i], pred = ps, stringsAsFactors = FALSE)
-    }
-  }
-  if (length(out)) do.call(rbind, out) else data.frame(dep = character(0), pred = character(0), stringsAsFactors = FALSE)
+  unique(struct_edges(struct_df)$dep)
 }
 
 # ---- Model Spec & Export Helpers ---------------------------------------------
@@ -599,21 +560,13 @@ build_model_spec <- function(meas, struct_df, extra_eq, settings, data_info, nam
     vars <- names(meas)[4:ncol(meas)]
     for (i in seq_len(nrow(meas))) {
       lt   <- trimws(as.character(meas$Latent[i]))
-      inds <- vars[vapply(meas[i, vars], function(x) isTRUE(as.logical(x)), logical(1))]
+      inds <- row_checked(meas, i, vars)
       if (!nzchar(lt) && !length(inds)) next
       measurement[[length(measurement) + 1]] <- list(latent = lt, indicators = as.list(inds))
     }
   }
-  structural <- list()
-  pred_cols <- struct_pred_cols(struct_df)
-  if (length(pred_cols) && nrow(struct_df) > 0) {
-    for (i in seq_len(nrow(struct_df))) {
-      ps <- pred_cols[vapply(struct_df[i, pred_cols], function(x) isTRUE(as.logical(x)), logical(1))]
-      if (length(ps) && nzchar(struct_df$Dependent[i])) {
-        structural[[length(structural) + 1]] <- list(dependent = struct_df$Dependent[i], predictors = as.list(ps))
-      }
-    }
-  }
+  edges <- struct_edges(struct_df)
+  structural <- lapply(unique(edges$dep), function(d) list(dependent = d, predictors = as.list(edges$pred[edges$dep == d])))
   list(
     format           = SPEC_FORMAT,
     version          = SPEC_VERSION,
@@ -680,6 +633,15 @@ parse_model_spec_json <- function(txt) {
   })
 }
 
+# Fills the Indicator column of a measurement table: each non-empty latent gets a name that does not clash
+# with an observed variable (or another latent).
+with_indicator_names <- function(tbl, obs_names) {
+  valid_latents <- ifelse(nzchar(tbl$Latent), tbl$Latent, "latent")
+  convs <- make.unique(c(obs_names, valid_latents))
+  tbl$Indicator <- ifelse(nzchar(tbl$Latent), tail(convs, nrow(tbl)), "")
+  tbl
+}
+
 # Measurement table for a spec: same layout as the initial table built when data is loaded
 # (Latent / Indicator / Operator + one logical column per displayed variable). Indicators that are
 # not among `inds` are reported in `dropped` instead of being silently lost.
@@ -703,10 +665,7 @@ spec_to_meas_table <- function(spec, inds, obs_names) {
   tbl <- data.frame(Latent = latent, Indicator = "", Operator = "=~",
                     mat, stringsAsFactors = FALSE, check.names = FALSE)
   colnames(tbl) <- c("Latent", "Indicator", "Operator", inds)
-  valid_latents <- ifelse(nzchar(tbl$Latent), tbl$Latent, "latent")
-  convs <- make.unique(c(obs_names, valid_latents))
-  tbl$Indicator <- ifelse(nzchar(tbl$Latent), tail(convs, n), "")
-  list(table = tbl, dropped = unique(dropped))
+  list(table = with_indicator_names(tbl, obs_names), dropped = unique(dropped))
 }
 
 # Structural matrix for a spec over the current model items (observed variables + latent names).
@@ -814,6 +773,120 @@ compute_latent_reliability <- function(fit, df_proc) {
                Alpha = alpha_val, CR = cr_val, AVE = ave_val, stringsAsFactors = FALSE)
   })
   do.call(rbind, rows)
+}
+
+# ---- Data preparation & preview helpers ---------------------------------------
+# Column-level preprocessing shared by the full column set and the (row-filtered) analysis data:
+# factors become text, the selected columns are log10-transformed and renamed to log_<name>, text columns with
+# 2+ distinct values (fewer than the number of rows) are one-hot encoded, and names are made syntactic.
+# `reference` (default: `df` itself) is the data set that decides WHICH columns are encoded and which dummy
+# columns exist; pass the full data when `df` is a row-filtered subset, so the column set does not depend on
+# the filter (a level missing from the subset becomes an all-zero column).
+preprocess_columns <- function(df, log_columns = NULL, reference = df) {
+  prep <- function(d) {
+    d[] <- lapply(d, function(x) if (is.factor(x)) as.character(x) else x)
+    if (!is.null(log_columns)) {
+      col_order <- names(d)
+      for (col in log_columns) {
+        log_col       <- paste0("log_", col)
+        d[[log_col]]  <- log10(d[[col]])
+        col_order[match(col, col_order)] <- log_col
+        d[[col]]      <- NULL
+      }
+      d <- d[, col_order, drop = FALSE]
+    }
+    d
+  }
+  ref <- prep(reference)   # evaluated first: the default `reference = df` must see the unprocessed data
+  df  <- prep(df)
+
+  chars <- names(ref)[vapply(ref, is.character, logical(1))]
+  multi <- chars[vapply(ref[chars], function(x) {
+    u <- unique(x); length(u) > 1 && length(u) < nrow(ref)
+  }, logical(1))]
+  if (length(multi)) {
+    for (col in multi) df[[col]] <- factor(df[[col]], levels = sort(unique(ref[[col]])))
+    mm <- model.matrix(~ . - 1, data = df[multi], na.action = na.pass)
+    df <- cbind(df[setdiff(names(df), multi)], as.data.frame(mm, check.names = TRUE))
+  }
+  names(df) <- make.names(names(df), unique = TRUE)
+  df
+}
+
+# TRUE for a column without usable variation (all missing, a single value, or spread below 1e-12). The one
+# definition of "zero variance" for display choices, standardization and the linear-dependency check.
+is_constant_col <- function(x) {
+  s <- suppressWarnings(stats::sd(x, na.rm = TRUE))
+  is.na(s) || s < 1e-12
+}
+
+# Columns offered as "Display columns" for a preprocessed data set `full` (original data `orig`):
+# constant numeric columns are excluded, the default selection is the numeric columns (log-transformed
+# ones under their log_ names).
+display_column_choices <- function(full, orig, log_columns = NULL) {
+  numeric_cols <- vapply(full, is.numeric, logical(1))
+  zero_var <- names(full)[numeric_cols][vapply(full[numeric_cols], is_constant_col, logical(1))]
+  available <- setdiff(names(full), zero_var)
+  numeric_orig <- names(orig)[vapply(orig, is.numeric, logical(1))]
+  logs <- if (length(log_columns)) paste0("log_", log_columns) else NULL
+  list(available = available, zero_var = zero_var, default = intersect(c(numeric_orig, logs), available))
+}
+
+# Data preview table. A single scroll area (.s2-table-scroll) is used instead of DT scrollX/scrollY, which swap
+# scroll containers when a column filter gets focus and shift the table. Floating-point columns are shown with
+# 3 decimals while integer-valued columns (ID, grade) stay as they are.
+preview_datatable <- function(df) {
+  dt <- datatable(df, filter = "top", editable = FALSE,
+                  options = list(pageLength = 30, autoWidth = TRUE, dom = 'lfr<"s2-table-scroll"t>ip'),
+                  rownames = FALSE)
+  is_float_col <- function(x) is.numeric(x) && any(!is.na(x) & (x %% 1 != 0))
+  float_cols <- names(df)[vapply(df, is_float_col, logical(1))]
+  if (length(float_cols) > 0) dt <- dt %>% formatRound(columns = float_cols, digits = 3)
+  dt
+}
+
+# ---- Shared formatting helpers (reports, tables, messages) ---------------------
+# Number as text, "-" when missing (vectorized).
+num_dash <- function(x, fmt = "%.3f") ifelse(is.na(x), "-", sprintf(fmt, x))
+
+# Parameter estimates with standardized columns; falls back to the plain table when lavaan cannot standardize.
+pe_with_std <- function(fit) {
+  tryCatch(lavaan::parameterEstimates(fit, standardized = TRUE), error = function(e) lavaan::parameterEstimates(fit))
+}
+
+# Display strings of one parameter-estimate row: p-value, standardized estimate, SE and z.
+pe_cell_strings <- function(r) {
+  list(p   = if (is.na(r$pvalue)) "-" else if (r$pvalue < 0.001) "< .001" else sprintf("%.3f", r$pvalue),
+       std = if ("std.all" %in% names(r) && !is.na(r$std.all)) sprintf("%.3f", r$std.all) else "-",
+       se  = num_dash(r$se),
+       z   = num_dash(r$z))
+}
+
+# " (df = -2)" for a model with a negative df, "" otherwise.
+ident_df_suffix <- function(df_val) {
+  if (isTRUE(is.finite(df_val))) paste0(" (df = ", format(df_val), ")") else ""
+}
+
+# TRUE when a fit_model_safe() result holds a usable lavaan fit.
+model_usable <- function(res) !is.null(res) && isTRUE(res$ok) && !is.null(res$fit)
+
+# Dismissable warning / error dialog. `level` is the Bootstrap alert class suffix ("warning", "danger").
+notice_modal <- function(title, ..., level = "warning") {
+  showModal(modalDialog(
+    title = title,
+    div(class = paste0("alert alert-", level), ...),
+    easyClose = TRUE,
+    footer = modalButton("Dismiss")
+  ))
+}
+
+# HTML table for the printed report. `align` gives "left" / "right" / "center" per column; header cells are
+# HTML, so they may contain entities (&alpha;). `rows_html` is the already built <tr> markup.
+print_table_html <- function(headers, rows_html, align = rep("left", length(headers))) {
+  style <- ifelse(align == "left", "", sprintf(" style='text-align:%s;'", align))
+  paste0("<table class='print-table'><thead><tr>",
+         paste0("<th", style, ">", headers, "</th>", collapse = ""),
+         "</tr></thead><tbody>", paste(rows_html, collapse = ""), "</tbody></table>")
 }
 
 # ---- Candidate comparability helpers ----------------------------------------
@@ -975,9 +1048,7 @@ fmt_var_list <- function(x) paste(x, collapse = ", ")
 
 # TRUE when the structural matrix has at least one active path (what Auto-Optimize works on)
 has_active_struct_path <- function(struct_df) {
-  if (is.null(struct_df) || nrow(struct_df) == 0 || ncol(struct_df) < 3) return(FALSE)
-  m <- struct_df[, 3:ncol(struct_df), drop = FALSE]
-  any(vapply(m, function(col) any(as.logical(col), na.rm = TRUE), logical(1)))
+  nrow(struct_edges(struct_df)) > 0
 }
 
 # One-line pointer shown under an identification error when the model has structural paths to prune
@@ -1051,8 +1122,7 @@ diagnose_fit_inputs <- function(syntax_str, data, missing_method, needs_meanstru
     } else if (ncol(X) >= 2) {
       # Exact linear dependency: smallest eigenvalue of the correlation matrix is ~0
       Xc <- stats::na.omit(X)
-      sds <- vapply(Xc, stats::sd, numeric(1))
-      Xc <- Xc[, !is.na(sds) & sds > 1e-12, drop = FALSE]
+      Xc <- Xc[, !vapply(Xc, is_constant_col, logical(1)), drop = FALSE]
       if (nrow(Xc) > 1 && ncol(Xc) >= 2) {
         eg <- eigen(stats::cor(Xc), symmetric = TRUE)
         if (min(eg$values) < 1e-8) {
@@ -1091,10 +1161,10 @@ diagnose_fit_inputs <- function(syntax_str, data, missing_method, needs_meanstru
   msgs
 }
 
-# Checks run AFTER a converged fit. Returns list(errors, warnings, ident): `ident` is the not-identified
+# Checks run AFTER a converged fit. Returns list(warnings, ident): `ident` is the not-identified
 # message (NULL when identified). An unidentified fit is still shown, so it is not an error.
 diagnose_fit_results <- function(fit, data) {
-  errs <- character(0); warns <- character(0); ident_msg <- NULL
+  warns <- character(0); ident_msg <- NULL
   tryCatch({
     pe <- lavaan::parameterEstimates(fit)
     if (!fit_identification(fit)$identified) {
@@ -1136,7 +1206,7 @@ diagnose_fit_results <- function(fit, data) {
                                     preds[i], preds[j], dv, cm[i, j]))
     }
   }, error = function(e) NULL)
-  list(errors = errs, warnings = unique(warns), ident = ident_msg)
+  list(warnings = unique(warns), ident = ident_msg)
 }
 
 # Free covariances between two different variables as sorted "a ~~ b" keys.
@@ -1166,7 +1236,7 @@ droppable_struct_vars <- function(struct_df, base_fit) {
 # Droppable variables that no longer take part in any active path of a candidate.
 orphaned_struct_vars <- function(struct_df, ctx) {
   if (is.null(ctx$droppable_vars) || !length(ctx$droppable_vars)) return(character(0))
-  intersect(ctx$droppable_vars, setdiff(ctx$droppable_vars, active_struct_vars(struct_df)))
+  setdiff(ctx$droppable_vars, active_struct_vars(struct_df))
 }
 
 # `dep ~ 0*pred` lines for the baseline paths of orphaned variables. A fixed-zero regression keeps the
@@ -1196,14 +1266,67 @@ fit_is_proper <- function(fit) {
   tryCatch(isTRUE(suppressWarnings(lavaan::lavInspect(fit, "post.check"))), error = function(e) TRUE)
 }
 
+# Auto-Optimize settings: the Step 1 dialog inputs and the validation of the submitted values both read this
+# table. Choices are label = value; numbers carry default / min / max / step.
+OPT_DEFAULTS <- list(
+  criterion  = list(default = "BIC",
+                    choices = c("BIC (Stronger Sparsity Penalty / Recommended)" = "BIC",
+                                "AICc (Small-Sample Corrected AIC)" = "AICc",
+                                "AIC (Predictive Accuracy)" = "AIC")),
+  strategy   = list(default = "adaptive",
+                    choices = c("Adaptive Auto-Switch (Recommended)" = "adaptive",
+                                "Regularized SEM (Lasso / Elastic Net - Modern Standard)" = "regsem",
+                                "Stepwise Search (Fast & Deterministic)" = "stepwise",
+                                "Exhaustive Search (100% Exact All-Subset)" = "exhaustive",
+                                "Simulated Annealing (SA - Fast Trajectory Search)" = "sa")),
+  max_exhaustive_comb = list(default = 1024, min = 64, max = 8192, step = 64),
+  sa_max_iter         = list(default = 150, min = 20, max = 500, step = 10),
+  sa_temp_init        = list(default = 10, min = 1, max = 100, step = 1),
+  sa_seed             = list(default = 1, min = 1, max = .Machine$integer.max, step = 1),
+  regsem_type         = list(default = "lasso", choices = c("Lasso (L1)" = "lasso", "Elastic Net" = "enet")),
+  regsem_n_lambda     = list(default = 30, min = 10, max = 100, step = 5)
+)
+
+# Step 1 dialog inputs built from OPT_DEFAULTS (`key` names the entry, `id` the input).
+opt_select_input <- function(key, id, label) {
+  d <- OPT_DEFAULTS[[key]]
+  selectInput(id, label, choices = d$choices, selected = d$default)
+}
+opt_numeric_input <- function(id, label) {
+  d <- OPT_DEFAULTS[[id]]
+  numericInput(id, label, value = d$default, min = d$min, max = d$max, step = d$step)
+}
+
+# Fit indices shown in the Fit Indices table and on the diagram title, in display order.
+FIT_INDEX_NAMES <- c("pvalue", "srmr", "rmsea", "aic", "bic", "gfi", "agfi", "nfi", "cfi")
+
+# Result of fit_model_safe() when nothing could be estimated (`kind`: "empty", "data" or "error").
+fit_failure <- function(msg, kind, level = NULL) {
+  out <- list(ok = FALSE, msg_friendly = msg, fail_kind = kind, fit = NULL, syntax = NULL,
+              pe_std = NULL, pe_raw = NULL, fit_measures = NULL, equations = NULL)
+  if (!is.null(level)) out$msg_level <- level
+  out
+}
+
+# TRUE when `fit` is a lavaan object that converged (NULL, failed fits and inspection errors give FALSE).
+fit_converged <- function(fit) {
+  !is.null(fit) && isTRUE(tryCatch(lavaan::lavInspect(fit, "converged"), error = function(e) FALSE))
+}
+
+# run_lavaan_sem() with the estimation context of an optimizer candidate; NULL when estimation fails.
+try_run_sem <- function(syntax_str, ctx, ...) {
+  tryCatch(
+    run_lavaan_sem(syntax_str, ctx$data, ctx$missing_method, ctx$needs_meanstructure, ...),
+    error = function(e) NULL)
+}
+
 # Identification of a fitted model. A model with df < 0 converges and even reports (meaningless) AIC/BIC,
 # but its standard errors cannot be computed, so "identified" needs df >= 0 AND an invertible information
 # matrix (lavInspect(fit, "vcov") is not a matrix when the standard errors failed).
 # `deficit` is how far the model is from being identified: the number of parameters to remove when df < 0
 # (0.5 when only the standard errors fail), used to steer the repair phase of the optimizer.
 fit_identification <- function(fit) {
-  converged <- tryCatch(isTRUE(lavaan::lavInspect(fit, "converged")), error = function(e) FALSE)
-  if (!converged) return(list(identified = FALSE, df = NA_real_, deficit = Inf))
+  if (!fit_converged(fit)) return(list(identified = FALSE, df = NA_real_, deficit = Inf))
   df <- tryCatch(as.numeric(lavaan::fitMeasures(fit, "df")), error = function(e) NA_real_)
   vc <- tryCatch(suppressWarnings(lavaan::lavInspect(fit, "vcov")), error = function(e) NULL)
   se_ok <- is.matrix(vc) && !anyNA(vc)
@@ -1212,28 +1335,12 @@ fit_identification <- function(fit) {
 }
 
 # Names of the fit indices that are drawn in red on the path diagram (same cutoffs as the diagram title):
-# p <= .05, GFI/AGFI/NFI/CFI <= .90, SRMR/RMSEA > .08. Returns NA when no index could be computed.
+# judged by FIT_CUTOFFS (a value exactly on a cutoff passes). Returns NA when no index could be computed.
 fit_threshold_violations <- function(fit) {
-  ms <- tryCatch(lavaan::fitMeasures(fit, c("pvalue", "srmr", "rmsea", "gfi", "agfi", "nfi", "cfi")),
-                 error = function(e) NULL)
+  ms <- tryCatch(lavaan::fitMeasures(fit, FIT_CUTOFFS$index), error = function(e) NULL)
   if (is.null(ms) || all(is.na(ms))) return(NA_character_)
-  bad <- c(
-    p     = isTRUE(ms[["pvalue"]] <= 0.05),
-    SRMR  = isTRUE(ms[["srmr"]]  > 0.08),
-    RMSEA = isTRUE(ms[["rmsea"]] > 0.08),
-    GFI   = isTRUE(ms[["gfi"]]   <= 0.90),
-    AGFI  = isTRUE(ms[["agfi"]]  <= 0.90),
-    NFI   = isTRUE(ms[["nfi"]]   <= 0.90),
-    CFI   = isTRUE(ms[["cfi"]]   <= 0.90))
-  names(bad)[bad]
-}
-
-# Which conventional fit cutoffs (CFI < .90, RMSEA > .08, SRMR > .08) a set of fit measures violates.
-fit_cutoff_violations <- function(ms) {
-  get <- function(nm) if (nm %in% names(ms)) as.numeric(ms[nm]) else NA_real_
-  c(cfi   = isTRUE(get("cfi") < 0.90),
-    rmsea = isTRUE(get("rmsea") > 0.08),
-    srmr  = isTRUE(get("srmr") > 0.08))
+  bad <- vapply(FIT_CUTOFFS$index, function(ix) isFALSE(fit_index_ok(ix, unname(ms[ix]))), logical(1))
+  FIT_CUTOFFS$label[bad]
 }
 
 # Small-sample corrected AIC: AIC + 2k(k+1)/(n-k-1), k = free parameters, n = total observations.
@@ -1273,32 +1380,49 @@ candidate_score <- function(rec, criterion) {
 # are not comparable). Its removed paths are therefore kept as fixed-zero regressions (`y ~ 0*x`) while
 # the candidate is scored; applying the candidate removes the variable for real.
 fit_candidate_model <- function(struct_df, ctx) {
-  all_syntax <- unlist(c(ctx$meas_lines, build_struct_lines(struct_df), orphan_zero_lines(struct_df, ctx), ctx$extra_lines))
+  all_syntax <- candidate_syntax(struct_df, ctx)
   if (!length(all_syntax)) return(NULL)
   syntax_str <- paste(all_syntax, collapse = "\n")
 
-  run_sem <- function(...) {
-    tryCatch(
-      run_lavaan_sem(syntax_str, ctx$data, ctx$missing_method, ctx$needs_meanstructure, ...),
-      error = function(e) NULL)
-  }
-
   fm <- NULL
-  if (!is.null(ctx$base_fit)) fm <- run_sem(start = ctx$base_fit)
+  if (!is.null(ctx$base_fit)) fm <- try_run_sem(syntax_str, ctx, start = ctx$base_fit)
   # Safety fallback: cold start if warm start failed or did not converge
-  if (is.null(fm) || !isTRUE(lavaan::lavInspect(fm, "converged"))) fm <- run_sem()
+  if (!fit_converged(fm)) fm <- try_run_sem(syntax_str, ctx)
   fm
+}
+
+# One row of the Auto-Optimize candidate catalog. Defaults describe a candidate that did not converge, so every
+# record carries the same fields; callers override what they know (e.g. the baseline or a converged fit).
+candidate_record <- function(struct_df, removed_str, ...) {
+  rec <- list(
+    removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
+    retained_str = build_retained_str(struct_df),
+    struct_df = struct_df, fit = NULL,
+    aic = NA_real_, bic = NA_real_, aicc = NA_real_,
+    cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
+    converged = FALSE, proper = FALSE, identified = FALSE, deficit = Inf, raw_aic = NA_real_,
+    vars_ok = TRUE, replaced = FALSE, added_covs = character(0), excluded_vars = character(0),
+    status = "[Non-converged]")
+  # NULL overrides are ignored (modifyList() would delete the field instead of keeping its default)
+  utils::modifyList(rec, Filter(Negate(is.null), list(...)))
+}
+
+# lavaan syntax lines of a candidate: measurement part, structural part, optionally the fixed-zero lines of
+# variables that lost every path (`orphan = FALSE` gives the syntax of the model as the user sees it), and
+# the manual equations.
+candidate_syntax <- function(struct_df, ctx, orphan = TRUE) {
+  unlist(c(ctx$meas_lines, build_struct_lines(struct_df),
+           if (orphan) orphan_zero_lines(struct_df, ctx), ctx$extra_lines))
 }
 
 # ---------- Helper: Reachability on the structural graph (edges: predictor -> dependent) ----------
 struct_descendants <- function(struct_df, from) {
+  edges <- struct_edges(struct_df)
   seen <- character(0)
   queue <- from
   while (length(queue)) {
     cur <- queue[1]; queue <- queue[-1]
-    if (!cur %in% names(struct_df)) next
-    flags <- vapply(struct_df[[cur]], function(x) isTRUE(as.logical(x)), logical(1))
-    kids <- setdiff(struct_df$Dependent[flags], seen)
+    kids <- setdiff(edges$dep[edges$pred == cur], seen)
     seen <- c(seen, kids)
     queue <- c(queue, kids)
   }
@@ -1316,10 +1440,8 @@ struct_descendants <- function(struct_df, from) {
 fit_suggestion_model <- function(syntax_lines, unused_vars, anchor_var, ctx) {
   if (!length(unused_vars) || is.null(anchor_var) || !nzchar(anchor_var)) return(NULL)
   syntax_str <- paste(c(syntax_lines, paste0(unused_vars, " ~ 0*", anchor_var)), collapse = "\n")
-  fm <- tryCatch(
-    run_lavaan_sem(syntax_str, ctx$data, ctx$missing_method, ctx$needs_meanstructure),
-    error = function(e) NULL)
-  if (is.null(fm) || !isTRUE(lavaan::lavInspect(fm, "converged"))) NULL else fm
+  fm <- try_run_sem(syntax_str, ctx)
+  if (fit_converged(fm)) fm else NULL
 }
 
 # ---- Helper: Removal candidates (checked paths with weak evidence) ------------
@@ -1327,7 +1449,7 @@ fit_suggestion_model <- function(syntax_lines, unused_vars, anchor_var, ctx) {
 # the structural checkbox matrix by variable NAME. Each cell is NULL or list(est, p, rank); rank 1 = the
 # least significant path (highest p-value). Paths that are not estimated in `fit` are never listed.
 get_removal_candidate_paths <- function(fit, struct_df, alpha = 0.05, max_paths = Inf) {
-  if (is.null(fit) || !isTRUE(lavaan::lavInspect(fit, "converged"))) return(NULL)
+  if (!fit_converged(fit)) return(NULL)
   pe <- tryCatch(lavaan::parameterEstimates(fit), error = function(e) NULL)
   if (is.null(pe) || !"pvalue" %in% names(pe)) return(NULL)
   reg <- pe[pe$op == "~" & is.finite(pe$pvalue) & pe$pvalue >= alpha, , drop = FALSE]
@@ -1356,7 +1478,7 @@ get_removal_candidate_paths <- function(fit, struct_df, alpha = 0.05, max_paths 
 # ---- Helper: Modification-index based suggestions ------------
 # All MI rows (regressions, residual covariances, cross-loadings) passing the MI and |std.EPC| filters.
 get_modification_suggestions <- function(fit, mi_threshold = 6.63, epc_threshold = 0) {
-  if (is.null(fit) || !isTRUE(lavaan::lavInspect(fit, "converged"))) return(NULL)
+  if (!fit_converged(fit)) return(NULL)
   mi_res <- tryCatch(
     lavaan::modificationindices(fit, standardized = TRUE, sort. = TRUE, minimum.value = mi_threshold),
     error = function(e) NULL)
@@ -1447,7 +1569,6 @@ ui <- fluidPage(
   animation: structura-spin 1s linear infinite;
   margin-bottom: 24px;
 }
-@keyframes structura-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 .structura-preload-progress {
   width: 280px;
   background-color: #334155;
@@ -1484,12 +1605,8 @@ ui <- fluidPage(
     tags$script(HTML("
       // Progress bar logic (JavaScript-driven to avoid R blocking issues)
       (function() {
-        var interval;
-        var width = 0;
-
         // Guarantee function is registered immediately even if DOM elements aren't ready yet
         window.finishStructuraPreload = function(success, errorMsg) {
-          if (interval) clearInterval(interval);
           var bar = document.getElementById('structura-preload-bar');
           var status = document.getElementById('structura-preload-status');
           
@@ -1655,20 +1772,21 @@ ui <- fluidPage(
         setTimeout(function() { URL.revokeObjectURL(url); }, 2000);
       };
 
-      window.downloadSemDiagramSvg = function() {
+      // The diagram for an export button; tells the user and returns null when there is none.
+      window.structuraRequireDiagram = function() {
         var d = window.structuraDiagramSvg();
-        if (!d) {
-          alert('No path diagram available to export. Please run and fit a model first.');
-          return;
-        }
+        if (!d) alert('No path diagram available to export. Please run and fit a model first.');
+        return d;
+      };
+
+      window.downloadSemDiagramSvg = function() {
+        var d = window.structuraRequireDiagram();
+        if (!d) return;
         window.structuraSaveBlob(new Blob([d.text], { type: 'image/svg+xml;charset=utf-8' }), 'structura2_path_diagram.svg');
       };
 
       window.downloadSemDiagramPng = function(scale) {
-        if (!window.structuraDiagramSvg()) {
-          alert('No path diagram available to export. Please run and fit a model first.');
-          return;
-        }
+        if (!window.structuraRequireDiagram()) return;
         window.structuraDiagramPng(scale || 2).then(function(blob) {
           window.structuraSaveBlob(blob, 'structura2_path_diagram.png');
         }).catch(function(err) {
@@ -1870,11 +1988,9 @@ ui <- fluidPage(
           var reportDiv = document.getElementById('structura-print-report');
           if (!reportDiv) return;
           
-          var plotContainer = document.getElementById('sem_plot_container');
-          var svgElem = plotContainer ? plotContainer.querySelector('svg') : null;
-          var svgHtml = svgElem ? svgElem.outerHTML : '<p style=\"color:#666; font-style:italic;\">No diagram available</p>';
+          var diagram = window.structuraDiagramSvg();
+          var svgHtml = diagram ? diagram.text : '<p style=\"color:#666; font-style:italic;\">No diagram available</p>';
 
-          var sectionIdx = 1;
           var html = '<div class=\"print-header\">' +
             '<div>' +
               '<h1>Structura2 Analysis Report</h1>' +
@@ -1885,62 +2001,32 @@ ui <- fluidPage(
               '<div><b>Mode:</b> ' + msg.analysis_mode + ' | <b>Missing:</b> ' + msg.missing_method + '</div>' +
             '</div>' +
           '</div>' +
-          (msg.warning_html || '') +
-          '<div class=\"print-avoid-break\">' +
-            '<div class=\"print-section-title\">' + (sectionIdx++) + '. Model Fit Summary & Diagnostics</div>' +
-            msg.fit_table_html +
-          '</div>';
+          (msg.warning_html || '');
 
-          if (msg.opt_history_html && msg.opt_history_html.trim() !== '') {
-            html += '<div class=\"print-avoid-break\">' +
-              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Model Optimization History</div>' +
-              msg.opt_history_html +
+          // Numbered report sections; `opts.style` adds inline style, `opts.avoidBreak === false` allows page breaks inside
+          var sectionIdx = 1;
+          var addSection = function(title, bodyHtml, opts) {
+            opts = opts || {};
+            html += '<div' + (opts.avoidBreak === false ? '' : ' class=\"print-avoid-break\"') +
+              (opts.style ? ' style=\"' + opts.style + '\"' : '') + '>' +
+              '<div class=\"print-section-title\">' + (sectionIdx++) + '. ' + title + '</div>' +
+              bodyHtml +
             '</div>';
-          }
+          };
+          var filled = function(h) { return h && h.trim() !== ''; };
 
-          if (msg.var_stats_html && msg.var_stats_html.trim() !== '') {
-            html += '<div class=\"print-avoid-break\">' +
-              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Variable Summary Statistics</div>' +
-              msg.var_stats_html +
-            '</div>';
-          }
-
-          if (msg.latent_rel_html && msg.latent_rel_html.trim() !== '') {
-            html += '<div class=\"print-avoid-break\">' +
-              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Latent Variable Reliability & Validity</div>' +
-              msg.latent_rel_html +
-            '</div>';
-          }
-
-          html += '<div class=\"print-avoid-break\">' +
-            '<div class=\"print-section-title\">' + (sectionIdx++) + '. Path Diagram</div>' +
-            '<div class=\"print-diagram-box\">' +
-              svgHtml +
-            '</div>' +
-          '</div>' +
-          '<div class=\"print-page-break\"></div>' +
-          '<div class=\"print-avoid-break\">' +
-            '<div class=\"print-section-title\">' + (sectionIdx++) + '. Parameter Estimates</div>' +
-            msg.param_table_html +
-          '</div>';
-
-          if (msg.defined_effects_html && msg.defined_effects_html.trim() !== '') {
-            html += '<div class=\"print-avoid-break\" style=\"margin-top: 14px;\">' +
-              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Defined & Indirect Effects</div>' +
-              msg.defined_effects_html +
-            '</div>';
-          }
-
-          html += '<div class=\"print-avoid-break\" style=\"margin-top: 14px;\">' +
-            '<div class=\"print-section-title\">' + (sectionIdx++) + '. Model Syntax (lavaan)</div>' +
-            '<pre class=\"print-syntax-box\">' + msg.syntax_text + '</pre>' +
-          '</div>';
-
-          if (msg.summary_text && msg.summary_text.trim() !== '') {
-            html += '<div style=\"margin-top: 14px;\">' +
-              '<div class=\"print-section-title\">' + (sectionIdx++) + '. Model Summary (lavaan)</div>' +
-              '<pre class=\"print-syntax-box\">' + msg.summary_text + '</pre>' +
-            '</div>';
+          addSection('Model Fit Summary & Diagnostics', msg.fit_table_html);
+          if (filled(msg.opt_history_html)) addSection('Model Optimization History', msg.opt_history_html);
+          if (filled(msg.var_stats_html)) addSection('Variable Summary Statistics', msg.var_stats_html);
+          if (filled(msg.latent_rel_html)) addSection('Latent Variable Reliability & Validity', msg.latent_rel_html);
+          addSection('Path Diagram', '<div class=\"print-diagram-box\">' + svgHtml + '</div>');
+          html += '<div class=\"print-page-break\"></div>';
+          addSection('Parameter Estimates', msg.param_table_html);
+          if (filled(msg.defined_effects_html)) addSection('Defined & Indirect Effects', msg.defined_effects_html, { style: 'margin-top: 14px;' });
+          addSection('Model Syntax (lavaan)', '<pre class=\"print-syntax-box\">' + msg.syntax_text + '</pre>', { style: 'margin-top: 14px;' });
+          if (filled(msg.summary_text)) {
+            addSection('Model Summary (lavaan)', '<pre class=\"print-syntax-box\">' + msg.summary_text + '</pre>',
+                       { avoidBreak: false, style: 'margin-top: 14px;' });
           }
 
           reportDiv.innerHTML = html;
@@ -1967,14 +2053,9 @@ ui <- fluidPage(
               if (++tries < 50) setTimeout(render, 100);
               return;
             }
-            renderPrunePreview(message);
+            window.structuraRenderDot(document.getElementById('prune_preview_container'), message);
           })();
         });
-
-        function renderPrunePreview(message) {
-          var container = document.getElementById('prune_preview_container');
-          if (container) window.structuraRenderDot(container, message);
-        }
 
         // Real-time Optimization Live Canvas Line Chart Renderer
         Shiny.addCustomMessageHandler('update_optimization_live_chart', function(msg) {
@@ -2244,7 +2325,7 @@ ui <- fluidPage(
                           actionButton("add_row", "Add Row", class = "btn btn-primary", style = "margin-top: 10px;")
                       ),
                       tags$hr(),
-                      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; flex-wrap: wrap; gap: 8px;",
+                      div(class = "s2-row-between", style = "margin-bottom: 4px; flex-wrap: wrap; gap: 8px;",
                           h4("Structural Model", class = "s2-section-title"),
                           div(style = "display: flex; align-items: center; gap: 12px; flex-wrap: wrap;",
                               div(style = "margin-bottom: 0;",
@@ -2326,7 +2407,7 @@ ui <- fluidPage(
                                            verbatimTextOutput("approx_eq"))
                       ),
                       # ---------- Path diagram --------------------
-                      div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; margin-top: 10px;",
+                      div(class = "s2-row-between", style = "margin-bottom: 6px; margin-top: 10px;",
                           h4("Path Diagram", style = "margin: 0; font-weight: 600;"),
                           div(style = "display: flex; gap: 6px;",
                               actionButton("save_diagram_svg", "Save SVG", class = "btn btn-default btn-xs",
@@ -2352,7 +2433,7 @@ ui <- fluidPage(
 
     # ---------------- Details tab --------------------------------
     tabPanel("Details",
-             div(style = "display: flex; justify-content: space-between; align-items: center; margin-top: 10px; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;",
+             div(class = "s2-row-between", style = "margin-top: 10px; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;",
                  h4("Parameter Estimates", style = "margin: 0; font-weight: 600;"),
                  div(style = "display: flex; gap: 20px; align-items: center;",
                      div(style = "margin-bottom: 0;",
@@ -2515,12 +2596,7 @@ server <- function(input, output, session) {
       updateRadioButtons(session, "sample_ds", selected = "None")
       removeModal()
     }, error = function(e) {
-      showModal(modalDialog(
-        title = "Data Load Error",
-        div(class = "alert alert-danger", e$message),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
+      notice_modal("Data Load Error", e$message, level = "danger")
     })
   })
 
@@ -2541,21 +2617,7 @@ server <- function(input, output, session) {
   output$datatable <- renderDT({
     req(data())
     df <- data()
-    # Single scroll area (.s2-table-scroll) instead of DT scrollX/scrollY, which swap
-    # scroll containers when a column filter gets focus and shift the table.
-    dt <- datatable(df, filter = "top", editable = FALSE,
-                    options = list(pageLength = 30, autoWidth = TRUE,
-                                   dom = 'lfr<"s2-table-scroll"t>ip'),
-                    rownames = FALSE)
-
-    # Format floating-point numeric columns to 3 decimal places while preserving integers (e.g., ID, grade)
-    is_float_col <- function(x) is.numeric(x) && any(!is.na(x) & (x %% 1 != 0))
-    float_cols <- names(df)[sapply(df, is_float_col)]
-    
-    if (length(float_cols) > 0) {
-      dt <- dt %>% formatRound(columns = float_cols, digits = 3)
-    }
-    dt
+    preview_datatable(df)
   }, server = FALSE)
 
   # ---------- Filtering & preprocessing --------------------------
@@ -2577,39 +2639,12 @@ server <- function(input, output, session) {
   # or re-render every time the user filters/searches the preview table.
   processed_columns_full <- reactive({
     req(data())
-    tryCatch({
-      df <- data()
-      df[] <- lapply(df, function(x) if (is.factor(x)) as.character(x) else x)
-
-      # --- log10 transform (renames columns only) -------------------
-      if (!is.null(input$log_columns)) {
-        col_order <- names(df)
-        for (col in input$log_columns) {
-          log_col      <- paste0("log_", col)
-          df[[log_col]] <- log10(df[[col]])
-          pos           <- match(col, col_order)
-          col_order[pos] <- log_col
-          df[[col]]      <- NULL
-        }
-        df <- df[, col_order, drop = FALSE]
-      }
-
-      # --- one-hot encode --------------------------------------------
-      chars <- names(df)[vapply(df, is.character, logical(1))]
-      multi <- chars[vapply(df[chars], function(x) {
-        u <- unique(x); length(u) > 1 && length(u) < nrow(df)
-      }, logical(1))]
-      if (length(multi)) {
-        mm <- model.matrix(~ . - 1, data = df[multi], na.action = na.pass)
-        df <- cbind(df[setdiff(names(df), multi)],
-                    as.data.frame(mm, check.names = TRUE))
-      }
-      names(df) <- make.names(names(df), unique = TRUE)
-      df
-    }, error = function(e) {
-      warning(paste("Data preprocessing failed:", e$message))
-      data.frame()
-    })
+    tryCatch(
+      preprocess_columns(data(), input$log_columns),
+      error = function(e) {
+        warning(paste("Data preprocessing failed:", e$message))
+        data.frame()
+      })
   })
 
   # Observed variables whose complete rows the main fit must keep (listwise only). Set when an optimization
@@ -2628,40 +2663,14 @@ server <- function(input, output, session) {
         idx_num <- as.numeric(unlist(idx))
         df <- data()[idx_num, , drop = FALSE]
       }
-      df[] <- lapply(df, function(x) if (is.factor(x)) as.character(x) else x)
-
-      # --- log10 transform -----------------------------------------
-      if (!is.null(input$log_columns)) {
-        col_order <- names(df)
-        for (col in input$log_columns) {
-          log_col      <- paste0("log_", col)
-          df[[log_col]] <- log10(df[[col]])
-          pos           <- match(col, col_order)
-          col_order[pos] <- log_col
-          df[[col]]      <- NULL
-        }
-        df <- df[, col_order, drop = FALSE]
-      }
-
-      # --- one-hot encode ------------------------------------------
-      chars <- names(df)[vapply(df, is.character, logical(1))]
-      multi <- chars[vapply(df[chars], function(x) {
-        u <- unique(x); length(u) > 1 && length(u) < nrow(df)
-      }, logical(1))]
-      if (length(multi)) {
-        mm <- model.matrix(~ . - 1, data = df[multi], na.action = na.pass)
-        df <- cbind(df[setdiff(names(df), multi)],
-                    as.data.frame(mm, check.names = TRUE))
-      }
-      names(df) <- make.names(names(df), unique = TRUE)
+      df <- preprocess_columns(df, input$log_columns, reference = data())
 
       # --- standardize if requested --------------------------------
       if (input$analysis_mode == "std") {
         num_cols <- names(df)[vapply(df, is.numeric, logical(1))]
         if (length(num_cols) > 0) {
           mat_vals <- as.matrix(df[, num_cols, drop = FALSE])
-          sds <- apply(mat_vals, 2, sd, na.rm = TRUE)
-          zero_var <- which(is.na(sds) | sds < 1e-12)
+          zero_var <- which(apply(mat_vals, 2, is_constant_col))
           non_zero_var <- setdiff(seq_along(num_cols), zero_var)
           if (length(non_zero_var) > 0) {
             mat_vals[, non_zero_var] <- scale(mat_vals[, non_zero_var, drop = FALSE])
@@ -2681,25 +2690,13 @@ server <- function(input, output, session) {
 
   output$display_column_ui <- renderUI({
     df <- processed_columns_full(); req(df)
+    # Constant columns are excluded from the choices; the default selection is the numeric columns
+    ch <- display_column_choices(df, data(), input$log_columns)
+    zero_var_cols <- ch$zero_var
 
-    # Identify columns with zero variance (constant columns)
-    numeric_cols <- sapply(df, is.numeric)
-    zero_var_cols <- names(df)[numeric_cols][sapply(df[numeric_cols], function(x) {
-      var_val <- var(x, na.rm = TRUE)
-      is.na(var_val) || var_val == 0
-    })]
-    
-    # Exclude zero variance columns from available choices
-    available_cols <- setdiff(names(df), zero_var_cols)
-    
-    # Set default selection from available columns only
-    numeric_orig <- names(data())[sapply(data(), is.numeric)]
-    logs <- if (!is.null(input$log_columns)) paste0("log_", input$log_columns) else NULL
-    default <- intersect(c(numeric_orig, logs), available_cols)
-    
     div(
       checkboxGroupInput("display_columns", "Display columns:",
-                         choices = available_cols, selected = default, inline = TRUE),
+                         choices = ch$available, selected = ch$default, inline = TRUE),
       if (length(zero_var_cols) > 0) {
         div(style = "color: #666; font-size: 11px; margin-top: 5px;",
             paste("Note: Excluded", length(zero_var_cols), "constant variable(s):",
@@ -2713,27 +2710,18 @@ server <- function(input, output, session) {
     df <- processed_data(); req(df)
     if (!is.null(input$display_columns))
       df <- df[, intersect(input$display_columns, names(df)), drop = FALSE]
-    
-    # Single scroll area (see output$datatable above)
-    dt <- datatable(df, filter = "top", editable = FALSE,
-                    options = list(pageLength = 30, autoWidth = TRUE,
-                                   dom = 'lfr<"s2-table-scroll"t>ip'),
-                    rownames = FALSE)
-
-    # Format floating-point numeric columns to 3 decimal places with aligned trailing zeros
-    is_float_col <- function(x) is.numeric(x) && any(!is.na(x) & (x %% 1 != 0))
-    float_cols <- names(df)[sapply(df, is_float_col)]
-    
-    if (length(float_cols) > 0) {
-      dt <- dt %>% formatRound(columns = float_cols, digits = 3)
-    }
-    dt
+    preview_datatable(df)
   }, server = FALSE)
 
   # ---------- Measurement table ----------------------------------
 
   input_table_data <- reactiveVal(NULL)
   input_table_trigger <- reactiveVal(0)
+
+  # The measurement table as the user currently sees it (the widget once it exists, otherwise the stored table)
+  current_meas_table <- function() {
+    if (!is.null(input$input_table)) hot_to_r(input$input_table) else input_table_data()
+  }
 
   observeEvent(data(), {
     req(data())
@@ -2751,7 +2739,7 @@ server <- function(input, output, session) {
   observeEvent(input$display_columns, ignoreNULL = FALSE, {
     if (is.null(input$display_columns) && !isTRUE(display_columns_seen())) return()   # control not rendered yet
     inds <- as.character(input$display_columns)
-    df <- if (!is.null(input$input_table)) hot_to_r(input$input_table) else input_table_data()
+    df <- current_meas_table()
     if (!is.null(df)) {
       current_inds <- setdiff(colnames(df), c("Latent", "Indicator", "Operator"))
       if (identical(sort(current_inds), sort(inds))) {
@@ -2818,14 +2806,11 @@ server <- function(input, output, session) {
       shinyjs::hide("latent_error_box")
     }
     
-    valid_latents <- ifelse(nzchar(tbl$Latent), tbl$Latent, "latent")
-    convs         <- make.unique(c(obs_names, valid_latents))
-    tbl$Indicator <- ifelse(nzchar(tbl$Latent), tail(convs, nrow(tbl)), "")
-    input_table_data(tbl)
+    input_table_data(with_indicator_names(tbl, obs_names))
   })
 
   observeEvent(input$add_row, {
-    df <- if (!is.null(input$input_table)) hot_to_r(input$input_table) else input_table_data()
+    df <- current_meas_table()
     req(df)
     new_row            <- df[1, ]
     new_row[,]         <- FALSE
@@ -2833,11 +2818,7 @@ server <- function(input, output, session) {
     new_row$Indicator  <- ""
     new_row$Operator   <- "=~"
     combined           <- rbind(df, new_row)
-    obs_names          <- names(processed_data())
-    valid_latents      <- ifelse(nzchar(combined$Latent), combined$Latent, "latent")
-    convs              <- make.unique(c(obs_names, valid_latents))
-    combined$Indicator <- ifelse(nzchar(combined$Latent), tail(convs, nrow(combined)), "")
-    input_table_data(combined)
+    input_table_data(with_indicator_names(combined, names(processed_data())))
     input_table_trigger(input_table_trigger() + 1)
   })
 
@@ -2957,7 +2938,7 @@ server <- function(input, output, session) {
   suggestion_fit <- reactive({
     if (!isTRUE(input$show_suggested_paths)) return(NULL)
     model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
-    if (is.null(model_res) || !isTRUE(model_res$ok) || is.null(model_res$fit)) return(NULL)
+    if (!model_usable(model_res)) return(NULL)
     # Modification indices of an unidentified fit are not meaningful
     if (isFALSE(model_res$identified)) return(NULL)
     items <- tryCatch(model_items(), error = function(e) character(0))
@@ -3029,8 +3010,7 @@ server <- function(input, output, session) {
   output$checkbox_matrix <- renderRHandsontable({
     struct_table_trigger()
     tryCatch({
-      df <- isolate(processed_data()); req(df)
-      meas <- isolate(input_table_data()); req(meas)
+      req(isolate(processed_data()), isolate(input_table_data()))
       mat <- isolate(struct_table_data()); req(mat)
       items <- mat$Dependent
       if (!length(items)) return()
@@ -3165,7 +3145,7 @@ server <- function(input, output, session) {
     mlines <- build_meas_lines(meas)
     struc <- struct_table_data(); req(struc)
     slines <- build_struct_lines(struc)
-    # ----- add manual equations (new) -----------------------------
+    # ----- add manual equations -----------------------------------
     extra <- strsplit(input$extra_eq, "\\n")[[1]]
     extra <- trimws(extra)
     extra <- extra[nzchar(extra)]
@@ -3203,9 +3183,8 @@ server <- function(input, output, session) {
 
   # Spec of the model currently defined in the tables (used at fit time and for named saves)
   make_model_spec <- function(df_used, name = "") {
-    meas <- if (!is.null(input$input_table)) hot_to_r(input$input_table) else input_table_data()
     build_model_spec(
-      meas, struct_table_data(), input$extra_eq, current_settings(),
+      current_meas_table(), struct_table_data(), input$extra_eq, current_settings(),
       list(name = data_label(), columns = names(data()), nrow_used = nrow(df_used)),
       name = name)
   }
@@ -3214,16 +3193,7 @@ server <- function(input, output, session) {
     ln <- isolate(lavaan_model_str())
     if (length(ln) == 0) {
       msg <- if (input$run_model > 0) "Define a model to proceed." else ""
-      return(list(ok = FALSE,
-                  msg_friendly = msg,
-                  msg_level = "info",
-                  fail_kind = "empty",
-                  fit = NULL,
-                  syntax = NULL,
-                  pe_std = NULL,
-                  pe_raw = NULL,
-                  fit_measures = NULL,
-                  equations = NULL))
+      return(fit_failure(msg, "empty", level = "info"))
     }
     tryCatch({
       # Use meanstructure = TRUE if FIML is selected to prevent lavaan error
@@ -3245,20 +3215,14 @@ server <- function(input, output, session) {
       pre_errs <- diagnose_fit_inputs(syntax_chr, df_fit, input$missing_method, needs_meanstructure)
       pre_kind <- attr(pre_errs, "kind") %||% ""
       if (length(pre_errs) > 0 && !identical(pre_kind, "identification")) {
-        return(list(ok = FALSE,
-                    msg_friendly = paste(pre_errs, collapse = "
-
-"),
-                    fail_kind = "data",
-                    fit = NULL, syntax = NULL, pe_std = NULL, pe_raw = NULL,
-                    fit_measures = NULL, equations = NULL))
+        return(fit_failure(paste(pre_errs, collapse = "\n\n"), "data"))
       }
 
       fm <- run_lavaan_sem(syntax_chr, df_fit,
                            input$missing_method, needs_meanstructure)
 
-      converged <- isTRUE(lavInspect(fm, "converged"))
-      post <- if (converged) diagnose_fit_results(fm, df_fit) else list(errors = character(0), warnings = character(0), ident = NULL)
+      converged <- fit_converged(fm)
+      post <- if (converged) diagnose_fit_results(fm, df_fit) else list(warnings = character(0), ident = NULL)
       # Not identified: df < 0 (pre-check) or no standard errors (post-check); one message is enough
       ident_msg <- if (length(pre_errs) > 0) paste(pre_errs, collapse = "
 
@@ -3272,7 +3236,7 @@ server <- function(input, output, session) {
         pe_std <- tryCatch(parameterEstimates(fm, standardized = TRUE), error = function(e) NULL)
         pe_raw <- tryCatch(parameterEstimates(fm, standardized = FALSE, remove.def = FALSE), error = function(e) NULL)
         fit_meas <- tryCatch(
-          fitMeasures(fm, c("nobs", "chisq", "df", "pvalue", "srmr", "rmsea", "gfi", "agfi", "nfi", "cfi", "aic", "bic")),
+          fitMeasures(fm, c("chisq", "df", "pvalue", "srmr", "rmsea", "gfi", "agfi", "nfi", "cfi", "aic", "bic")),
           error = function(e) NULL
         )
         eqs <- tryCatch(lavaan_to_equations(fm, cached_pe = pe_raw), error = function(e) character(0))
@@ -3284,7 +3248,10 @@ server <- function(input, output, session) {
            identified = identified,
            # Only a NEGATIVE df is a df violation to mark in red; no standard errors with df >= 0 is reported by the
            # message box alone (p, NFI and CFI can still be computed there)
-           ident_df = if (!identified && isTRUE(fit_identification(fm)$df < 0)) fit_identification(fm)$df else NA_real_,
+           ident_df = {
+             ident_info <- if (!identified) fit_identification(fm)
+             if (!is.null(ident_info) && isTRUE(ident_info$df < 0)) ident_info$df else NA_real_
+           },
            fail_kind = if (converged) "" else "convergence",
            msg_title = if (!identified) "The model is not identified. Results are shown for inspection only." else NULL,
            msg_level = if (!identified) "error" else NULL,
@@ -3339,15 +3306,7 @@ server <- function(input, output, session) {
         friendly_msg <- paste0("Estimation failed: ", error_msg, ". Try: (1) Check for perfect correlations between variables, (2) Ensure sufficient sample size, or (3) Simplify the model structure.")
       }
       
-      list(ok = FALSE,
-           msg_friendly = paste0(friendly_msg, "\n\nTechnical details: ", error_msg),
-           fail_kind = "error",
-           fit = NULL,
-           syntax = NULL,
-           pe_std = NULL,
-           pe_raw = NULL,
-           fit_measures = NULL,
-           equations = NULL)
+      fit_failure(paste0(friendly_msg, "\n\nTechnical details: ", error_msg), "error")
     })
   }, ignoreNULL = FALSE)  # Initial auto-execution
 
@@ -3381,33 +3340,26 @@ server <- function(input, output, session) {
     ms <- model$fit_measures
     if (is.null(ms)) {
       fit <- model$fit
-      ms  <- fitMeasures(fit, c("pvalue","srmr","rmsea","aic","bic",
-                                "gfi","agfi","nfi","cfi"))
+      ms  <- fitMeasures(fit, FIT_INDEX_NAMES)
     }
-    vals <- round(as.numeric(ms[c("pvalue","srmr","rmsea","aic","bic","gfi","agfi","nfi","cfi")]), 3)
-    names(vals) <- c("pvalue","srmr","rmsea","aic","bic","gfi","agfi","nfi","cfi")
+    vals <- round(as.numeric(ms[FIT_INDEX_NAMES]), 3)
+    names(vals) <- FIT_INDEX_NAMES
     # One row per index: value, the criterion it is judged against, and a pass / fail mark
     # (the mark is text, so the verdict does not depend on color alone)
-    thr <- c(pvalue = .05, srmr = .08, rmsea = .08,
-             gfi = .90, agfi = .90, nfi = .90, cfi = .90)
-    dir <- c(pvalue = ">=", srmr = "<=", rmsea = "<=", gfi = ">=", agfi = ">=", nfi = ">=", cfi = ">=")
     labels <- c(pvalue = "p-value", srmr = "SRMR", rmsea = "RMSEA", aic = "AIC", bic = "BIC",
                 gfi = "GFI", agfi = "AGFI", nfi = "NFI", cfi = "CFI")
     # Not identified: lavaan's values are shown as they are; the ones that cannot be computed (p, NFI, CFI)
     # and the df are red
     unident <- isFALSE(model$identified) && is.finite(model$ident_df)
-    judge <- function(idx, v) {
-      if (is.na(v) || !(idx %in% names(thr))) return(NA)
-      if (dir[[idx]] == ">=") v >= thr[[idx]] else v <= thr[[idx]]
-    }
     rows <- lapply(names(vals), function(idx) {
       v <- vals[[idx]]
-      ok <- judge(idx, v)
+      ok <- fit_index_ok(idx, v)
+      k <- match(idx, FIT_CUTOFFS$index)
       value_html <- if (is.na(v)) {
         if (unident) '<span class="s2-ng">NA</span>' else "NA"
       } else if (isFALSE(ok)) sprintf('<span class="s2-ng">%.3f</span>', v)
       else sprintf("%.3f", v)
-      crit <- if (idx %in% names(thr)) sprintf("%s %s", if (dir[[idx]] == ">=") "≥" else "≤", sub("^0", "", format(thr[[idx]], nsmall = 2))) else "—"
+      crit <- if (!is.na(k)) sprintf("%s %s", if (FIT_CUTOFFS$higher_better[k]) "≥" else "≤", sub("^0", "", format(FIT_CUTOFFS$cutoff[k], nsmall = 2))) else "—"
       mark <- if (is.na(ok)) "" else if (ok) '<span class="s2-ok">✓</span>' else '<span class="s2-ng">✗</span>'
       data.frame(Index = labels[[idx]], Value = value_html, Criterion = crit, Fit = mark,
                  stringsAsFactors = FALSE)
@@ -3431,20 +3383,15 @@ server <- function(input, output, session) {
     if (identical(model$ctx$analysis_mode %||% input$analysis_mode, "std"))
       return("— Hidden in Standardized mode —")
     validate(need(model$ok, unavailable_msg(model)))
-    if (!is.null(model$equations)) {
-      paste(model$equations, collapse = "\n")
-    } else {
-      paste(lavaan_to_equations(model$fit), collapse = "\n")
-    }
+    paste(model$equations, collapse = "\n")
   })
 
   # Details tab: the message box sits on the Model tab, so a not-identified model is flagged here as well
   output$ident_note <- renderUI({
     model <- tryCatch(fit_model_safe(), error = function(e) NULL)
     if (is.null(model) || !isFALSE(model$identified)) return(NULL)
-    df_txt <- if (is.finite(model$ident_df)) sprintf(" (df = %s)", format(model$ident_df)) else ""
     div(class = "alert-box alert-box-error",
-        paste0("The model is not identified", df_txt, ": standard errors and fit indices are unavailable or unreliable."))
+        paste0("The model is not identified", ident_df_suffix(model$ident_df), ": standard errors and fit indices are unavailable or unreliable."))
   })
 
   output$fit_summary <- renderPrint({
@@ -3606,7 +3553,7 @@ server <- function(input, output, session) {
   # matches the model shown even if settings were changed after Run (see pred_obs_data()).
   pred_obs_result <- reactive({
     model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
-    if (is.null(model_res) || !isTRUE(model_res$ok) || is.null(model_res$fit))
+    if (!model_usable(model_res))
       return(list(items = list(), notes = "Run and fit a model first.", identified = TRUE, std = FALSE))
     mode <- input$pred_obs_mode %||% "direct"
     if (!mode %in% c("direct", "reduced")) mode <- "direct"
@@ -3723,61 +3670,37 @@ server <- function(input, output, session) {
   # ----------------- Export PDF Analysis Report ------------------
   observeEvent(input$export_pdf_btn, {
     model_res <- fit_model_safe()
-    if (!isTRUE(model_res$ok) || is.null(model_res$fit)) {
-      showModal(modalDialog(
-        title = "Export Warning",
-        div(class = "alert alert-warning",
-            "Please run and successfully fit a model before exporting the PDF report."),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
+    if (!model_usable(model_res)) {
+      notice_modal("Export Warning", "Please run and successfully fit a model before exporting the PDF report.")
       return()
     }
 
     tryCatch({
       fit <- model_res$fit
-      ms <- lavaan::fitMeasures(fit, c("nobs", "chisq", "df", "pvalue", "cfi", "tli", "rmsea", "srmr", "aic", "bic"))
+      ms <- lavaan::fitMeasures(fit, c("chisq", "df", "pvalue", "cfi", "tli", "rmsea", "srmr", "aic", "bic"))
       
-      # Multicollinearity calculation
-      condition_number <- NA
-      max_cond_index <- NA
-      tryCatch({
-        samp_cov <- lavaan::lavInspect(fit, "sampstat")$cov
-        if (!is.null(samp_cov) && nrow(samp_cov) > 0) {
-          samp_cor <- stats::cov2cor(samp_cov)
-          eig_vals <- eigen(samp_cor, symmetric = TRUE, only.values = TRUE)$values
-          if (length(eig_vals) > 0 && min(eig_vals) > 1e-12) {
-            condition_number <- max(eig_vals) / min(eig_vals)
-            max_cond_indices <- sqrt(max(eig_vals) / eig_vals)
-            max_cond_index <- max(max_cond_indices)
-          }
-        }
-      }, error = function(e) NULL)
-
-      cond_num_str <- if (!is.na(condition_number)) sprintf("%.1f", condition_number) else "-"
-      max_cond_str <- if (!is.na(max_cond_index)) sprintf("%.1f", max_cond_index) else "-"
+      collinearity <- collinearity_stats(fit)
+      cond_num_str <- num_dash(collinearity$condition_number, "%.1f")
+      max_cond_str <- num_dash(collinearity$max_cond_index, "%.1f")
 
       # Build Fit & Diagnostics HTML Table
       # fitMeasures() has no "nobs" measure, so N comes from lavInspect(). Values that cannot be computed are
       # shown as NA (red) instead of being turned into 0, which would look like a perfect fit.
       n_obs_val <- tryCatch(sum(lavaan::lavInspect(fit, "nobs")), error = function(e) NA_real_)
       na_cell <- "<span style='color:#b91c1c;font-weight:600;'>NA</span>"
-      num_cell <- function(v, fmt) if (is.na(v)) na_cell else sprintf(fmt, v)
+      na_red_cell <- function(v, fmt) if (is.na(v)) na_cell else sprintf(fmt, v)
       unident_pdf <- isFALSE(model_res$identified)
       df_cell <- if (is.na(ms["df"])) na_cell else if (unident_pdf)
         sprintf("<span style='color:#b91c1c;font-weight:600;'>%d</span>", as.integer(ms["df"]))
       else sprintf("%d", as.integer(ms["df"]))
 
-      fit_html <- paste0(
-        "<table class='print-table'>",
-        "<thead><tr><th>N</th><th>Chi-square</th><th>df</th><th>p-value</th><th>CFI</th><th>TLI</th><th>RMSEA</th><th>SRMR</th><th>AIC</th><th>BIC</th><th>Cond. No.</th><th>Max Cond. Index</th></tr></thead>",
-        "<tbody><tr>",
-        paste0("<td>", num_cell(n_obs_val, "%d"), "</td><td>", num_cell(ms["chisq"], "%.2f"), "</td><td>", df_cell, "</td><td>",
-               num_cell(ms["pvalue"], "%.3f"), "</td><td>", num_cell(ms["cfi"], "%.3f"), "</td><td>",
-               num_cell(ms["tli"], "%.3f"), "</td><td>", num_cell(ms["rmsea"], "%.3f"), "</td><td>",
-               num_cell(ms["srmr"], "%.3f"), "</td><td>", num_cell(ms["aic"], "%.1f"), "</td><td>",
-               num_cell(ms["bic"], "%.1f"), "</td><td>", cond_num_str, "</td><td>", max_cond_str, "</td>"),
-        "</tr></tbody></table>"
+      fit_html <- print_table_html(
+        c("N", "Chi-square", "df", "p-value", "CFI", "TLI", "RMSEA", "SRMR", "AIC", "BIC", "Cond. No.", "Max Cond. Index"),
+        paste0("<tr><td>", na_red_cell(n_obs_val, "%d"), "</td><td>", na_red_cell(ms["chisq"], "%.2f"), "</td><td>", df_cell, "</td><td>",
+               na_red_cell(ms["pvalue"], "%.3f"), "</td><td>", na_red_cell(ms["cfi"], "%.3f"), "</td><td>",
+               na_red_cell(ms["tli"], "%.3f"), "</td><td>", na_red_cell(ms["rmsea"], "%.3f"), "</td><td>",
+               na_red_cell(ms["srmr"], "%.3f"), "</td><td>", na_red_cell(ms["aic"], "%.1f"), "</td><td>",
+               na_red_cell(ms["bic"], "%.1f"), "</td><td>", cond_num_str, "</td><td>", max_cond_str, "</td></tr>")
       )
 
       # The report describes the model as it was fitted (data and settings captured at fit time)
@@ -3787,15 +3710,11 @@ server <- function(input, output, session) {
       var_stats_html <- tryCatch({
         vs <- compute_var_stats(fit, df_fit)
         if (!is.null(vs) && nrow(vs) > 0) {
-          num_cell <- function(x) ifelse(is.na(x), "-", sprintf("%.3f", x))
           rows <- sprintf("<tr><td><b>%s</b></td><td style='text-align:right;'>%d</td><td style='text-align:right;'>%d (%.1f%%)</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td></tr>",
                           htmltools::htmlEscape(vs$Variable), as.integer(vs$ValidN), as.integer(vs$MissingN), vs$MissingPct,
-                          num_cell(vs$Mean), num_cell(vs$SD), num_cell(vs$Skewness), num_cell(vs$Kurtosis))
-          paste0(
-            "<table class='print-table'>",
-            "<thead><tr><th>Variable</th><th style='text-align:right;'>Valid N</th><th style='text-align:right;'>Missing N (%)</th><th style='text-align:right;'>Mean</th><th style='text-align:right;'>Std.Dev</th><th style='text-align:right;'>Skewness</th><th style='text-align:right;'>Kurtosis</th></tr></thead>",
-            "<tbody>", paste(rows, collapse = ""), "</tbody></table>"
-          )
+                          num_dash(vs$Mean), num_dash(vs$SD), num_dash(vs$Skewness), num_dash(vs$Kurtosis))
+          print_table_html(c("Variable", "Valid N", "Missing N (%)", "Mean", "Std.Dev", "Skewness", "Kurtosis"), rows,
+                           align = c("left", rep("right", 6)))
         } else ""
       }, error = function(e) "")
 
@@ -3803,42 +3722,32 @@ server <- function(input, output, session) {
       latent_rel_html <- tryCatch({
         rel <- compute_latent_reliability(fit, df_fit)
         if (!is.null(rel) && nrow(rel) > 0) {
-          num_cell <- function(x) ifelse(is.na(x), "-", sprintf("%.3f", x))
           lv_rows <- sprintf("<tr><td><b>%s</b></td><td>%s</td><td style='text-align:right;'>%d</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td></tr>",
                              htmltools::htmlEscape(rel$Latent), htmltools::htmlEscape(rel$Indicators), as.integer(rel$Count),
-                             num_cell(rel$Alpha), num_cell(rel$CR), num_cell(rel$AVE))
-          paste0(
-            "<table class='print-table'>",
-            "<thead><tr><th>Latent Construct</th><th>Indicators</th><th style='text-align:right;'>Count</th><th style='text-align:right;'>Cronbach's &alpha;</th><th style='text-align:right;'>CR (Composite Reliability)</th><th style='text-align:right;'>AVE (Average Variance Extracted)</th></tr></thead>",
-            "<tbody>", paste(lv_rows, collapse = ""), "</tbody></table>"
-          )
+                             num_dash(rel$Alpha), num_dash(rel$CR), num_dash(rel$AVE))
+          print_table_html(c("Latent Construct", "Indicators", "Count", "Cronbach's &alpha;", "CR (Composite Reliability)",
+                             "AVE (Average Variance Extracted)"), lv_rows,
+                           align = c("left", "left", rep("right", 4)))
         } else ""
       }, error = function(e) "")
 
       # Build Parameter Estimates Table
-      pe <- tryCatch({
-        lavaan::parameterEstimates(fit, standardized = TRUE)
-      }, error = function(e) lavaan::parameterEstimates(fit))
-      
+      pe <- model_res$pe_std %||% pe_with_std(fit)
+
       main_pe <- pe[pe$op != ":=", ]
       param_rows <- vapply(seq_len(nrow(main_pe)), function(i) {
         r <- main_pe[i, ]
-        p_val_str <- if (is.na(r$pvalue)) "-" else if (r$pvalue < 0.001) "< .001" else sprintf("%.3f", r$pvalue)
-        std_val_str <- if ("std.all" %in% names(r) && !is.na(r$std.all)) sprintf("%.3f", r$std.all) else "-"
-        se_str <- if (is.na(r$se)) "-" else sprintf("%.3f", r$se)
-        z_str <- if (is.na(r$z)) "-" else sprintf("%.3f", r$z)
+        s <- pe_cell_strings(r)
         sprintf("<tr><td>%s</td><td style='text-align:center;'>%s</td><td>%s</td><td style='text-align:right;'>%.3f</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td></tr>",
                 htmltools::htmlEscape(as.character(r$lhs)),
                 htmltools::htmlEscape(as.character(r$op)),
                 htmltools::htmlEscape(as.character(r$rhs)),
-                r$est, se_str, z_str, p_val_str, std_val_str)
+                r$est, s$se, s$z, s$p, s$std)
       }, character(1))
-      
-      param_html <- paste0(
-        "<table class='print-table'>",
-        "<thead><tr><th>LHS</th><th style='text-align:center;'>Op</th><th>RHS</th><th style='text-align:right;'>Estimate</th><th style='text-align:right;'>Std.Err</th><th style='text-align:right;'>z-value</th><th style='text-align:right;'>p-value</th><th style='text-align:right;'>Std.all</th></tr></thead>",
-        "<tbody>", paste(param_rows, collapse = ""), "</tbody></table>"
-      )
+
+      param_html <- print_table_html(
+        c("LHS", "Op", "RHS", "Estimate", "Std.Err", "z-value", "p-value", "Std.all"), param_rows,
+        align = c("left", "center", "left", rep("right", 5)))
 
       # Build Defined & Indirect Effects Table
       defined_effects_html <- tryCatch({
@@ -3846,20 +3755,14 @@ server <- function(input, output, session) {
         if (!is.null(def_sub) && nrow(def_sub) > 0) {
           def_rows <- vapply(seq_len(nrow(def_sub)), function(i) {
             r <- def_sub[i, ]
-            p_val_str <- if (is.na(r$pvalue)) "-" else if (r$pvalue < 0.001) "< .001" else sprintf("%.3f", r$pvalue)
-            std_val_str <- if ("std.all" %in% names(r) && !is.na(r$std.all)) sprintf("%.3f", r$std.all) else "-"
-            se_str <- if (is.na(r$se)) "-" else sprintf("%.3f", r$se)
-            z_str <- if (is.na(r$z)) "-" else sprintf("%.3f", r$z)
+            s <- pe_cell_strings(r)
             sprintf("<tr><td><b>%s</b></td><td style='text-align:right;'>%.3f</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td><td style='text-align:right;'>%s</td></tr>",
                     htmltools::htmlEscape(as.character(r$lhs)),
-                    r$est, se_str, z_str, p_val_str, std_val_str)
+                    r$est, s$se, s$z, s$p, s$std)
           }, character(1))
-          
-          paste0(
-            "<table class='print-table'>",
-            "<thead><tr><th>Defined Parameter / Indirect Effect</th><th style='text-align:right;'>Estimate</th><th style='text-align:right;'>Std.Err</th><th style='text-align:right;'>z-value</th><th style='text-align:right;'>p-value</th><th style='text-align:right;'>Std.all</th></tr></thead>",
-            "<tbody>", paste(def_rows, collapse = ""), "</tbody></table>"
-          )
+
+          print_table_html(c("Defined Parameter / Indirect Effect", "Estimate", "Std.Err", "z-value", "p-value", "Std.all"),
+                           def_rows, align = c("left", rep("right", 5)))
         } else ""
       }, error = function(e) "")
 
@@ -3916,13 +3819,12 @@ server <- function(input, output, session) {
       }, error = function(e) "")
 
       payload <- list(
-        timestamp            = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
-        analysis_mode        = if (identical(model_res$snapshot$settings$analysis_mode %||% input$analysis_mode, "std")) "Standardized" else "Raw",
+        analysis_mode       = if (identical(model_res$snapshot$settings$analysis_mode %||% input$analysis_mode, "std")) "Standardized" else "Raw",
         missing_method       = model_res$snapshot$settings$missing_method %||% input$missing_method,
         warning_html         = if (isFALSE(model_res$identified)) paste0(
           "<div style='border:2px solid #b91c1c; color:#b91c1c; padding:8px 12px; margin:10px 0; font-weight:600;'>",
           "The model is NOT IDENTIFIED",
-          if (is.finite(model_res$ident_df)) paste0(" (df = ", format(model_res$ident_df), ")") else "",
+          ident_df_suffix(model_res$ident_df),
           ": estimates are for inspection only; standard errors and fit indices are unavailable or unreliable.</div>") else "",
         fit_table_html       = fit_html,
         var_stats_html       = var_stats_html,
@@ -3939,13 +3841,7 @@ server <- function(input, output, session) {
 
       session$sendCustomMessage("prepare_and_print_pdf_report", payload)
     }, error = function(e) {
-      showModal(modalDialog(
-        title = "Export Error",
-        div(class = "alert alert-danger",
-            paste("Failed to generate PDF report:", e$message)),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
+      notice_modal("Export Error", paste("Failed to generate PDF report:", e$message), level = "danger")
     })
   })
 
@@ -4038,6 +3934,9 @@ server <- function(input, output, session) {
     }
   })
 
+  # JSON text of the model currently defined in the tables, stored under the name `nm`
+  named_spec_json <- function(nm) spec_to_json(make_model_spec(processed_data(), name = nm))
+
   observeEvent(input$save_model_btn, {
     tryCatch({
       nm <- trimws(input$save_model_name %||% "")
@@ -4049,8 +3948,7 @@ server <- function(input, output, session) {
         showNotification("Enter a name for the model first.", type = "warning", duration = 5)
         return()
       }
-      spec <- make_model_spec(processed_data(), name = nm)
-      session$sendCustomMessage("structura_store", list(op = "save", name = nm, json = spec_to_json(spec)))
+      session$sendCustomMessage("structura_store", list(op = "save", name = nm, json = named_spec_json(nm)))
     }, error = function(e) {
       showNotification(paste("Could not save the model:", conditionMessage(e)), type = "error", duration = 8)
     })
@@ -4078,20 +3976,18 @@ server <- function(input, output, session) {
         return()
       }
       nm <- trimws(input$save_model_name %||% "")
-      spec <- make_model_spec(processed_data(), name = nm)
       session$sendCustomMessage("structura_download_text", list(
         stem = "structura2_model", label = nm, ext = "json", stamp = TRUE,
-        mime = "application/json;charset=utf-8", text = spec_to_json(spec)))
+        mime = "application/json;charset=utf-8", text = named_spec_json(nm)))
     }, error = function(e) {
       showNotification(paste("Could not export the model:", conditionMessage(e)), type = "error", duration = 8)
     })
   })
 
-  observeEvent(input$model_import_json, {
-    x <- input$model_import_json
+  # Parses a model spec JSON text (an imported file or a stored model) and starts the staged restore.
+  restore_from_json <- function(txt, check_empty = FALSE) {
     removeModal()
-    txt <-as.character(x$text %||% "")
-    if (!nzchar(txt)) {
+    if (check_empty && !nzchar(txt)) {
       showNotification("The selected file could not be read or is empty.", type = "error", duration = 8)
       return()
     }
@@ -4101,18 +3997,9 @@ server <- function(input, output, session) {
       return()
     }
     start_restore(parsed$spec)
-  })
-
-  observeEvent(input$restore_spec_json, {
-    x <- input$restore_spec_json
-    removeModal()
-    parsed <- parse_model_spec_json(as.character(x$json %||% ""))
-    if (!isTRUE(parsed$ok)) {
-      showNotification(parsed$msg, type = "error", duration = 10)
-      return()
-    }
-    start_restore(parsed$spec)
-  })
+  }
+  observeEvent(input$model_import_json, restore_from_json(as.character(input$model_import_json$text %||% ""), check_empty = TRUE))
+  observeEvent(input$restore_spec_json, restore_from_json(as.character(input$restore_spec_json$json %||% "")))
 
   # Autosave: the spec captured at fit time of every successful fit.
   # No ignoreInit here: before the first Run the fit reactive can sit in a silent "not ready" state, and with
@@ -4161,18 +4048,18 @@ server <- function(input, output, session) {
   # not settle in time the restore is abandoned with a message. The model is not fitted automatically.
   restore_state <- reactiveVal(NULL)
 
-  # Columns that can be shown after the current log-transform selection (mirrors output$display_column_ui)
-  restore_display_choices <- function(logs) {
-    full <- processed_columns_full()
-    numeric_cols <- vapply(full, is.numeric, logical(1))
-    zero_var <- names(full)[numeric_cols][vapply(full[numeric_cols], function(x) {
-      v <- var(x, na.rm = TRUE); is.na(v) || v == 0
-    }, logical(1))]
-    available <- setdiff(names(full), zero_var)
-    numeric_orig <- names(data())[vapply(data(), is.numeric, logical(1))]
-    list(available = available,
-         default = intersect(c(numeric_orig, if (length(logs)) paste0("log_", logs) else NULL), available))
+  # Leaves the staged restore (success or failure): clears its state and the progress notification
+  end_restore <- function() {
+    restore_state(NULL)
+    removeNotification("restore_progress", session = session)
   }
+  restore_fail <- function(msg, duration = 12) {
+    end_restore()
+    showNotification(msg, type = "error", duration = duration)
+  }
+
+  # Columns that can be shown after the current log-transform selection (mirrors output$display_column_ui)
+  restore_display_choices <- function(logs) display_column_choices(processed_columns_full(), data(), logs)
 
   start_restore <- function(spec) {
     if (is.null(data())) {
@@ -4207,9 +4094,7 @@ server <- function(input, output, session) {
       if (logs_changed) updateCheckboxGroupInput(session, "log_columns", selected = target_logs)
       invisible(TRUE)
     }, error = function(e) {
-      restore_state(NULL)
-      removeNotification("restore_progress", session = session)
-      showNotification(paste("Could not restore the model:", conditionMessage(e)), type = "error", duration = 10)
+      restore_fail(paste("Could not restore the model:", conditionMessage(e)), duration = 10)
       invisible(FALSE)
     })
   }
@@ -4221,11 +4106,7 @@ server <- function(input, output, session) {
 
     secs_in_stage <- as.numeric(difftime(Sys.time(), st$stage_t, units = "secs"))
     go <- function(stage, ...) restore_state(modifyList(st, c(list(stage = stage, stage_t = Sys.time()), list(...))))
-    abort <- function(msg) {
-      restore_state(NULL)
-      removeNotification("restore_progress", session = session)
-      showNotification(msg, type = "error", duration = 12)
-    }
+    abort <- function(msg) restore_fail(msg)
 
     if (as.numeric(difftime(Sys.time(), st$t0, units = "secs")) > 25) {
       return(abort("Restoring the model timed out. Reload the data and try again, or rebuild the model manually."))
@@ -4287,8 +4168,7 @@ server <- function(input, output, session) {
         cur <- struct_table_data()
         if (!is.null(cur) && identical(make_struct_key(cur), st$struct_key)) {
           if (secs_in_stage > 0.8) {
-            restore_state(NULL)
-            removeNotification("restore_progress", session = session)
+            end_restore()
             msg <- "Model restored. Click Run to fit it."
             skipped <- unique(st$dropped)
             if (length(skipped)) {
@@ -4326,14 +4206,8 @@ server <- function(input, output, session) {
   observeEvent(input$export_zip_btn, {
     # Before the first Run the fit reactive can still be in a silent "not ready" state, hence the tryCatch
     model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
-    if (is.null(model_res) || !isTRUE(model_res$ok) || is.null(model_res$fit)) {
-      showModal(modalDialog(
-        title = "Export Warning",
-        div(class = "alert alert-warning",
-            "Please run and successfully fit a model before downloading the results."),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
+    if (!model_usable(model_res)) {
+      notice_modal("Export Warning", "Please run and successfully fit a model before downloading the results.")
       return()
     }
     tryCatch({
@@ -4342,8 +4216,7 @@ server <- function(input, output, session) {
       files <- list()
       add <- function(name, text) files[[length(files) + 1]] <<- list(name = name, text = text)
 
-      pe <- tryCatch(lavaan::parameterEstimates(fit, standardized = TRUE),
-                     error = function(e) lavaan::parameterEstimates(fit))
+      pe <- model_res$pe_std %||% pe_with_std(fit)
       add("parameter_estimates.csv", df_to_csv_text(pe))
 
       fm <- tryCatch(lavaan::fitMeasures(fit), error = function(e) NULL)
@@ -4366,7 +4239,7 @@ server <- function(input, output, session) {
       readme <- c(
         if (isFALSE(model_res$identified)) c(
           paste0("WARNING: the model is NOT IDENTIFIED",
-                 if (is.finite(model_res$ident_df)) paste0(" (df = ", format(model_res$ident_df), ")") else "",
+                 ident_df_suffix(model_res$ident_df),
                  ". Estimates are for inspection only; standard errors and fit indices are unavailable or unreliable."),
           ""),
         "Structura2 results",
@@ -4391,13 +4264,7 @@ server <- function(input, output, session) {
 
       session$sendCustomMessage("structura_build_zip", list(files = files))
     }, error = function(e) {
-      showModal(modalDialog(
-        title = "Export Error",
-        div(class = "alert alert-danger",
-            paste("Failed to prepare the results ZIP:", conditionMessage(e))),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
+      notice_modal("Export Error", paste("Failed to prepare the results ZIP:", conditionMessage(e)), level = "danger")
     })
   })
 
@@ -4445,9 +4312,9 @@ server <- function(input, output, session) {
   # PDF / ZIP need a successfully fitted model; Saved Models needs loaded data (models store variable names only)
   observe({
     model_res <- tryCatch(fit_model_safe(), error = function(e) NULL)
-    shinyjs::toggle("export_pdf_btn", condition = !is.null(model_res) && isTRUE(model_res$ok) && !is.null(model_res$fit))
-    shinyjs::toggle("export_zip_btn", condition = !is.null(model_res) && isTRUE(model_res$ok) && !is.null(model_res$fit))
-    shinyjs::toggle("pred_obs_btn_box", condition = !is.null(model_res) && isTRUE(model_res$ok) && !is.null(model_res$fit))
+    shinyjs::toggle("export_pdf_btn", condition = model_usable(model_res))
+    shinyjs::toggle("export_zip_btn", condition = model_usable(model_res))
+    shinyjs::toggle("pred_obs_btn_box", condition = model_usable(model_res))
     df <- tryCatch(processed_data(), error = function(e) NULL)
     shinyjs::toggle("saved_models_btn", condition = is.data.frame(df) && ncol(df) > 0)
   })
@@ -4457,82 +4324,52 @@ server <- function(input, output, session) {
   warn_if_fit_stale <- function() {
     stale <- isolate(fit_staleness())
     if (length(stale) == 0) return(TRUE)
-    showModal(modalDialog(
-      title = "Auto-Optimize Warning",
-      div(class = "alert alert-warning",
-          "The model, data or analysis settings have changed since the last Run, so the baseline no longer ",
-          "matches. Click Run to refit the current model, then start Optimize again."),
-      easyClose = TRUE,
-      footer = modalButton("Dismiss")
-    ))
+    notice_modal("Auto-Optimize Warning",
+                 "The model, data or analysis settings have changed since the last Run, so the baseline no longer ",
+                 "matches. Click Run to refit the current model, then start Optimize again.")
     FALSE
+  }
+
+  # Baseline for Auto-Optimize: optimization_baseline() of the last fit plus the fit result itself in `$model`.
+  # Returns NULL after showing the reason when the baseline cannot be used (no fit, or the inputs changed).
+  usable_baseline <- function() {
+    base_model <- fit_model_safe()
+    base_info <- optimization_baseline(base_model)
+    if (!isTRUE(base_info$usable)) {
+      notice_modal("Auto-Optimize Warning", paste0("Could not fit baseline model for optimization: ", base_info$msg))
+      return(NULL)
+    }
+    if (!warn_if_fit_stale()) return(NULL)
+    base_info$model <- base_model
+    base_info
   }
 
   # Trigger Auto-Optimize Step 1 Modal
   observeEvent(input$prune_model_btn, {
     struct_df <- isolate(struct_table_data())
     if (is.null(struct_df) || nrow(struct_df) == 0) {
-      showModal(modalDialog(
-        title = "Auto-Optimize Warning",
-        div(class = "alert alert-warning",
-            "No structural model defined. Please set up structural paths first."),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
+      notice_modal("Auto-Optimize Warning", "No structural model defined. Please set up structural paths first.")
       return()
     }
 
-    base_model <- fit_model_safe()
-    base_info <- optimization_baseline(base_model)
-
-    if (!isTRUE(base_info$usable)) {
-      showModal(modalDialog(
-        title = "Auto-Optimize Warning",
-        div(class = "alert alert-warning",
-            paste0("Could not fit baseline model for optimization: ", base_info$msg)),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
-      return()
-    }
-    if (!warn_if_fit_stale()) return()
+    base_info <- usable_baseline()
+    if (is.null(base_info)) return()
     base_unidentified_info <- if (!isTRUE(base_info$identified)) {
       base_df <- fit_identification(base_info$fit)$df
       div(style = "background-color: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 10px 14px; margin-bottom: 15px; font-size: 13px; color: #1e3a8a;",
           tags$b("The current model is not identified"),
-          paste0(if (is.finite(base_df) && base_df < 0) sprintf(" (df = %d)", as.integer(base_df)) else "",
+          paste0(if (isTRUE(base_df < 0)) ident_df_suffix(base_df) else "",
                  ". Paths are removed first until the model is identified, then the best model is searched. "),
           "Models that are not identified are never ranked. Locked paths are never removed, and every variable keeps ",
           "at least one path, so lock fewer paths if no identified model can be found.")
     } else NULL
 
     # Initialize lock table data (filtered to active rows and active predictor columns)
-    pred_cols <- names(struct_df)[3:ncol(struct_df)]
-    
-    active_row_indices <- c()
-    for (i in seq_len(nrow(struct_df))) {
-      has_active <- FALSE
-      for (col in pred_cols) {
-        if (isTRUE(as.logical(struct_df[i, col]))) {
-          has_active <- TRUE
-          break
-        }
-      }
-      if (has_active) active_row_indices <- c(active_row_indices, i)
-    }
-    
-    active_pred_cols <- c()
-    for (col in pred_cols) {
-      has_active <- FALSE
-      for (i in seq_len(nrow(struct_df))) {
-        if (isTRUE(as.logical(struct_df[i, col]))) {
-          has_active <- TRUE
-          break
-        }
-      }
-      if (has_active) active_pred_cols <- c(active_pred_cols, col)
-    }
-    
+    pred_cols <- struct_pred_cols(struct_df)
+    active_edges <- struct_edges(struct_df)
+    active_row_indices <- which(struct_df$Dependent %in% active_edges$dep)
+    active_pred_cols <- intersect(pred_cols, active_edges$pred)
+
     if (length(active_row_indices) == 0 || length(active_pred_cols) == 0) {
       lock_df <- struct_df
       for (col in pred_cols) lock_df[[col]] <- FALSE
@@ -4543,11 +4380,12 @@ server <- function(input, output, session) {
       }
     }
     prune_lock_table_data(lock_df)
+    # The previous opening's output is dropped (NULL destroys its observer); otherwise every old table would be
+    # re-rendered on each lock edit
+    output[[prune_lock_table_id()]] <- NULL
     lock_id <- prune_lock_table_id(isolate(prune_lock_open_id()) + 1L)
     output[[lock_id]] <- render_prune_lock_table()
     prune_lock_open_id(isolate(prune_lock_open_id()) + 1L)
-
-    active_preds <- active_pred_cols
 
     showModal(modalDialog(
       title = "Auto-Optimize Model: Step 1 - Strategy, Parameters & Path Locking",
@@ -4557,7 +4395,7 @@ server <- function(input, output, session) {
         base_unidentified_info,
         div(
           style = "background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 12px; margin-bottom: 15px;",
-          div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;",
+          div(class = "s2-row-between", style = "margin-bottom: 6px;",
               tags$b("Variable Isolation Prevention (Keep in Model)", style = "color: #1e293b; font-size: 14px;"),
               span(style = "font-size: 11px; color: #64748b;", "At least one connecting path will be retained")
           ),
@@ -4573,13 +4411,13 @@ server <- function(input, output, session) {
           ),
           fluidRow(
             column(width = 12,
-                   div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;",
+                   div(class = "s2-row-between", style = "margin-bottom: 4px;",
                        tags$label("Predictor Variables:", style = "font-size: 12px; font-weight: 600; margin: 0; color: #334155;"),
                        div(actionLink("retain_preds_all", "All", style = "font-size: 11px; margin-right: 6px; cursor: pointer;"),
                            actionLink("retain_preds_none", "None", style = "font-size: 11px; cursor: pointer;"))
                    ),
                    div(style = "max-height: 110px; overflow-y: auto; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 4px; padding: 6px 10px;",
-                       checkboxGroupInput("prune_retain_preds", label = NULL, choices = active_preds, selected = character(0))
+                       checkboxGroupInput("prune_retain_preds", label = NULL, choices = active_pred_cols, selected = character(0))
                    )
             )
           )
@@ -4589,22 +4427,8 @@ server <- function(input, output, session) {
         rHandsontableOutput(lock_id),
         tags$hr(),
         fluidRow(
-          column(width = 6,
-                 selectInput("prune_criterion", "Optimization Criterion:",
-                             choices = c("BIC (Stronger Sparsity Penalty / Recommended)" = "BIC",
-                                         "AICc (Small-Sample Corrected AIC)" = "AICc",
-                                         "AIC (Predictive Accuracy)" = "AIC"),
-                             selected = "BIC")
-          ),
-          column(width = 6,
-                 selectInput("prune_strategy", "Search Algorithm Strategy:",
-                             choices = c("Adaptive Auto-Switch (Recommended)" = "adaptive",
-                                         "Regularized SEM (Lasso / Elastic Net - Modern Standard)" = "regsem",
-                                         "Stepwise Search (Fast & Deterministic)" = "stepwise",
-                                         "Exhaustive Search (100% Exact All-Subset)" = "exhaustive",
-                                         "Simulated Annealing (SA - Fast Trajectory Search)" = "sa"),
-                             selected = "adaptive")
-          )
+          column(width = 6, opt_select_input("criterion", "prune_criterion", "Optimization Criterion:")),
+          column(width = 6, opt_select_input("strategy", "prune_strategy", "Search Algorithm Strategy:"))
         ),
         tags$details(
           style = "margin-top: 15px; border: 1px solid #ddd; padding: 10px; border-radius: 4px; background-color: #fafafa;",
@@ -4616,25 +4440,22 @@ server <- function(input, output, session) {
             style = "margin-top: 10px;",
             conditionalPanel(
               condition = "input.prune_strategy == 'adaptive' || input.prune_strategy == 'exhaustive'",
-              numericInput("max_exhaustive_comb", "Exhaustive Search Max Combinations Threshold:",
-                           value = 1024, min = 64, max = 8192, step = 64)
+              opt_numeric_input("max_exhaustive_comb", "Exhaustive Search Max Combinations Threshold:")
             ),
             conditionalPanel(
               condition = "input.prune_strategy == 'sa' || input.prune_strategy == 'adaptive'",
               fluidRow(
-                column(4, numericInput("sa_max_iter", "SA Max Iterations:", value = 150, min = 20, max = 500, step = 10)),
-                column(4, numericInput("sa_temp_init", "SA Initial Temp (in criterion units):", value = 10.0, min = 1.0, max = 100.0, step = 1.0)),
-                column(4, numericInput("sa_seed", "Random Seed:", value = 1, min = 1, step = 1))
+                column(4, opt_numeric_input("sa_max_iter", "SA Max Iterations:")),
+                column(4, opt_numeric_input("sa_temp_init", "SA Initial Temp (in criterion units):")),
+                column(4, opt_numeric_input("sa_seed", "Random Seed:"))
               ),
               helpText("The cooling rate is derived automatically so the temperature falls to 0.1 at the final iteration.")
             ),
             conditionalPanel(
               condition = "input.prune_strategy == 'regsem'",
               fluidRow(
-                column(6, selectInput("regsem_type", "Regularization Penalty:",
-                                     choices = c("Lasso (L1)" = "lasso", "Elastic Net" = "enet"),
-                                     selected = "lasso")),
-                column(6, numericInput("regsem_n_lambda", "Number of Lambda Steps:", value = 30, min = 10, max = 100, step = 5))
+                column(6, opt_select_input("regsem_type", "regsem_type", "Regularization Penalty:")),
+                column(6, opt_numeric_input("regsem_n_lambda", "Number of Lambda Steps:"))
               ),
               helpText("Regularized structural equation modeling using L1/L2 penalties across varying lambda thresholds.")
             )
@@ -4728,6 +4549,7 @@ server <- function(input, output, session) {
   opt_state <- reactiveVal(NULL)
   pending_prune_check <- reactiveVal(NULL)   # AIC/BIC/AICc of an applied candidate, verified after the main refit
   prune_page_length <- 15L                   # rows per page of the candidate ranking table
+  refit_cache <- new.env(parent = emptyenv())   # structure key -> fit re-estimated for a previewed lower-ranked candidate
 
   finalize_prune_results <- function(st, current_step = 0, stopped_early = FALSE) {
     opt_running(FALSE)
@@ -4738,32 +4560,21 @@ server <- function(input, output, session) {
     ord <- order(scores, decreasing = FALSE)
     sorted_candidates <- candidates_list[ord]
     scores <- scores[ord]
-    if (length(sorted_candidates) > 0 && is.finite(scores[1]) && sorted_candidates[[1]]$status != "[Baseline]") {
-      sorted_candidates[[1]]$status <- "[Optimal]"
-    }
 
-    # Distance from the best candidate and Akaike-type weights (exp(-delta/2), normalized).
+    # Akaike-type weights (exp(-delta/2), normalized) from the distance to the best candidate.
     # Candidates within 2 units of the best are statistically hard to distinguish from it.
     best_score <- if (length(scores) > 0) scores[1] else Inf
     if (is.finite(best_score)) {
       delta_best <- scores - best_score
       w_raw <- ifelse(is.finite(delta_best), exp(-delta_best / 2), 0)
       weights <- w_raw / sum(w_raw)
-      for (k in seq_along(sorted_candidates)) {
-        sorted_candidates[[k]]$delta_best <- delta_best[k]
-        sorted_candidates[[k]]$weight <- weights[k]
-        if (k > 1 && is.finite(delta_best[k]) && delta_best[k] < 2 &&
-            sorted_candidates[[k]]$status %in% c("[Good]", "[Improved]")) {
-          sorted_candidates[[k]]$status <- "[Equivalent]"
-        }
-      }
+      for (k in seq_along(sorted_candidates)) sorted_candidates[[k]]$weight <- weights[k]
     }
 
     # Post-compute detailed fit measures (CFI, RMSEA, SRMR) for the top candidates only. Keeping
     # every lavaan object (up to 2^M of them for the exhaustive search) exhausts memory in WebR,
     # so lower-ranked fits are released and re-estimated on demand when previewed.
     max_keep_fits <- 20L
-    base_violations <- fit_cutoff_violations(st$base_ms)
     if (length(sorted_candidates) > 0) {
       for (k in seq_along(sorted_candidates)) {
         cand_k <- sorted_candidates[[k]]
@@ -4778,14 +4589,6 @@ server <- function(input, output, session) {
             sorted_candidates[[k]]$cfi <- as.numeric(ms_k["cfi"])
             sorted_candidates[[k]]$rmsea <- as.numeric(ms_k["rmsea"])
             sorted_candidates[[k]]$srmr <- as.numeric(ms_k["srmr"])
-            # Flag only a NEW violation: a cutoff the baseline met but this candidate breaks. If the
-            # baseline already violates a cutoff, every candidate would otherwise be flagged as well.
-            # (no baseline fit measures exist when the start was not identified, so nothing can be "new")
-            if (isTRUE(st$base_identified %||% TRUE) && any(fit_cutoff_violations(ms_k) & !base_violations)) {
-              if (!sorted_candidates[[k]]$status %in% c("[Baseline]", "[Optimal]", "[Replaced]", "[Variable Dropped]", "[Not Identified]")) {
-                sorted_candidates[[k]]$status <- "[Degraded Fit]"
-              }
-            }
           }
         }
       }
@@ -4800,28 +4603,25 @@ server <- function(input, output, session) {
       criterion = st$criterion,
       strategy_used = st$eff_strategy,
       isolation_summary = isolation_summary,
-      stopped_early = stopped_early,
-      stopped_at_step = current_step,
-      max_steps = st$max_steps,
       ctx = st$ctx,
       fallback_note = st$fallback_note %||% "",
       base_identified = isTRUE(st$base_identified %||% TRUE),
       repair_note = st$repair_note %||% "",
-      any_identified = any(is.finite(scores)),
-      message = "Success"
+      any_identified = any(is.finite(scores))
     )
     
+    rm(list = ls(refit_cache, all.names = TRUE), envir = refit_cache)   # re-estimated fits of an earlier run
     prune_results(res)
     selected_prune_cand(res$candidates[[1]])
     selected_prune_idx(1)
-    
+
     stopped_badge <- if (stopped_early) {
       sprintf(" [Stopped Early at Step %d / %d]", current_step, st$max_steps)
     } else ""
     
     showModal(modalDialog(
       title = div(
-        style = "display: flex; justify-content: space-between; align-items: center; width: calc(100% - 30px); margin-right: 15px;",
+        class = "s2-row-between", style = "width: calc(100% - 30px); margin-right: 15px;",
         span(paste0("Auto-Optimize Model: Step 2 - Candidate Ranking Catalog", stopped_badge), style = "font-weight: bold;"),
         div(
           style = "display: flex; gap: 8px; align-items: center;",
@@ -4874,7 +4674,7 @@ server <- function(input, output, session) {
           div(class = "s2-prune-left", DTOutput("prune_candidates_table")),
           div(class = "s2-prune-right",
         div(
-          style = "display: flex; justify-content: space-between; align-items: center; margin-top: 0; margin-bottom: 10px;",
+          class = "s2-row-between", style = "margin-top: 0; margin-bottom: 10px;",
           h5("Path Diagram Preview for Selected Candidate:", style = "margin: 0; font-weight: 600;"),
           uiOutput("prune_cand_indicator_ui", inline = TRUE)
         ),
@@ -4893,14 +4693,45 @@ server <- function(input, output, session) {
       ),
       footer = NULL
     ))
+    # The search state is no longer needed: it holds every candidate fit (up to 2^M of them), while the results
+    # keep only the best ones. It is released only after the dialog is up, so a failure while building the
+    # dialog can still fall back to the state (see abort_optimization / the tick error handler).
+    opt_state(NULL)
+  }
+
+  # Stops a running optimization after an error: shows the results found so far when the state still holds
+  # some, otherwise closes the dialog; always reports `what` and the error message.
+  abort_optimization <- function(what, e) {
+    opt_running(FALSE)
+    st_saved <- isolate(opt_state())
+    shown <- FALSE
+    if (!is.null(st_saved) && length(st_saved$candidates_map) > 1) {
+      shown <- tryCatch({
+        finalize_prune_results(st_saved, current_step = isolate(opt_step()), stopped_early = TRUE)
+        TRUE
+      }, error = function(e2) FALSE)
+    }
+    if (!shown) {
+      opt_state(NULL)
+      removeModal()
+    }
+    showNotification(
+      paste0(what, conditionMessage(e),
+             if (shown) ". The results found so far are shown. " else ". ",
+             "Re-run with different settings or model, or try another search strategy (e.g. Stepwise)."),
+      type = "error", duration = 12)
   }
 
   observeEvent(input$stop_prune_explore, {
     if (!isTRUE(opt_running())) return()
     st <- opt_state()
     if (is.null(st)) return()
-    curr_s <- opt_step()
-    finalize_prune_results(st, current_step = curr_s, stopped_early = TRUE)
+    tryCatch(
+      finalize_prune_results(st, current_step = opt_step(), stopped_early = TRUE),
+      error = function(e) {
+        if (inherits(e, "shiny.silent.error")) stop(e)
+        abort_optimization("Auto-Optimize could not show the results: ", e)
+      })
   })
 
   observeEvent(input$cancel_prune_explore, {
@@ -4915,32 +4746,33 @@ server <- function(input, output, session) {
     # Validate every optimizer input up front (before any modal is shown): cleared fields arrive as NA and
     # typed values can bypass the UI limits. Corrected fields are reported together in one notification.
     adjusted <- character(0)
-    num_input <- function(id, label, default, min_val, max_val) {
+    num_input <- function(id, label) {
+      d <- OPT_DEFAULTS[[id]]
       raw <- input[[id]]
-      v <- safe_num(raw, default, min_val, max_val)
+      v <- safe_num(raw, d$default, d$min, d$max)
       raw_num <- suppressWarnings(as.numeric(raw))
       if (!(length(raw_num) == 1 && is.finite(raw_num) && raw_num == v)) {
         adjusted <<- c(adjusted, sprintf("%s -> %s", label, format(v, scientific = FALSE)))
       }
       v
     }
-    choice_input <- function(id, label, allowed, default) {
+    choice_input <- function(key, id, label) {
+      d <- OPT_DEFAULTS[[key]]
       v <- input[[id]]
-      if (length(v) != 1 || is.na(v) || !(v %in% allowed)) {
-        adjusted <<- c(adjusted, sprintf("%s -> %s", label, default))
-        return(default)
+      if (length(v) != 1 || is.na(v) || !(v %in% d$choices)) {
+        adjusted <<- c(adjusted, sprintf("%s -> %s", label, d$default))
+        return(d$default)
       }
       v
     }
-    criterion <- choice_input("prune_criterion", "Optimization Criterion", c("BIC", "AICc", "AIC"), "BIC")
-    strategy <- choice_input("prune_strategy", "Search Algorithm Strategy",
-                             c("adaptive", "regsem", "stepwise", "exhaustive", "sa"), "adaptive")
-    max_comb <- num_input("max_exhaustive_comb", "Exhaustive Search Max Combinations", 1024, 64, 8192)
-    sa_max_iter <- as.integer(num_input("sa_max_iter", "SA Max Iterations", 150, 20, 500))
-    sa_T0 <- num_input("sa_temp_init", "SA Initial Temp", 10, 1, 100)
-    sa_seed <- as.integer(num_input("sa_seed", "Random Seed", 1, 1, .Machine$integer.max))
-    regsem_type <- choice_input("regsem_type", "Regularization Penalty", c("lasso", "enet"), "lasso")
-    regsem_n_lambda <- as.integer(num_input("regsem_n_lambda", "Number of Lambda Steps", 30, 10, 100))
+    criterion <- choice_input("criterion", "prune_criterion", "Optimization Criterion")
+    strategy <- choice_input("strategy", "prune_strategy", "Search Algorithm Strategy")
+    max_comb <- num_input("max_exhaustive_comb", "Exhaustive Search Max Combinations")
+    sa_max_iter <- as.integer(num_input("sa_max_iter", "SA Max Iterations"))
+    sa_T0 <- num_input("sa_temp_init", "SA Initial Temp")
+    sa_seed <- as.integer(num_input("sa_seed", "Random Seed"))
+    regsem_type <- choice_input("regsem_type", "regsem_type", "Regularization Penalty")
+    regsem_n_lambda <- as.integer(num_input("regsem_n_lambda", "Number of Lambda Steps"))
     if (length(adjusted) > 0) {
       showNotification(
         paste0("Some optimizer settings were empty or out of range and were adjusted: ",
@@ -4948,83 +4780,47 @@ server <- function(input, output, session) {
         type = "warning", duration = 8)
     }
 
-    base_model <- fit_model_safe()
-    base_info <- optimization_baseline(base_model)
-    if (!isTRUE(base_info$usable)) {
-      showModal(modalDialog(
-        title = "Auto-Optimize Warning",
-        div(class = "alert alert-warning",
-            paste0("Could not fit baseline model for optimization: ", base_info$msg)),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
-      return()
-    }
-    if (!warn_if_fit_stale()) return()
+    base_info <- usable_baseline()
+    if (is.null(base_info)) return()
+    base_model <- base_info$model
     base_fit <- base_info$fit
     base_identified <- isTRUE(base_info$identified)
     if (!base_identified && identical(strategy, "regsem")) {
-      showModal(modalDialog(
-        title = "Auto-Optimize Warning",
-        div(class = "alert alert-warning",
-            "Regularized SEM needs an identified starting model, but the current model is not identified. ",
-            "Choose Adaptive, Stepwise, Exhaustive or Simulated Annealing: they remove paths until the model is identified."),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
+      notice_modal("Auto-Optimize Warning",
+                   "Regularized SEM needs an identified starting model, but the current model is not identified. ",
+                   "Choose Adaptive, Stepwise, Exhaustive or Simulated Annealing: they remove paths until the model is identified.")
       return()
     }
 
     struct_df <- struct_table_data()
     lock_df <- prune_lock_table_data()
-    pred_cols <- names(struct_df)[3:ncol(struct_df)]
-    active_paths <- list()
+    pred_cols <- struct_pred_cols(struct_df)
+    base_edges <- struct_edges(struct_df)
 
-    for (i in seq_len(nrow(struct_df))) {
-      dep <- struct_df$Dependent[i]
-      if (!nzchar(dep)) next
-      for (p in pred_cols) {
-        if (isTRUE(as.logical(struct_df[i, p]))) {
-          is_locked <- FALSE
-          if (!is.null(lock_df) && dep %in% lock_df$Dependent && p %in% names(lock_df)) {
-            lock_r_idx <- which(lock_df$Dependent == dep)
-            if (length(lock_r_idx) > 0) {
-              is_locked <- isTRUE(as.logical(lock_df[lock_r_idx[1], p]))
-            }
-          }
-          active_paths[[length(active_paths) + 1]] <- list(
-            dep = dep, pred = p, locked = is_locked
-          )
-        }
-      }
+    is_path_locked <- function(dep, p) {
+      if (is.null(lock_df) || !p %in% names(lock_df)) return(FALSE)
+      lock_r_idx <- which(lock_df$Dependent == dep)
+      length(lock_r_idx) > 0 && isTRUE(as.logical(lock_df[lock_r_idx[1], p]))
     }
+    active_paths <- lapply(seq_len(nrow(base_edges)), function(k) {
+      list(dep = base_edges$dep[k], pred = base_edges$pred[k], locked = is_path_locked(base_edges$dep[k], base_edges$pred[k]))
+    })
 
     removable_paths <- Filter(function(x) !x$locked, active_paths)
     M <- length(removable_paths)
 
     if (M == 0) {
-      showModal(modalDialog(
-        title = "Auto-Optimize Warning",
-        div(class = "alert alert-warning", "No unlocked structural paths available for optimization. All active paths are locked."),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
+      notice_modal("Auto-Optimize Warning", "No unlocked structural paths available for optimization. All active paths are locked.")
       return()
     }
 
     # Every dependent variable of the baseline always keeps an incoming path: losing all of them makes it
     # exogenous and lavaan replaces the paths with covariances, so such candidates are never comparable.
-    retain_deps <- unique(struct_edges(struct_df)$dep)
+    retain_deps <- unique(base_edges$dep)
     retain_preds <- input$prune_retain_preds %||% character(0)
 
     if (!check_variable_isolation(struct_df, retain_deps, retain_preds, pred_cols)) {
-      showModal(modalDialog(
-        title = "Auto-Optimize Warning",
-        div(class = "alert alert-warning",
-            "The current baseline model does not satisfy the specified variable isolation constraints."),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
+      notice_modal("Auto-Optimize Warning", "The current baseline model does not satisfy the specified variable isolation constraints.")
       return()
     }
 
@@ -5042,15 +4838,10 @@ server <- function(input, output, session) {
           type = "message", duration = 8)
       }
     } else if (strategy == "exhaustive" && total_comb > max_comb) {
-      showModal(modalDialog(
-        title = "Auto-Optimize Warning",
-        div(class = "alert alert-warning",
-            sprintf("Exhaustive Search would need %s combinations (%d removable paths), which exceeds the threshold of %s. ",
-                    format(total_comb, big.mark = ",", scientific = FALSE), M, format(max_comb, big.mark = ",", scientific = FALSE)),
-            "Lock more paths, raise the threshold, or choose another search strategy (e.g. Stepwise or Adaptive)."),
-        easyClose = TRUE,
-        footer = modalButton("Dismiss")
-      ))
+      notice_modal("Auto-Optimize Warning",
+                   sprintf("Exhaustive Search would need %s combinations (%d removable paths), which exceeds the threshold of %s. ",
+                           format(total_comb, big.mark = ",", scientific = FALSE), M, format(max_comb, big.mark = ",", scientific = FALSE)),
+                   "Lock more paths, raise the threshold, or choose another search strategy (e.g. Stepwise or Adaptive).")
       return()
     }
 
@@ -5072,13 +4863,13 @@ server <- function(input, output, session) {
       showModal(modalDialog(
         title = "Auto-Optimize Model: Optimizing Model Space...",
         footer = div(
-          style = "display: flex; justify-content: space-between; align-items: center; width: 100%;",
+          class = "s2-row-between", style = "width: 100%;",
           actionButton("cancel_prune_explore", "Cancel", class = "btn btn-default", `data-dismiss` = "modal"),
           actionButton("stop_prune_explore", "Stop & View Results", class = "btn btn-warning")
         ),
         div(
           style = "text-align: center; padding: 15px;",
-          div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;",
+          div(class = "s2-row-between", style = "margin-bottom: 8px;",
               span(style = "font-weight: bold; color: #475569; font-size: 13px;",
                    sprintf("Strategy: %s | Criterion: %s", toupper(eff_strategy), criterion)),
               span(id = "prune_iter_badge", class = "badge badge-primary", style = "font-size: 12px; background-color: #2563eb;", "Step 0")
@@ -5137,9 +4928,7 @@ server <- function(input, output, session) {
         eff_strategy = eff_strategy,
         criterion = criterion,
         ctx = ctx,
-        base_fit = base_fit,
         base_identified = base_identified,
-        base_ms = base_ms,
         base_score = base_score,
         removable_paths = removable_paths,
         M = M,
@@ -5174,24 +4963,14 @@ server <- function(input, output, session) {
       )
 
       base_key <- make_struct_key(struct_df)
-      state_obj$candidates_map[[base_key]] <- list(
-        removed_str = "None (Baseline Model)",
-        retained_str = build_retained_str(struct_df),
-        struct_df = struct_df,
+      state_obj$candidates_map[[base_key]] <- candidate_record(
+        struct_df, "None (Baseline Model)",
         fit = base_fit,
-        aic = as.numeric(base_ms["aic"]),
-        bic = as.numeric(base_ms["bic"]),
-        aicc = as.numeric(base_ms["aicc"]),
-        delta_aic = if (base_identified) 0.0 else NA_real_,
-        delta_bic = if (base_identified) 0.0 else NA_real_,
-        delta_aicc = if (base_identified && is.finite(base_ms[["aicc"]])) 0.0 else NA_real_,
-        cfi = as.numeric(base_ms["cfi"]),
-        rmsea = as.numeric(base_ms["rmsea"]),
-        srmr = as.numeric(base_ms["srmr"]),
+        aic = as.numeric(base_ms["aic"]), bic = as.numeric(base_ms["bic"]), aicc = as.numeric(base_ms["aicc"]),
+        cfi = as.numeric(base_ms["cfi"]), rmsea = as.numeric(base_ms["rmsea"]), srmr = as.numeric(base_ms["srmr"]),
         converged = TRUE,
         proper = fit_is_proper(base_fit),
         identified = base_identified, deficit = base_ident$deficit,
-        vars_ok = TRUE, replaced = FALSE, added_covs = character(0),
         status = "[Baseline]"
       )
 
@@ -5226,30 +5005,13 @@ server <- function(input, output, session) {
         return()
       }
 
-      make_key_local <- make_struct_key
-
       build_candidate_record_local <- function(curr_s_df, removed_str) {
         fm <- fit_candidate_model(curr_s_df, st$ctx)
-        ret_str <- build_retained_str(curr_s_df)
-        if (is.null(fm) || !isTRUE(lavaan::lavInspect(fm, "converged"))) {
-          return(list(
-            removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
-            retained_str = ret_str,
-            struct_df = curr_s_df, fit = NULL,
-            aic = NA_real_, bic = NA_real_, aicc = NA_real_,
-            delta_aic = NA_real_, delta_bic = NA_real_, delta_aicc = NA_real_,
-            cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
-            converged = FALSE, proper = FALSE, identified = FALSE, deficit = Inf, raw_aic = NA_real_,
-            status = "[Non-converged]"
-          ))
-        }
-        # Ultra-fast score extraction using stats::AIC and stats::BIC (skips baseline model fitting)
+        if (!fit_converged(fm)) return(candidate_record(curr_s_df, removed_str))
+        # Score extraction with stats::AIC / stats::BIC on the candidate fit only
         c_aic <- tryCatch(as.numeric(stats::AIC(fm)), error = function(e) NA_real_)
         c_bic <- tryCatch(as.numeric(stats::BIC(fm)), error = function(e) NA_real_)
-        c_aicc <- aicc_from_fit(fm, c_aic)
-        d_aic <- c_aic - as.numeric(st$base_ms["aic"])
-        d_bic <- c_bic - as.numeric(st$base_ms["bic"])
-        d_aicc <- c_aicc - as.numeric(st$base_ms["aicc"])
+        scores <- c(aic = c_aic, bic = c_bic, aicc = aicc_from_fit(fm, c_aic))
         proper <- fit_is_proper(fm)
         chk <- candidate_structure_check(fm, st$ctx)
         ident <- fit_identification(fm)
@@ -5257,24 +5019,18 @@ server <- function(input, output, session) {
         if (!chk$vars_ok || !ident$identified) {
           # Fitted on a different set of variables, or not identified: its AIC/BIC are meaningless and
           # cannot be compared with the baseline at all
-          c_aic <- c_bic <- c_aicc <- d_aic <- d_bic <- d_aicc <- NA_real_
+          scores[] <- NA_real_
         }
 
-        stat <- "[Good]"
-        d_crit <- c(AIC = d_aic, BIC = d_bic, AICc = d_aicc)[[st$criterion]]
-        if (isTRUE(d_crit < -0.01)) stat <- "[Improved]"
+        stat <- ""
         if (!proper) stat <- "[Improper]"
         if (!ident$identified) stat <- "[Not Identified]"
         if (chk$replaced) stat <- "[Replaced]"
         if (!chk$vars_ok) stat <- "[Variable Dropped]"
 
-        list(
-          removed_str = if (nzchar(removed_str)) removed_str else "None (Baseline Model)",
-          retained_str = ret_str,
-          struct_df = curr_s_df, fit = fm,
-          aic = c_aic, bic = c_bic, aicc = c_aicc,
-          delta_aic = d_aic, delta_bic = d_bic, delta_aicc = d_aicc,
-          cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_,
+        candidate_record(
+          curr_s_df, removed_str, fit = fm,
+          aic = scores[["aic"]], bic = scores[["bic"]], aicc = scores[["aicc"]],
           converged = TRUE, proper = proper, status = stat,
           identified = ident$identified, deficit = ident$deficit, raw_aic = raw_aic,
           vars_ok = chk$vars_ok, replaced = chk$replaced, added_covs = chk$added_covs,
@@ -5282,16 +5038,28 @@ server <- function(input, output, session) {
         )
       }
 
-      # Score of a record under the active criterion; Inf for non-converged or improper fits
-      score_of <- function(rec) candidate_score(rec, st$criterion)
+      # Candidate for `df` from the cache, estimated now when it is not cached yet. Returns the updated state,
+      # the record, its score and whether a model was actually fitted (cached candidates do not use up a tick).
+      eval_candidate <- function(st, df) {
+        key <- make_struct_key(df)
+        fitted <- !key %in% names(st$candidates_map)
+        if (fitted) st$candidates_map[[key]] <- build_candidate_record_local(df, removed_label(df))
+        rec <- st$candidates_map[[key]]
+        list(st = st, rec = rec, score = score_of(rec), fitted = fitted)
+      }
 
-      curr_score_step <- st$base_score
-      # Without a baseline score (unidentified start) nothing has been achieved yet
-      best_curr <- if (length(st$best_scores_hist) > 0) tail(st$best_scores_hist, 1)
-                   else if (is.finite(st$base_score)) st$base_score else Inf
+      # Appends one step to the score history; the best-so-far series follows (the baseline score is the start;
+      # without one, an unidentified start, nothing has been achieved yet).
+      record_score <- function(st, score) {
+        best <- if (length(st$best_scores_hist) > 0) tail(st$best_scores_hist, 1)
+                else if (is.finite(st$base_score)) st$base_score else Inf
+        if (is.finite(score) && score < best) best <- score
+        st$scores_hist <- c(st$scores_hist, score)
+        st$best_scores_hist <- c(st$best_scores_hist, best)
+        st
+      }
 
-      step_advance <- 1L
-
+      # "dep ~ pred; dep ~ pred" list of the removable paths that are switched off in `df`
       removed_label <- function(df) {
         rem_vec <- c()
         for (jp in st$removable_paths) {
@@ -5299,6 +5067,27 @@ server <- function(input, output, session) {
         }
         paste(rem_vec, collapse = "; ")
       }
+
+      # Variable-isolation rules of this run (see check_variable_isolation())
+      isolation_ok <- function(df) {
+        check_variable_isolation(df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)
+      }
+
+      # The baseline structure with every removable path whose flag in `keep` is FALSE switched off
+      struct_from_flags <- function(keep) {
+        df <- st$struct_df
+        for (idx in seq_along(st$removable_paths)) {
+          rp <- st$removable_paths[[idx]]
+          if (!keep[idx]) df[df$Dependent == rp$dep, rp$pred] <- FALSE
+        }
+        df
+      }
+
+      # Score of a record under the active criterion; Inf for non-converged or improper fits
+      score_of <- function(rec) candidate_score(rec, st$criterion)
+
+      curr_score_step <- st$base_score
+      step_advance <- 1L
 
       if (isTRUE(st$repair)) {
         # Repair phase (unidentified start, Stepwise/SA): remove one path per sweep until the model is identified.
@@ -5312,14 +5101,12 @@ server <- function(input, output, session) {
           if (!isTRUE(as.logical(st$repair_df[st$repair_df$Dependent == rp$dep, rp$pred]))) next
           test_s_df <- st$repair_df
           test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-          if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) next
+          if (!isolation_ok(test_s_df)) next
 
-          k_str <- make_key_local(test_s_df)
-          if (!k_str %in% names(st$candidates_map)) {
-            st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, removed_label(test_s_df))
-            evaluated <- TRUE   # only a real model fit consumes the tick; cached candidates are free
-          }
-          rec <- st$candidates_map[[k_str]]
+          ev <- eval_candidate(st, test_s_df)
+          st <- ev$st
+          evaluated <- ev$fitted   # only a real model fit consumes the tick; cached candidates are free
+          rec <- ev$rec
           # Only fits that converged and keep the variables/paths comparable can be walked through
           if (isTRUE(rec$converged) && !isFALSE(rec$vars_ok) && !isTRUE(rec$replaced)) {
             cand_def <- rec$deficit
@@ -5354,7 +5141,7 @@ server <- function(input, output, session) {
               isTRUE(as.logical(best$df[best$df$Dependent == rp$dep, rp$pred]))
             }, logical(1))
             # The repaired model is the first scored model: it is the best found so far
-            s0 <- score_of(st$candidates_map[[make_key_local(best$df)]])
+            s0 <- score_of(st$candidates_map[[make_struct_key(best$df)]])
             if (is.finite(s0)) {
               st$scores_hist <- c(st$scores_hist, s0)
               st$best_scores_hist <- c(st$best_scores_hist, s0)
@@ -5385,7 +5172,7 @@ server <- function(input, output, session) {
         # single-threaded WebR runtime. A sweep tries removing each remaining active path from the
         # current model; at the end of the sweep the best improving removal (if any) is adopted.
         if (is.null(st$sw_best_score)) {
-          st$sw_best_score <- score_of(st$candidates_map[[make_key_local(st$curr_df)]])
+          st$sw_best_score <- score_of(st$candidates_map[[make_struct_key(st$curr_df)]])
           st$sw_best_df <- st$curr_df
           st$sw_start_score <- st$sw_best_score
           st$sw_tie_df <- NULL
@@ -5404,21 +5191,12 @@ server <- function(input, output, session) {
           test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
 
           # Check variable isolation constraints
-          if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) next
+          if (!isolation_ok(test_s_df)) next
 
-          rem_vec <- c()
-          for (j in seq_along(st$removable_paths)) {
-            jp <- st$removable_paths[[j]]
-            if (!isTRUE(as.logical(test_s_df[test_s_df$Dependent == jp$dep, jp$pred]))) {
-              rem_vec <- c(rem_vec, paste0(jp$dep, " ~ ", jp$pred))
-            }
-          }
-          k_str <- make_key_local(test_s_df)
-          if (!k_str %in% names(st$candidates_map)) {
-            st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, paste(rem_vec, collapse = "; "))
-            evaluated <- TRUE   # only a real model fit consumes the tick; cached candidates are free
-          }
-          cand_score <- score_of(st$candidates_map[[k_str]])
+          ev <- eval_candidate(st, test_s_df)
+          st <- ev$st
+          evaluated <- ev$fitted   # only a real model fit consumes the tick; cached candidates are free
+          cand_score <- ev$score
           last_cand_score <- cand_score
           if (is.finite(cand_score) && cand_score < st$sw_best_score - 0.01) {
             st$sw_best_score <- cand_score
@@ -5445,42 +5223,22 @@ server <- function(input, output, session) {
 
         curr_score_step <- if (is.finite(last_cand_score)) last_cand_score else
           if (!is.null(st$sw_best_score) && is.finite(st$sw_best_score)) st$sw_best_score else st$base_score
-        st$scores_hist <- c(st$scores_hist, curr_score_step)
-        if (is.finite(curr_score_step) && curr_score_step < best_curr) {
-          best_curr <- curr_score_step
-        }
-        st$best_scores_hist <- c(st$best_scores_hist, best_curr)
+        st <- record_score(st, curr_score_step)
       } else if (st$eff_strategy == "exhaustive") {
         chunk_size <- min(4L, st$max_steps - step)
         for (ci in seq_len(chunk_size)) {
           row_i <- step + ci
           if (row_i > st$max_steps) break
-          state_vec <- as.logical(st$grid_matrix[row_i, ])
-          test_s_df <- st$struct_df
-          removed_paths_vec <- c()
-          for (idx in seq_along(st$removable_paths)) {
-            rp <- st$removable_paths[[idx]]
-            if (!state_vec[idx]) {
-              test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-              removed_paths_vec <- c(removed_paths_vec, paste0(rp$dep, " ~ ", rp$pred))
-            }
-          }
+          test_s_df <- struct_from_flags(as.logical(st$grid_matrix[row_i, ]))
           # Check variable isolation constraints
-          if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) {
+          if (!isolation_ok(test_s_df)) {
             curr_score_step <- Inf
           } else {
-            k_str <- make_key_local(test_s_df)
-            if (!k_str %in% names(st$candidates_map)) {
-              rem_label <- paste(removed_paths_vec, collapse = "; ")
-              st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
-            }
-            curr_score_step <- score_of(st$candidates_map[[k_str]])
+            ev <- eval_candidate(st, test_s_df)
+            st <- ev$st
+            curr_score_step <- ev$score
           }
-          st$scores_hist <- c(st$scores_hist, curr_score_step)
-          if (is.finite(curr_score_step) && curr_score_step < best_curr) {
-            best_curr <- curr_score_step
-          }
-          st$best_scores_hist <- c(st$best_scores_hist, best_curr)
+          st <- record_score(st, curr_score_step)
         }
         step_advance <- chunk_size
       } else if (st$eff_strategy == "sa") {
@@ -5490,35 +5248,24 @@ server <- function(input, output, session) {
           cand_vec <- st$curr_vec
           cand_vec[flip_pos] <- !cand_vec[flip_pos]
           
-          test_s_df <- st$struct_df
-          rem_vec <- c()
-          for (idx in seq_along(st$removable_paths)) {
-            rp <- st$removable_paths[[idx]]
-            if (!cand_vec[idx]) {
-              test_s_df[test_s_df$Dependent == rp$dep, rp$pred] <- FALSE
-              rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
-            }
-          }
-          if (!check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) {
+          test_s_df <- struct_from_flags(cand_vec)
+          if (!isolation_ok(test_s_df)) {
             c_score <- Inf
           } else {
-            k_str <- make_key_local(test_s_df)
-            if (!k_str %in% names(st$candidates_map)) {
-              rem_label <- paste(rem_vec, collapse = "; ")
-              st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, rem_label)
-            }
-            c_score <- score_of(st$candidates_map[[k_str]])
+            ev <- eval_candidate(st, test_s_df)
+            st <- ev$st
+            c_score <- ev$score
           }
 
           if (is.finite(c_score)) {
             curr_score_step <- c_score
-            curr_score <- score_of(st$candidates_map[[make_key_local(st$curr_df)]])
+            curr_score <- score_of(st$candidates_map[[make_struct_key(st$curr_df)]])
 
             dE <- as.numeric(c_score - curr_score)
-            if (!is.na(dE) && !is.nan(dE)) {
+            if (!is.na(dE)) {
               eff_T <- max(st$T_val, 1e-6)
               prob <- if (dE < 0) 1.0 else exp(-dE / eff_T)
-              if (!is.na(prob) && !is.nan(prob) && runif(1) < prob) {
+              if (!is.na(prob) && runif(1) < prob) {
                 st$curr_vec <- cand_vec
                 st$curr_df <- test_s_df
               }
@@ -5527,11 +5274,7 @@ server <- function(input, output, session) {
             curr_score_step <- Inf
           }
           st$T_val <- max(st$T_val * st$sa_alpha, 1e-6)
-          st$scores_hist <- c(st$scores_hist, curr_score_step)
-          if (is.finite(curr_score_step) && curr_score_step < best_curr) {
-            best_curr <- curr_score_step
-          }
-          st$best_scores_hist <- c(st$best_scores_hist, best_curr)
+          st <- record_score(st, curr_score_step)
         }
         step_advance <- chunk_size
       } else if (st$eff_strategy == "regsem") {
@@ -5545,11 +5288,11 @@ server <- function(input, output, session) {
           reg_obj <- NULL
           if (regsem_loaded) {
             reg_obj <- tryCatch({
-              getExportedValue(regsem_pkg, "cv_regsem")(st$base_fit, type = pen_type, pars_pen = "regressions",
+              getExportedValue(regsem_pkg, "cv_regsem")(st$ctx$base_fit, type = pen_type, pars_pen = "regressions",
                                                       n.lambda = n_lambda, jump = 0.04)
             }, error = function(e) {
               tryCatch({
-                getExportedValue(regsem_pkg, "regsem")(st$base_fit, type = pen_type, pars_pen = "regressions", lambda = 0.05)
+                getExportedValue(regsem_pkg, "regsem")(st$ctx$base_fit, type = pen_type, pars_pen = "regressions", lambda = 0.05)
               }, error = function(e2) NULL)
             })
           }
@@ -5574,7 +5317,7 @@ server <- function(input, output, session) {
             }
             st$fallback_note <- paste0(note, "; results use an approximate soft-threshold path on standardized coefficients, NOT regsem.")
             showNotification(st$fallback_note, type = "warning", duration = 10)
-            ss <- tryCatch(lavaan::standardizedSolution(st$base_fit), error = function(e) NULL)
+            ss <- tryCatch(lavaan::standardizedSolution(st$ctx$base_fit), error = function(e) NULL)
             if (!is.null(ss)) {
               reg_ss <- ss[ss$op == "~", , drop = FALSE]
               lambdas <- seq(0.01, 0.5, length.out = n_lambda)
@@ -5613,18 +5356,10 @@ server <- function(input, output, session) {
             }
           }
 
-          if (check_variable_isolation(test_s_df, st$retain_deps, st$retain_preds, st$pred_cols, st$ctx$required_vars)) {
-            k_str <- make_key_local(test_s_df)
-            if (!k_str %in% names(st$candidates_map)) {
-              rem_vec <- c()
-              for (rp in st$removable_paths) {
-                if (!isTRUE(as.logical(test_s_df[test_s_df$Dependent == rp$dep, rp$pred]))) {
-                  rem_vec <- c(rem_vec, paste0(rp$dep, " ~ ", rp$pred))
-                }
-              }
-              st$candidates_map[[k_str]] <- build_candidate_record_local(test_s_df, paste(rem_vec, collapse = "; "))
-            }
-            curr_score_step <- score_of(st$candidates_map[[k_str]])
+          if (isolation_ok(test_s_df)) {
+            ev <- eval_candidate(st, test_s_df)
+            st <- ev$st
+            curr_score_step <- ev$score
           }
         }
 
@@ -5632,13 +5367,10 @@ server <- function(input, output, session) {
           curr_score_step <- if (length(st$scores_hist) > 0) tail(st$scores_hist, 1) else st$base_score
         }
 
-        st$scores_hist <- c(st$scores_hist, curr_score_step)
-        if (is.finite(curr_score_step) && curr_score_step < best_curr) {
-          best_curr <- curr_score_step
-        }
-        st$best_scores_hist <- c(st$best_scores_hist, best_curr)
-        step_advance <- 1L
+        st <- record_score(st, curr_score_step)
       }
+      # Best score so far (after this step), for the progress message
+      best_curr <- if (length(st$best_scores_hist) > 0) tail(st$best_scores_hist, 1) else Inf
       
       if (!isTRUE(isolate(opt_running()))) {
         return()
@@ -5649,10 +5381,11 @@ server <- function(input, output, session) {
       cur_step_display <- min(step + step_advance, st$max_steps)
       fmt_score <- function(x) if (is.finite(x)) sprintf("%.2f", x) else "-"
       detail_msg <- if (is.finite(st$base_score)) {
+        # A step that is rejected (isolation rules, no usable fit) has no score: shown as "-", not "Inf"
         sprintf(
-          "Step %d / %d | Current %s: %.2f | Best: %.2f (Δ %+.2f)",
+          "Step %d / %d | Current %s: %s | Best: %s (Δ %+.2f)",
           cur_step_display, st$max_steps, st$criterion,
-          curr_score_step, best_curr, best_curr - st$base_score
+          fmt_score(curr_score_step), fmt_score(best_curr), best_curr - st$base_score
         )
       } else {
         sprintf("Step %d / %d | Current %s: %s | Best: %s",
@@ -5672,25 +5405,8 @@ server <- function(input, output, session) {
     }, error = function(e) {
       # req()/validate()/cancelOutput() conditions all inherit from shiny.silent.error: re-raise them as flow control
       if (inherits(e, "shiny.silent.error")) stop(e)
-      opt_running(FALSE)
       # opt_state() still holds the state of the last successful tick: show what was found so far
-      st_saved <- isolate(opt_state())
-      shown <- FALSE
-      if (!is.null(st_saved) && length(st_saved$candidates_map) > 1) {
-        shown <- tryCatch({
-          finalize_prune_results(st_saved, current_step = isolate(opt_step()), stopped_early = TRUE)
-          TRUE
-        }, error = function(e2) FALSE)
-      }
-      if (!shown) {
-        opt_state(NULL)
-        removeModal()
-      }
-      showNotification(
-        paste0("Auto-Optimize stopped because of an unexpected error: ", conditionMessage(e),
-               if (shown) ". The results found so far are shown. " else ". ",
-               "Re-run with different settings or model, or try another search strategy (e.g. Stepwise)."),
-        type = "error", duration = 12)
+      abort_optimization("Auto-Optimize stopped because of an unexpected error: ", e)
     })
   })
 
@@ -5702,7 +5418,7 @@ server <- function(input, output, session) {
     
     df_list <- lapply(seq_along(cands), function(i) {
       c_item <- cands[[i]]
-      ret_str <- if (is.null(c_item$retained_str)) build_retained_str(c_item$struct_df) else c_item$retained_str
+      ret_str <- c_item$retained_str
       data.frame(
         Rank = i,
         Note = {
@@ -5716,7 +5432,7 @@ server <- function(input, output, session) {
         `Retained Paths` = ret_str,
         AIC = if (is.na(c_item$aic)) "—" else sprintf("%.2f", c_item$aic),
         BIC = if (is.na(c_item$bic)) "—" else sprintf("%.2f", c_item$bic),
-        AICc = if (is.null(c_item$aicc) || is.na(c_item$aicc)) "—" else sprintf("%.2f", c_item$aicc),
+        AICc = if (is.na(c_item$aicc)) "—" else sprintf("%.2f", c_item$aicc),
         Fit = {
           v <- c_item$violations
           if (is.null(v) || (length(v) == 1 && is.na(v))) "—"
@@ -5753,37 +5469,22 @@ server <- function(input, output, session) {
          style = "font-size: 13px; font-weight: 600; color: #475569; background-color: #f1f5f9; padding: 3px 10px; border-radius: 12px; border: 1px solid #cbd5e1;")
   })
 
-  # Previous Candidate Button Click
-  observeEvent(input$prune_prev_cand, {
+  # Previous / Next Candidate buttons: move the selection by `offset` rows (staying inside the catalog) and
+  # bring the selected row's page of the ranking table into view
+  step_prune_candidate <- function(offset) {
     res <- prune_results(); req(res)
     curr_idx <- selected_prune_idx()
     if (is.null(curr_idx)) curr_idx <- 1
-    if (curr_idx > 1) {
-      new_idx <- curr_idx - 1
-      selected_prune_idx(new_idx)
-      selected_prune_cand(res$candidates[[new_idx]])
-      target_page <- ceiling(new_idx / prune_page_length)
-      dataTableProxy("prune_candidates_table") %>% 
-        selectRows(new_idx) %>% 
-        selectPage(target_page)
-    }
-  })
-
-  # Next Candidate Button Click
-  observeEvent(input$prune_next_cand, {
-    res <- prune_results(); req(res)
-    curr_idx <- selected_prune_idx()
-    if (is.null(curr_idx)) curr_idx <- 1
-    if (curr_idx < length(res$candidates)) {
-      new_idx <- curr_idx + 1
-      selected_prune_idx(new_idx)
-      selected_prune_cand(res$candidates[[new_idx]])
-      target_page <- ceiling(new_idx / prune_page_length)
-      dataTableProxy("prune_candidates_table") %>% 
-        selectRows(new_idx) %>% 
-        selectPage(target_page)
-    }
-  })
+    new_idx <- curr_idx + offset
+    if (new_idx < 1 || new_idx > length(res$candidates)) return()
+    selected_prune_idx(new_idx)
+    selected_prune_cand(res$candidates[[new_idx]])
+    dataTableProxy("prune_candidates_table") %>%
+      selectRows(new_idx) %>%
+      selectPage(ceiling(new_idx / prune_page_length))
+  }
+  observeEvent(input$prune_prev_cand, step_prune_candidate(-1))
+  observeEvent(input$prune_next_cand, step_prune_candidate(1))
 
   # Candidate Row Selection Observer -> Updates selected candidate (rendering handled by observe below)
   observeEvent(input$prune_candidates_table_rows_selected, {
@@ -5812,7 +5513,14 @@ server <- function(input, output, session) {
     # Lower-ranked candidates release their lavaan object to save memory; re-estimate on demand.
     if (is.null(cand$fit)) {
       ctx <- isolate(prune_results())$ctx
-      refit <- if (!is.null(ctx)) tryCatch(fit_candidate_model(cand$struct_df, ctx), error = function(e) NULL) else NULL
+      # Re-estimated fits are kept per structure, so selecting a candidate again does not estimate it again
+      # (a plain environment: writing into prune_results() would re-render the ranking table)
+      cand_key <- make_struct_key(cand$struct_df)
+      refit <- refit_cache[[cand_key]]
+      if (is.null(refit) && !is.null(ctx)) {
+        refit <- tryCatch(fit_candidate_model(cand$struct_df, ctx), error = function(e) NULL)
+        if (!is.null(refit)) assign(cand_key, refit, envir = refit_cache)
+      }
       if (is.null(refit)) {
         session$sendCustomMessage("update_prune_preview_plot", list(
           error = TRUE,
@@ -5821,7 +5529,7 @@ server <- function(input, output, session) {
         return()
       }
       cand$fit <- refit
-      selected_prune_cand(cand)   # cache so Apply and re-selection reuse it
+      selected_prune_cand(cand)   # Apply reuses it
       return()
     }
 
@@ -5931,7 +5639,7 @@ server <- function(input, output, session) {
     if (is.null(chk)) return()
     pending_prune_check(NULL)
     res <- fit_model_safe()
-    if (!isTRUE(res$ok) || is.null(res$fit)) return()
+    if (!model_usable(res)) return()
     ms <- tryCatch(lavaan::fitMeasures(res$fit, c("aic", "bic")), error = function(e) NULL)
     if (is.null(ms) || anyNA(ms)) return()
     # AICc is compared only when it is defined both in the table and for the refitted model

@@ -2,11 +2,11 @@
 # Run: Rscript tests/test_edge_cases.R   (from the project root)
 suppressMessages(library(lavaan))
 exprs <- parse("app.R")
-wanted <- c("struct_pred_cols", "build_struct_lines", "make_struct_key", "active_struct_vars",
+wanted <- c("FIT_CUTOFFS", "fit_index_ok", "fit_threshold_violations", "struct_pred_cols", "build_struct_lines", "make_struct_key", "active_struct_vars",
             "run_lavaan_sem", "free_cov_pairs", "required_struct_vars", "candidate_structure_check", "droppable_struct_vars", "orphaned_struct_vars", "orphan_zero_lines",
-            "check_variable_isolation", "fit_is_proper", "candidate_score", "criterion_field", "aicc_from_fit", "fit_candidate_model",
+            "check_variable_isolation", "fit_is_proper", "candidate_score", "criterion_field", "aicc_from_fit", "fit_candidate_model", "fit_converged", "try_run_sem", "candidate_syntax",
             "struct_descendants", "struct_dependents", "struct_edges", "fit_suggestion_model",
-            "fit_cutoff_violations", "get_modification_suggestions", "get_suggested_structural_paths", "%||%")
+            "get_modification_suggestions", "get_suggested_structural_paths", "%||%")
 for (e in exprs) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && as.character(e[[2]]) %in% wanted) eval(e)
 }

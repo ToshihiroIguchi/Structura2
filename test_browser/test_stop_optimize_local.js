@@ -115,7 +115,7 @@ const fs = require('fs');
     document.getElementById('prune_model_btn').click();
   });
 
-  await page.waitForSelector('#prune_lock_table', { timeout: 10000 });
+  await page.waitForSelector('[id^="prune_lock_table_"]', { timeout: 10000 });
 
   console.log('Selecting Simulated Annealing (sa)...');
   await page.evaluate(() => {
@@ -184,7 +184,7 @@ const fs = require('fs');
   await page.evaluate(() => {
     document.getElementById('prune_model_btn').click();
   });
-  await page.waitForSelector('#prune_lock_table', { timeout: 10000 });
+  await page.waitForSelector('[id^="prune_lock_table_"]', { timeout: 10000 });
   await page.evaluate(() => {
     if (window.Shiny && window.Shiny.setInputValue) {
       window.Shiny.setInputValue('prune_strategy', 'sa');
