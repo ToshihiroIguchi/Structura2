@@ -75,6 +75,10 @@ const ok = (c, m) => { console.log((c ? 'PASS' : 'FAIL') + ' - ' + m); if (!c) f
   ok(!/\bx3\b/.test(after.syntax), 'x3 removed from the applied model');
   ok(after.notes.some(n => n.includes('Rows kept at ' + N_ALL)), 'notification says rows kept at ' + N_ALL);
   ok(n2 === N_ALL, `applied model is estimated on ${N_ALL} rows (not ${N_FREE}); got ${n2}`);
+  // The fit is pinned to the optimization rows: it must not count as stale (Optimize stays available)
+  const btnShown = await page.evaluate(() => { const b = document.getElementById('prune_model_btn'); return !!b && getComputedStyle(b).display !== 'none'; });
+  ok(btnShown, 'Optimize button is still available after applying (the pinned fit is not stale)');
+  ok(!/Highlighted suggestions are from the previous fit/.test(await page.evaluate(() => document.body.innerText)), 'no stale-fit banner after applying');
   ok(errs.length === 0, 'no JS page errors');
   await browser.close();
   console.log(failures ? 'FAILED: ' + failures : 'ALL PASSED');
