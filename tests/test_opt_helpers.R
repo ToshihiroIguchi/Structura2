@@ -7,7 +7,7 @@ wanted <- c("OPT_DEFAULTS", "FIT_CUTOFFS", "fit_index_ok", "fit_threshold_violat
             "check_variable_isolation", "fit_is_proper", "candidate_score", "criterion_field", "aicc_from_fit", "fit_candidate_model", "fit_converged", "try_run_sem", "candidate_syntax",
             "droppable_struct_vars", "orphaned_struct_vars", "orphan_zero_lines",
             "struct_descendants", "struct_dependents", "struct_edges", "fit_suggestion_model", "get_modification_suggestions", "get_suggested_structural_paths",
-            "%||%", "safe_num", "needs_meanstructure_for", "fit_stale_reasons")
+            "%||%", "safe_num", "needs_meanstructure_for", "fit_stale_reasons", "pin_rows", "with_rng_state")
 for (e in exprs) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && as.character(e[[2]]) %in% wanted) eval(e)
 }
@@ -308,5 +308,28 @@ want_e <- do.call(rbind, lapply(1:3, function(i) {
 rownames(want_e) <- NULL
 ok(identical(e_mixed, want_e), "struct_edges matches the per-cell definition for logical/text/number/factor/NA cells")
 ok(nrow(struct_edges(mixed[0, ])) == 0 && length(row_checked(mixed, 1, character(0))) == 0, "empty table / no columns")
+
+# --- a variable named in a manual equation is neither required nor droppable (it stays in the model anyway)
+xfit <- fit_candidate_model(base_df, list(data = d, missing_method = "listwise", needs_meanstructure = FALSE,
+                                          meas_lines = NULL, extra_lines = NULL, base_fit = NULL))
+ok(setequal(required_struct_vars(base_df, xfit), c("x1", "x2", "x3", "m", "y")), "required_struct_vars: no manual equations")
+ok(setequal(required_struct_vars(base_df, xfit, "x3 ~~ x1"), c("x2", "m", "y")), "required_struct_vars: variables of a manual equation are excluded")
+ok(setequal(droppable_struct_vars(base_df, xfit, "x3 ~~ x1"), "x2"), "droppable_struct_vars passes the manual equations on")
+
+# --- pin_rows: the main fit and the staleness check must see the same rows
+pd <- data.frame(a = c(1, 2, NA, 4), b = c(1, NA, 3, 4))
+ok(identical(pin_rows(pd, NULL, "listwise"), pd), "pin_rows: no pin leaves the data unchanged")
+ok(identical(pin_rows(pd, "a", "ml"), pd), "pin_rows: only listwise deletion is pinned")
+ok(identical(pin_rows(pd, "zzz", "listwise"), pd), "pin_rows: a pin on unknown columns is ignored")
+ok(nrow(pin_rows(pd, c("a", "b"), "listwise")) == 2, "pin_rows: keeps the rows complete on the pinned variables")
+
+# --- with_rng_state: reproducible stream, caller's RNG state untouched
+set.seed(7); ref <- runif(1); set.seed(7)
+s1 <- with_rng_state(NULL, 5, a1 <- runif(3))
+after <- runif(1)
+ok(identical(after, ref), "with_rng_state: the caller's RNG state is restored")
+s2 <- with_rng_state(s1, 5, a2 <- runif(3))
+set.seed(5); full <- runif(6)
+ok(isTRUE(all.equal(c(a1, a2), full)), "with_rng_state: the stream continues across calls like one seeded run")
 cat("ALL PASSED
 ")

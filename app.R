@@ -845,6 +845,16 @@ preview_datatable <- function(df) {
   dt
 }
 
+# Rows the main fit uses when an applied optimization candidate pinned a variable set (see row_pin): with listwise
+# deletion only the rows complete on `pin` are kept. Shared by the main fit and the staleness check so both see
+# the same data.
+pin_rows <- function(df, pin, missing_method) {
+  if (is.null(pin) || !identical(missing_method, "listwise")) return(df)
+  pin_vars <- intersect(pin, names(df))
+  if (!length(pin_vars)) return(df)
+  df[stats::complete.cases(df[, pin_vars, drop = FALSE]), , drop = FALSE]
+}
+
 # ---- Shared formatting helpers (reports, tables, messages) ---------------------
 # Number as text, "-" when missing (vectorized).
 num_dash <- function(x, fmt = "%.3f") ifelse(is.na(x), "-", sprintf(fmt, x))
@@ -1220,17 +1230,19 @@ free_cov_pairs <- function(fit) {
 
 # Variables the baseline model contains and a candidate must keep: the structural variables that are
 # neither latent nor measurement indicators (those stay in the model through the measurement part).
-required_struct_vars <- function(struct_df, base_fit) {
+required_struct_vars <- function(struct_df, base_fit, extra_lines = character(0)) {
   lv  <- tryCatch(lavaan::lavNames(base_fit, "lv"), error = function(e) character(0))
   ind <- tryCatch(lavaan::lavNames(base_fit, "ov.ind"), error = function(e) character(0))
-  setdiff(active_struct_vars(struct_df), c(lv, ind))
+  # A variable named in a manual equation stays in the model whatever happens to its structural paths
+  in_extra <- unique(unlist(regmatches(extra_lines, gregexpr("[A-Za-z.][A-Za-z0-9._]*", extra_lines))))
+  setdiff(active_struct_vars(struct_df), c(lv, ind, in_extra))
 }
 
 # Exogenous predictors of the baseline (no incoming structural path) that an optimization may strip of
 # every path. They are evaluated with their removed paths fixed to zero (see orphan_zero_lines) so the
 # likelihood stays comparable, and are left out of the model when the candidate is applied.
-droppable_struct_vars <- function(struct_df, base_fit) {
-  setdiff(required_struct_vars(struct_df, base_fit), struct_dependents(struct_df))
+droppable_struct_vars <- function(struct_df, base_fit, extra_lines = character(0)) {
+  setdiff(required_struct_vars(struct_df, base_fit, extra_lines), struct_dependents(struct_df))
 }
 
 # Droppable variables that no longer take part in any active path of a candidate.
@@ -1295,6 +1307,29 @@ opt_select_input <- function(key, id, label) {
 opt_numeric_input <- function(id, label) {
   d <- OPT_DEFAULTS[[id]]
   numericInput(id, label, value = d$default, min = d$min, max = d$max, step = d$step)
+}
+
+# Evaluates `expr` with the random-number state `state` (NULL: freshly seeded with `seed`) and returns the state
+# afterwards. The caller's own RNG state is restored on exit, so the search never disturbs the rest of the session.
+with_rng_state <- function(state, seed, expr) {
+  g <- globalenv()
+  had <- exists(".Random.seed", envir = g, inherits = FALSE)
+  old <- if (had) get(".Random.seed", envir = g, inherits = FALSE) else NULL
+  on.exit({
+    if (had) assign(".Random.seed", old, envir = g)
+    else if (exists(".Random.seed", envir = g, inherits = FALSE)) rm(".Random.seed", envir = g)
+  }, add = TRUE)
+  if (is.null(state)) set.seed(seed) else assign(".Random.seed", state, envir = g)
+  force(expr)
+  get(".Random.seed", envir = g, inherits = FALSE)
+}
+
+# DataTables column renderer for a numeric score column: `digits` decimals for display, a dash for a missing
+# value, and a huge number for sorting/type detection so the column stays numeric.
+score_renderer <- function(digits) {
+  DT::JS(sprintf(
+    "function(data, type) { var ok = (typeof data === 'number' && isFinite(data)); if (type === 'display') return ok ? data.toFixed(%d) : '—'; return ok ? data : 1e300; }",
+    as.integer(digits)))
 }
 
 # Fit indices shown in the Fit Indices table and on the diagram title, in display order.
@@ -3202,11 +3237,7 @@ server <- function(input, output, session) {
       snapshot_error <- NULL
       df_fit <- processed_data()
       # Keep the rows an applied optimization candidate was compared on (see row_pin)
-      pin <- isolate(row_pin())
-      if (!is.null(pin) && identical(input$missing_method, "listwise")) {
-        pin_vars <- intersect(pin, names(df_fit))
-        if (length(pin_vars)) df_fit <- df_fit[stats::complete.cases(df_fit[, pin_vars, drop = FALSE]), , drop = FALSE]
-      }
+      df_fit <- pin_rows(df_fit, isolate(row_pin()), input$missing_method)
       parts_fit <- isolate(model_parts())
       syntax_chr <- paste(ln, collapse = "\n")
 
@@ -4276,6 +4307,8 @@ server <- function(input, output, session) {
     current_syntax <- tryCatch(lavaan_model_str(), error = function(e) NULL)
     current_data <- tryCatch(processed_data(), error = function(e) NULL)
     if (is.null(model_res) || is.null(current_syntax) || is.null(current_data)) return("structure")
+    # The main fit is estimated on the pinned rows (see pin_rows), so compare against the same rows
+    current_data <- pin_rows(current_data, row_pin(), input$missing_method)
     fit_stale_reasons(model_res, current_syntax, current_data, input$missing_method)
   })
 
@@ -4287,6 +4320,12 @@ server <- function(input, output, session) {
   prune_lock_table_id <- function(n = prune_lock_open_id()) paste0("prune_lock_table_", n)
   prune_results <- reactiveVal(NULL)
   applied_prune_info <- reactiveVal(NULL)   # candidate applied to the UI + the syntax it should produce (PDF history)
+  # The row pin only makes sense for the applied model: once the syntax is edited away from it, the pin is released
+  observeEvent(lavaan_model_str(), {
+    if (is.null(isolate(row_pin()))) return()
+    expected <- isolate(applied_prune_info())$expected_syntax
+    if (!identical(lavaan_model_str(), expected)) row_pin(NULL)
+  }, ignoreInit = TRUE)
   selected_prune_cand <- reactiveVal(NULL)
   selected_prune_idx <- reactiveVal(1)
 
@@ -4549,7 +4588,21 @@ server <- function(input, output, session) {
   opt_state <- reactiveVal(NULL)
   pending_prune_check <- reactiveVal(NULL)   # AIC/BIC/AICc of an applied candidate, verified after the main refit
   prune_page_length <- 15L                   # rows per page of the candidate ranking table
+  max_keep_fits <- 20L                       # lavaan objects kept per run (best candidates); see prune_excess_fits()
   refit_cache <- new.env(parent = emptyenv())   # structure key -> fit re-estimated for a previewed lower-ranked candidate
+
+  # During a search every candidate keeps its lavaan object (up to 2^M of them for the exhaustive search), which
+  # exhausts memory in WebR. Once more than twice the kept number are held, all but the best `max_keep_fits` are
+  # released; they are re-estimated on demand when previewed (see refit_cache).
+  prune_excess_fits <- function(candidates_map, criterion) {
+    has_fit <- vapply(candidates_map, function(r) !is.null(r$fit), logical(1))
+    if (sum(has_fit) <= 2L * max_keep_fits) return(candidates_map)
+    idx <- which(has_fit)
+    sc <- vapply(candidates_map[idx], candidate_score, numeric(1), criterion = criterion)
+    drop <- idx[order(sc)][-seq_len(max_keep_fits)]
+    for (k in drop) candidates_map[[k]]$fit <- NULL
+    candidates_map
+  }
 
   finalize_prune_results <- function(st, current_step = 0, stopped_early = FALSE) {
     opt_running(FALSE)
@@ -4574,7 +4627,6 @@ server <- function(input, output, session) {
     # Post-compute detailed fit measures (CFI, RMSEA, SRMR) for the top candidates only. Keeping
     # every lavaan object (up to 2^M of them for the exhaustive search) exhausts memory in WebR,
     # so lower-ranked fits are released and re-estimated on demand when previewed.
-    max_keep_fits <- 20L
     if (length(sorted_candidates) > 0) {
       for (k in seq_along(sorted_candidates)) {
         cand_k <- sorted_candidates[[k]]
@@ -4638,7 +4690,7 @@ server <- function(input, output, session) {
           } else {
             "background-color: #f8fafc; padding: 10px 14px; border-radius: 6px; border: 1px solid #e2e8f0; margin-bottom: 15px;"
           },
-          p(sprintf("Strategy: %s%s%s. Select a row (or use the arrows) to preview its path diagram. Sort by %s, AIC, BIC or AICc.",
+          p(sprintf("Strategy: %s%s%s. Select a row (or use the arrows) to preview its path diagram. Ranked by %s (lower is better); click a column header to sort.",
                     toupper(res$strategy_used),
                     if (nzchar(res$isolation_summary %||% "")) paste0(" [Protected: ", res$isolation_summary, "]") else "",
                     if (stopped_early) sprintf(" (halted early at step %d of %d; best candidates so far are shown)", current_step, st$max_steps) else "",
@@ -4785,10 +4837,12 @@ server <- function(input, output, session) {
     base_model <- base_info$model
     base_fit <- base_info$fit
     base_identified <- isTRUE(base_info$identified)
+    # Problems with the Step 1 settings are reported as notifications so the dialog (locks, strategy, parameters)
+    # stays open and can be corrected without entering everything again
+    step1_error <- function(...) showNotification(paste0(...), type = "error", duration = 10)
     if (!base_identified && identical(strategy, "regsem")) {
-      notice_modal("Auto-Optimize Warning",
-                   "Regularized SEM needs an identified starting model, but the current model is not identified. ",
-                   "Choose Adaptive, Stepwise, Exhaustive or Simulated Annealing: they remove paths until the model is identified.")
+      step1_error("Regularized SEM needs an identified starting model, but the current model is not identified. ",
+                  "Choose Adaptive, Stepwise, Exhaustive or Simulated Annealing: they remove paths until the model is identified.")
       return()
     }
 
@@ -4810,7 +4864,7 @@ server <- function(input, output, session) {
     M <- length(removable_paths)
 
     if (M == 0) {
-      notice_modal("Auto-Optimize Warning", "No unlocked structural paths available for optimization. All active paths are locked.")
+      step1_error("No unlocked structural paths available for optimization. All active paths are locked: uncheck some locks.")
       return()
     }
 
@@ -4820,7 +4874,7 @@ server <- function(input, output, session) {
     retain_preds <- input$prune_retain_preds %||% character(0)
 
     if (!check_variable_isolation(struct_df, retain_deps, retain_preds, pred_cols)) {
-      notice_modal("Auto-Optimize Warning", "The current baseline model does not satisfy the specified variable isolation constraints.")
+      step1_error("The current baseline model does not satisfy the specified variable isolation constraints. Untick some predictors under Variable Isolation Prevention.")
       return()
     }
 
@@ -4838,21 +4892,23 @@ server <- function(input, output, session) {
           type = "message", duration = 8)
       }
     } else if (strategy == "exhaustive" && total_comb > max_comb) {
-      notice_modal("Auto-Optimize Warning",
-                   sprintf("Exhaustive Search would need %s combinations (%d removable paths), which exceeds the threshold of %s. ",
-                           format(total_comb, big.mark = ",", scientific = FALSE), M, format(max_comb, big.mark = ",", scientific = FALSE)),
-                   "Lock more paths, raise the threshold, or choose another search strategy (e.g. Stepwise or Adaptive).")
+      step1_error(sprintf("Exhaustive Search would need %s combinations (%d removable paths), which exceeds the threshold of %s. ",
+                          format(total_comb, big.mark = ",", scientific = FALSE), M, format(max_comb, big.mark = ",", scientific = FALSE)),
+                  "Lock more paths, raise the threshold, or choose another search strategy (e.g. Stepwise or Adaptive).")
       return()
     }
 
     # An unidentified start has no meaningful AIC/BIC: there is no baseline score to compare candidates with
+    na_ms <- c(aic = NA_real_, bic = NA_real_, cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_, aicc = NA_real_)
     base_ms <- if (base_identified) {
-      ms0 <- lavaan::fitMeasures(base_fit, c("aic", "bic", "cfi", "rmsea", "srmr"))
-      c(ms0, aicc = aicc_from_fit(base_fit, ms0[["aic"]]))
-    } else {
-      c(aic = NA_real_, bic = NA_real_, cfi = NA_real_, rmsea = NA_real_, srmr = NA_real_, aicc = NA_real_)
-    }
-    base_score <- as.numeric(base_ms[criterion_field(criterion)])
+      tryCatch({
+        ms0 <- lavaan::fitMeasures(base_fit, c("aic", "bic", "cfi", "rmsea", "srmr"))
+        c(ms0, aicc = aicc_from_fit(base_fit, ms0[["aic"]]))
+      }, error = function(e) na_ms)
+    } else na_ms
+    base_proper <- fit_is_proper(base_fit)
+    # An improper baseline never ranks (candidate_score() is Inf), so it is not the reference of the progress chart
+    base_score <- if (base_proper) as.numeric(base_ms[criterion_field(criterion)]) else NA_real_
 
     # Data, settings and measurement/manual-equation lines are those of the baseline fit (fit_staleness() has
     # just confirmed they match the current inputs), so baseline and candidates are always estimated alike.
@@ -4899,15 +4955,15 @@ server <- function(input, output, session) {
       grid_matrix <- if (eff_strategy == "exhaustive") expand.grid(replicate(M, c(FALSE, TRUE), simplify = FALSE)) else NULL
 
       # Reproducible stochastic search; temperature is annealed from T0 to 0.1 over the whole run.
-      set.seed(sa_seed)
-      sa_alpha <- (0.1 / sa_T0)^(1 / max(sa_max_iter, 1))
+      # (the generator state lives in the search state: see with_rng_state())
+      sa_alpha <-(0.1 / sa_T0)^(1 / max(sa_max_iter, 1))
 
       # Candidates are estimated exactly like the main model. They stay comparable with the baseline only if
       # no variable disappears (required_vars always keep a path) and no removed path is silently replaced
       # by a covariance (checked after each fit against base_ov / base_cov_pairs).
       # Exogenous predictors may lose every path: they are scored with fixed-zero paths (droppable_vars,
       # base_edges) and are removed from the model when the candidate is applied.
-      droppable_vars <- droppable_struct_vars(struct_df, base_fit)
+      droppable_vars <- droppable_struct_vars(struct_df, base_fit, fit_ctx$extra_lines)
       ctx <- list(
         data = fit_ctx$data,
         missing_method = fit_ctx$missing_method,
@@ -4917,7 +4973,7 @@ server <- function(input, output, session) {
         extra_lines = fit_ctx$extra_lines,
         droppable_vars = droppable_vars,
         base_edges = struct_edges(struct_df),
-        required_vars = setdiff(required_struct_vars(struct_df, base_fit), droppable_vars),
+        required_vars = setdiff(required_struct_vars(struct_df, base_fit, fit_ctx$extra_lines), droppable_vars),
         base_ov = lavaan::lavNames(base_fit, "ov"),
         base_cov_pairs = free_cov_pairs(base_fit),
         base_fit = base_fit
@@ -4943,6 +4999,8 @@ server <- function(input, output, session) {
         curr_df = struct_df,
         T_val = sa_T0,
         sa_alpha = sa_alpha,
+        sa_seed = sa_seed,
+        rng = NULL,
         # Stepwise sub-step state: one candidate fit per tick
         sw_idx = 1L,
         sw_best_score = NULL,
@@ -4969,7 +5027,8 @@ server <- function(input, output, session) {
         aic = as.numeric(base_ms["aic"]), bic = as.numeric(base_ms["bic"]), aicc = as.numeric(base_ms["aicc"]),
         cfi = as.numeric(base_ms["cfi"]), rmsea = as.numeric(base_ms["rmsea"]), srmr = as.numeric(base_ms["srmr"]),
         converged = TRUE,
-        proper = fit_is_proper(base_fit),
+        proper = base_proper,
+        violations = if (base_identified) fit_threshold_violations(base_fit),
         identified = base_identified, deficit = base_ident$deficit,
         status = "[Baseline]"
       )
@@ -5043,7 +5102,10 @@ server <- function(input, output, session) {
       eval_candidate <- function(st, df) {
         key <- make_struct_key(df)
         fitted <- !key %in% names(st$candidates_map)
-        if (fitted) st$candidates_map[[key]] <- build_candidate_record_local(df, removed_label(df))
+        if (fitted) {
+          st$candidates_map[[key]] <- build_candidate_record_local(df, removed_label(df))
+          st$candidates_map <- prune_excess_fits(st$candidates_map, st$criterion)
+        }
         rec <- st$candidates_map[[key]]
         list(st = st, rec = rec, score = score_of(rec), fitted = fitted)
       }
@@ -5115,7 +5177,7 @@ server <- function(input, output, session) {
             if (is.null(best) || cand_def < best$deficit - 1e-9 ||
                 (abs(cand_def - best$deficit) <= 1e-9 && cand_aic < best$raw_aic)) {
               st$repair_best <- list(df = test_s_df, deficit = cand_def, raw_aic = cand_aic,
-                                     identified = is.finite(score_of(rec)))
+                                     identified = isTRUE(rec$identified))
             }
           }
         }
@@ -5243,7 +5305,7 @@ server <- function(input, output, session) {
         step_advance <- chunk_size
       } else if (st$eff_strategy == "sa") {
         chunk_size <- min(4L, st$max_steps - step)
-        for (ci in seq_len(chunk_size)) {
+        new_rng <- with_rng_state(st$rng, st$sa_seed, for (ci in seq_len(chunk_size)) {
           flip_pos <- sample.int(st$M, 1)
           cand_vec <- st$curr_vec
           cand_vec[flip_pos] <- !cand_vec[flip_pos]
@@ -5275,7 +5337,8 @@ server <- function(input, output, session) {
           }
           st$T_val <- max(st$T_val * st$sa_alpha, 1e-6)
           st <- record_score(st, curr_score_step)
-        }
+        })
+        st$rng <- new_rng
         step_advance <- chunk_size
       } else if (st$eff_strategy == "regsem") {
         # Regularized SEM (cv_regsem / regsem)
@@ -5363,10 +5426,7 @@ server <- function(input, output, session) {
           }
         }
 
-        if (!is.finite(curr_score_step)) {
-          curr_score_step <- if (length(st$scores_hist) > 0) tail(st$scores_hist, 1) else st$base_score
-        }
-
+        # A step without a usable candidate keeps Inf: it is not a score, and the chart skips it
         st <- record_score(st, curr_score_step)
       }
       # Best score so far (after this step), for the progress message
@@ -5430,19 +5490,20 @@ server <- function(input, output, session) {
           } else "—"
         },
         `Retained Paths` = ret_str,
-        AIC = if (is.na(c_item$aic)) "—" else sprintf("%.2f", c_item$aic),
-        BIC = if (is.na(c_item$bic)) "—" else sprintf("%.2f", c_item$bic),
-        AICc = if (is.na(c_item$aicc)) "—" else sprintf("%.2f", c_item$aicc),
+        # Score columns stay numeric (formatted by the column renderer below) so that sorting is numeric
+        AIC = as.numeric(c_item$aic),
+        BIC = as.numeric(c_item$bic),
+        AICc = as.numeric(c_item$aicc),
         Fit = {
           v <- c_item$violations
           if (is.null(v) || (length(v) == 1 && is.na(v))) "—"
           else if (length(v) == 0) "OK"
           else paste0("NG: ", paste(v, collapse = ", "))
         },
-        Weight = if (is.null(c_item$weight) || !is.finite(c_item$weight)) "—" else sprintf("%.3f", c_item$weight),
-        CFI = if (is.na(c_item$cfi)) "—" else sprintf("%.3f", c_item$cfi),
-        RMSEA = if (is.na(c_item$rmsea)) "—" else sprintf("%.3f", c_item$rmsea),
-        SRMR = if (is.na(c_item$srmr)) "—" else sprintf("%.3f", c_item$srmr),
+        Weight = if (is.null(c_item$weight) || !is.finite(c_item$weight)) NA_real_ else as.numeric(c_item$weight),
+        CFI = as.numeric(c_item$cfi),
+        RMSEA = as.numeric(c_item$rmsea),
+        SRMR = as.numeric(c_item$srmr),
         check.names = FALSE,
         stringsAsFactors = FALSE
       )
@@ -5454,7 +5515,13 @@ server <- function(input, output, session) {
       tbl,
       selection = list(mode = "single", selected = isolate(selected_prune_idx())),
       rownames = FALSE,
-      options = list(pageLength = prune_page_length, dom = 'itp', scrollX = TRUE)
+      options = list(
+        pageLength = prune_page_length, dom = 'itp', scrollX = TRUE,
+        # Missing values show as a dash and sort after every number (ascending)
+        columnDefs = list(
+          list(targets = 3:5, render = score_renderer(2)),
+          list(targets = 7:10, render = score_renderer(3)))
+      )
     )
   }, server = FALSE)
 
@@ -5465,7 +5532,7 @@ server <- function(input, output, session) {
     idx <- selected_prune_idx()
     if (is.null(idx) || idx < 1) idx <- 1
     total <- length(res$candidates)
-    span(sprintf("Candidate %d of %d (Rank %d)", idx, total, idx),
+    span(sprintf("Rank %d of %d", idx, total),
          style = "font-size: 13px; font-weight: 600; color: #475569; background-color: #f1f5f9; padding: 3px 10px; border-radius: 12px; border: 1px solid #cbd5e1;")
   })
 
