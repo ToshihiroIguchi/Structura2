@@ -314,6 +314,9 @@ xfit <- fit_candidate_model(base_df, list(data = d, missing_method = "listwise",
                                           meas_lines = NULL, extra_lines = NULL, base_fit = NULL))
 ok(setequal(required_struct_vars(base_df, xfit), c("x1", "x2", "x3", "m", "y")), "required_struct_vars: no manual equations")
 ok(setequal(required_struct_vars(base_df, xfit, "x3 ~~ x1"), c("x2", "m", "y")), "required_struct_vars: variables of a manual equation are excluded")
+# y, x2, x3 and x1 are named in the manual equations; the label `a` and the constant 0.5 are not variables
+ok(setequal(required_struct_vars(base_df, xfit, c("y ~ a*x2", "x3 ~~ 0.5*x1")), "m"),
+   "required_struct_vars: labels and constants are not variables")
 ok(setequal(droppable_struct_vars(base_df, xfit, "x3 ~~ x1"), "x2"), "droppable_struct_vars passes the manual equations on")
 
 # --- pin_rows: the main fit and the staleness check must see the same rows

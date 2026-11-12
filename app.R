@@ -1233,8 +1233,16 @@ free_cov_pairs <- function(fit) {
 required_struct_vars <- function(struct_df, base_fit, extra_lines = character(0)) {
   lv  <- tryCatch(lavaan::lavNames(base_fit, "lv"), error = function(e) character(0))
   ind <- tryCatch(lavaan::lavNames(base_fit, "ov.ind"), error = function(e) character(0))
-  # A variable named in a manual equation stays in the model whatever happens to its structural paths
-  in_extra <- unique(unlist(regmatches(extra_lines, gregexpr("[A-Za-z.][A-Za-z0-9._]*", extra_lines))))
+  # A variable named in a manual equation stays in the model whatever happens to its structural paths. The
+  # lines are parsed by lavaan (so constants, labels and modifiers such as `a*x` are not mistaken for variables).
+  in_extra <- character(0)
+  if (length(extra_lines)) {
+    in_extra <- tryCatch({
+      pt <- lavaan::lavParseModelString(paste(extra_lines, collapse = "\n"), as.data.frame. = TRUE)
+      pt <- pt[pt$op %in% c("=~", "~", "~~", "~1"), , drop = FALSE]
+      setdiff(unique(c(pt$lhs, pt$rhs)), "")
+    }, error = function(e) character(0))
+  }
   setdiff(active_struct_vars(struct_df), c(lv, ind, in_extra))
 }
 
@@ -4634,6 +4642,15 @@ server <- function(input, output, session) {
           sorted_candidates[[k]]$fit <- NULL
           next
         }
+        # A top-ranked candidate whose fit was released during the search (ties among unscored candidates are
+        # ordered differently here) is re-estimated so its fit measures are not lost
+        if (cand_k$converged && is.null(cand_k$fit) && is.na(cand_k$cfi) && !is.null(st$ctx)) {
+          refit_k <- tryCatch(fit_candidate_model(cand_k$struct_df, st$ctx), error = function(e) NULL)
+          if (!is.null(refit_k)) {
+            cand_k$fit <- refit_k
+            sorted_candidates[[k]]$fit <- refit_k
+          }
+        }
         if (cand_k$converged && !is.null(cand_k$fit) && is.na(cand_k$cfi)) {
           ms_k <- tryCatch(lavaan::fitMeasures(cand_k$fit, c("cfi", "rmsea", "srmr")), error = function(e) NULL)
           if (cand_k$identified) sorted_candidates[[k]]$violations <- fit_threshold_violations(cand_k$fit)
@@ -5519,8 +5536,8 @@ server <- function(input, output, session) {
         pageLength = prune_page_length, dom = 'itp', scrollX = TRUE,
         # Missing values show as a dash and sort after every number (ascending)
         columnDefs = list(
-          list(targets = 3:5, render = score_renderer(2)),
-          list(targets = 7:10, render = score_renderer(3)))
+          list(targets = match(c("AIC", "BIC", "AICc"), names(tbl)) - 1L, render = score_renderer(2)),
+          list(targets = match(c("Weight", "CFI", "RMSEA", "SRMR"), names(tbl)) - 1L, render = score_renderer(3)))
       )
     )
   }, server = FALSE)
